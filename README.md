@@ -181,7 +181,6 @@ POST /api/mobile-chat            - Send chat message during mobile testing sessi
 
 ## Documentation
 
-See [SPEC.md](./SPEC.md) for full technical specification.
 See [CLAUDE.md](./CLAUDE.md) for Claude Code specific instructions.
 
 ## License
