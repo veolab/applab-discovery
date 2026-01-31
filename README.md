@@ -1,6 +1,9 @@
 # DiscoveryLab
 
-![gecko](assets/capa-github-mini.png)
+<p>
+  <img src="assets/mascote.png" alt="Mascote" height="200">
+  <img src="assets/emojis.png" alt="Features" height="150">
+</p>
 
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-brightgreen?style=flat-square)
 [![npm](https://img.shields.io/npm/v/@veolab/discoverylab.svg?style=flat-square)](https://www.npmjs.com/package/@veolab/discoverylab)
