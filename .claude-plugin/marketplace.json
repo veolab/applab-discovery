@@ -1,0 +1,15 @@
+{
+  "name": "veolab-plugins",
+  "owner": {
+    "name": "Anderson Melo"
+  },
+  "plugins": [
+    {
+      "name": "discoverylab",
+      "source": ".",
+      "description": "AI-powered app testing & marketing asset generator",
+      "version": "0.1.0",
+      "keywords": ["app-testing", "maestro", "playwright", "mcp", "mobile", "web", "screenshots"]
+    }
+  ]
+}

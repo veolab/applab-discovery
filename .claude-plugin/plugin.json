@@ -1,0 +1,12 @@
+{
+  "name": "discoverylab",
+  "description": "AI-powered app testing & marketing asset generator",
+  "version": "0.1.0",
+  "author": {
+    "name": "Anderson Melo"
+  },
+  "homepage": "https://github.com/veolab/applab-discovery",
+  "repository": "https://github.com/veolab/applab-discovery",
+  "license": "MIT",
+  "keywords": ["app-testing", "maestro", "playwright", "screenshots", "mcp", "mobile", "web"]
+}

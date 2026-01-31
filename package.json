@@ -1,0 +1,84 @@
+{
+  "name": "discoverylab",
+  "version": "0.1.0",
+  "description": "AI-powered app testing & evidence generator - Claude Code Plugin",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "discoverylab": "dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/cli.ts serve",
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts",
+    "start": "node dist/cli.js serve",
+    "mcp": "node dist/index.js"
+  },
+  "keywords": [
+    "claude",
+    "mcp",
+    "plugin",
+    "app-testing",
+    "evidence",
+    "mockup",
+    "screen-recording",
+    "maestro",
+    "playwright",
+    "ai"
+  ],
+  "author": "Anderson Melo",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/veolab/applab-discovery.git"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@hono/node-server": "^1.19.9",
+    "@types/ws": "^8.18.1",
+    "better-sqlite3": "^11.0.0",
+    "canvas": "^3.2.1",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "drizzle-orm": "^0.35.0",
+    "hono": "^4.0.0",
+    "open": "^10.0.0",
+    "playwright": "^1.57.0",
+    "three": "^0.170.0",
+    "ws": "^8.19.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^20.0.0",
+    "@types/three": "^0.170.0",
+    "drizzle-kit": "^0.26.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  },
+  "claude-plugin": {
+    "name": "DiscoveryLab",
+    "description": "AI-powered app testing & evidence generator",
+    "version": "0.1.0",
+    "tools": [
+      "dlab.capture.screen",
+      "dlab.capture.emulator",
+      "dlab.analyze.video",
+      "dlab.analyze.screenshot",
+      "dlab.canvas.create",
+      "dlab.canvas.export",
+      "dlab.maestro.run",
+      "dlab.playwright.run",
+      "dlab.ui.open",
+      "dlab.project.list",
+      "dlab.project.create",
+      "dlab.project.save",
+      "dlab.project.export",
+      "dlab.setup.status",
+      "dlab.setup.install"
+    ]
+  }
+}

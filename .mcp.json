@@ -1,0 +1,6 @@
+{
+  "discoverylab": {
+    "command": "npx",
+    "args": ["-y", "discoverylab@latest", "mcp"]
+  }
+}
