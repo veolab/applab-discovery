@@ -3469,44 +3469,87 @@ app.post('/api/testing/mobile/record/start', async (c) => {
   try {
     const { execSync } = await import('node:child_process');
 
+    // Parse request body for user-selected device
+    const body = await c.req.json().catch(() => ({}));
+    const { deviceId: requestedDeviceId, platform: requestedPlatform } = body;
+
     // Detect running device
     let platform: 'ios' | 'android' | null = null;
     let deviceId = '';
     let deviceName = '';
 
-    // Check iOS Simulator
-    try {
-      const simOutput = execSync('xcrun simctl list devices booted -j', { encoding: 'utf8' });
-      const simData = JSON.parse(simOutput);
-      for (const [runtime, devices] of Object.entries(simData.devices) as any) {
-        for (const device of devices) {
-          if (device.state === 'Booted') {
-            platform = 'ios';
-            deviceId = device.udid;
-            deviceName = device.name;
-            break;
-          }
-        }
-        if (platform) break;
-      }
-    } catch {}
+    // If user explicitly selected a device, use it
+    if (requestedDeviceId && requestedPlatform) {
+      platform = requestedPlatform as 'ios' | 'android';
+      deviceId = requestedDeviceId;
 
-    // Check Android if no iOS (using detected SDK path)
-    if (!platform && ADB_PATH) {
-      try {
-        const adbOutput = execSync(`"${ADB_PATH}" devices -l`, { encoding: 'utf8' });
-        const lines = adbOutput.split('\n').slice(1);
-        for (const line of lines) {
-          if (line.includes('device') && !line.includes('offline')) {
-            const parts = line.split(/\s+/);
-            deviceId = parts[0];
-            const modelMatch = line.match(/model:(\S+)/);
-            deviceName = modelMatch?.[1] || deviceId;
-            platform = 'android';
-            break;
+      // Get device name for the selected device
+      if (platform === 'ios') {
+        try {
+          const simOutput = execSync('xcrun simctl list devices booted -j', { encoding: 'utf8' });
+          const simData = JSON.parse(simOutput);
+          for (const [runtime, devices] of Object.entries(simData.devices) as any) {
+            for (const device of devices) {
+              if (device.udid === deviceId) {
+                deviceName = device.name;
+                break;
+              }
+            }
+            if (deviceName) break;
           }
+        } catch {}
+        deviceName = deviceName || deviceId;
+      } else if (platform === 'android' && ADB_PATH) {
+        try {
+          const adbOutput = execSync(`"${ADB_PATH}" devices -l`, { encoding: 'utf8' });
+          const lines = adbOutput.split('\n').slice(1);
+          for (const line of lines) {
+            if (line.startsWith(deviceId)) {
+              const modelMatch = line.match(/model:(\S+)/);
+              deviceName = modelMatch?.[1] || deviceId;
+              break;
+            }
+          }
+        } catch {}
+        deviceName = deviceName || deviceId;
+      }
+    } else {
+      // Fallback: Auto-detect device (original logic)
+
+      // Check iOS Simulator
+      try {
+        const simOutput = execSync('xcrun simctl list devices booted -j', { encoding: 'utf8' });
+        const simData = JSON.parse(simOutput);
+        for (const [runtime, devices] of Object.entries(simData.devices) as any) {
+          for (const device of devices) {
+            if (device.state === 'Booted') {
+              platform = 'ios';
+              deviceId = device.udid;
+              deviceName = device.name;
+              break;
+            }
+          }
+          if (platform) break;
         }
       } catch {}
+
+      // Check Android if no iOS (using detected SDK path)
+      if (!platform && ADB_PATH) {
+        try {
+          const adbOutput = execSync(`"${ADB_PATH}" devices -l`, { encoding: 'utf8' });
+          const lines = adbOutput.split('\n').slice(1);
+          for (const line of lines) {
+            if (line.includes('device') && !line.includes('offline')) {
+              const parts = line.split(/\s+/);
+              deviceId = parts[0];
+              const modelMatch = line.match(/model:(\S+)/);
+              deviceName = modelMatch?.[1] || deviceId;
+              platform = 'android';
+              break;
+            }
+          }
+        } catch {}
+      }
     }
 
     if (!platform || !deviceId) {
