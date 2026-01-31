@@ -2691,7 +2691,7 @@ app.post('/api/export', async (c) => {
     }
 
     const { EXPORTS_DIR } = await import('../db/index.js');
-    const { mkdirSync, copyFileSync, writeFileSync } = await import('node:fs');
+    const { mkdirSync, copyFileSync, writeFileSync, statSync, cpSync } = await import('node:fs');
     const { exec } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const execAsync = promisify(exec);
@@ -2706,8 +2706,96 @@ app.post('/api/export', async (c) => {
     let outputPath = '';
     let mimeType = 'image/png';
 
-    // Handle different formats
-    if (format === 'png' || format === 'jpg' || format === 'jpeg') {
+    // Check if videoPath is a directory (e.g., Maestro recordings)
+    const isVideoPathDirectory = existsSync(project.videoPath) && statSync(project.videoPath).isDirectory();
+
+    if (isVideoPathDirectory && format === 'gif') {
+      // Maestro recording: create animated GIF from screenshots
+      outputPath = join(exportDir, `export-${timestamp}.gif`);
+      mimeType = 'image/gif';
+
+      // Find screenshots directory
+      const screenshotsDir = join(project.videoPath, 'screenshots');
+      const screenshotsDirExists = existsSync(screenshotsDir) && statSync(screenshotsDir).isDirectory();
+      const sourceDir = screenshotsDirExists ? screenshotsDir : project.videoPath;
+
+      // Get all PNG files sorted by name (timestamp order)
+      const { readdirSync } = await import('node:fs');
+      const pngFiles = readdirSync(sourceDir)
+        .filter((f: string) => f.endsWith('.png'))
+        .sort()
+        .map((f: string) => join(sourceDir, f));
+
+      if (pngFiles.length === 0) {
+        return c.json({ error: 'No screenshots found in recording' }, 400);
+      }
+
+      // Create concat file for ffmpeg
+      const concatPath = join(exportDir, `concat-${timestamp}.txt`);
+      const concatContent = pngFiles.map((f: string) => `file '${f}'\nduration 0.5`).join('\n');
+      writeFileSync(concatPath, concatContent);
+
+      try {
+        // Use ffmpeg concat demuxer to create animated GIF
+        await execAsync(`ffmpeg -f concat -safe 0 -i "${concatPath}" -vf "fps=2,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" "${outputPath}" -y`);
+        // Clean up concat file
+        const { unlinkSync } = await import('node:fs');
+        unlinkSync(concatPath);
+      } catch (err) {
+        // Clean up concat file on error
+        try {
+          const { unlinkSync } = await import('node:fs');
+          unlinkSync(concatPath);
+        } catch {}
+        return c.json({ error: 'GIF creation failed - FFmpeg required. Install with: brew install ffmpeg' }, 400);
+      }
+    } else if (isVideoPathDirectory && format === 'mp4') {
+      // Maestro recording: create video from screenshots
+      outputPath = join(exportDir, `export-${timestamp}.mp4`);
+      mimeType = 'video/mp4';
+
+      // Find screenshots directory
+      const screenshotsDir = join(project.videoPath, 'screenshots');
+      const screenshotsDirExists = existsSync(screenshotsDir) && statSync(screenshotsDir).isDirectory();
+      const sourceDir = screenshotsDirExists ? screenshotsDir : project.videoPath;
+
+      // Get all PNG files sorted by name (timestamp order)
+      const { readdirSync } = await import('node:fs');
+      const pngFiles = readdirSync(sourceDir)
+        .filter((f: string) => f.endsWith('.png'))
+        .sort()
+        .map((f: string) => join(sourceDir, f));
+
+      if (pngFiles.length === 0) {
+        return c.json({ error: 'No screenshots found in recording' }, 400);
+      }
+
+      // Create concat file for ffmpeg
+      const concatPath = join(exportDir, `concat-${timestamp}.txt`);
+      const concatContent = pngFiles.map((f: string) => `file '${f}'\nduration 0.5`).join('\n');
+      writeFileSync(concatPath, concatContent);
+
+      try {
+        // Use ffmpeg concat demuxer to create MP4
+        await execAsync(`ffmpeg -f concat -safe 0 -i "${concatPath}" -vf "scale=480:-2" -c:v libx264 -pix_fmt yuv420p "${outputPath}" -y`);
+        // Clean up concat file
+        const { unlinkSync } = await import('node:fs');
+        unlinkSync(concatPath);
+      } catch (err) {
+        // Clean up concat file on error
+        try {
+          const { unlinkSync } = await import('node:fs');
+          unlinkSync(concatPath);
+        } catch {}
+        return c.json({ error: 'Video creation failed - FFmpeg required. Install with: brew install ffmpeg' }, 400);
+      }
+    } else if (isVideoPathDirectory) {
+      // Maestro recording: copy entire directory for other formats
+      outputPath = join(exportDir, `export-${timestamp}`);
+      cpSync(project.videoPath, outputPath, { recursive: true });
+      mimeType = 'application/octet-stream';
+    } else if (format === 'png' || format === 'jpg' || format === 'jpeg') {
+      // Handle different formats for single files
       const ext = format === 'jpg' ? 'jpeg' : format;
       outputPath = join(exportDir, `export-${timestamp}.${format}`);
       mimeType = `image/${ext}`;
@@ -2729,7 +2817,7 @@ app.post('/api/export', async (c) => {
       outputPath = join(exportDir, `export-${timestamp}.gif`);
       mimeType = 'image/gif';
 
-      // Create GIF from image (single frame)
+      // Create GIF from single image
       try {
         await execAsync(`ffmpeg -i "${project.videoPath}" -vf "fps=10,scale=320:-1:flags=lanczos" "${outputPath}" -y`);
       } catch {

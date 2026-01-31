@@ -15224,6 +15224,19 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     return;
                 }
 
+                // Open the exported file/folder in Finder/Explorer
+                if (data.path) {
+                    try {
+                        await fetch('/api/reveal', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ path: data.path })
+                        });
+                    } catch (e) {
+                        console.warn('Could not open export folder:', e);
+                    }
+                }
+
                 showToast('Export complete', 'success');
                 setStatus('Ready');
             } catch {
