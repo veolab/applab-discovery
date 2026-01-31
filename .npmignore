@@ -1,0 +1,60 @@
+# Source code (dist/ is the published build)
+src/
+
+# Development files
+tsconfig.json
+bun.lock
+*.tsbuildinfo
+
+# Documentation (internal)
+SPEC.md
+ARCHITECTURE-ANALYSIS.md
+AGENTS.md
+CLAUDE.md
+
+# Git
+.git/
+.gitignore
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Claude Code local config
+.claude/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+
+# Test & Coverage
+coverage/
+.nyc_output
+__tests__/
+*.test.js
+*.spec.js
+
+# Temp
+tmp/
+temp/
+~/
+
+# Other
+models/
+
+# Keep these (do NOT ignore):
+# - dist/           (built code)
+# - package.json    (manifest)
+# - README.md       (documentation)
+# - .mcp.json       (MCP auto-config)
+# - skills/         (Claude Code skills)
+# - .claude-plugin/ (plugin manifest)
+# - assets/         (if needed for UI)

@@ -50,7 +50,7 @@ The MCP server is automatically configured when you install via the marketplace.
 ### Via npm (Manual)
 
 ```bash
-npm install -g discoverylab
+npm install -g @veolab/discoverylab
 ```
 
 Then add to your `~/.claude.json`:
@@ -59,7 +59,25 @@ Then add to your `~/.claude.json`:
   "mcpServers": {
     "discoverylab": {
       "command": "npx",
-      "args": ["-y", "discoverylab@latest", "mcp"]
+      "args": ["-y", "@veolab/discoverylab@latest", "mcp"]
+    }
+  }
+}
+```
+
+### Via Bun (Faster)
+
+```bash
+bun add -g @veolab/discoverylab
+```
+
+Then add to your `~/.claude.json`:
+```json
+{
+  "mcpServers": {
+    "discoverylab": {
+      "command": "bunx",
+      "args": ["@veolab/discoverylab", "mcp"]
     }
   }
 }

@@ -1,5 +1,5 @@
 {
-  "name": "discoverylab",
+  "name": "@veolab/discoverylab",
   "version": "0.1.0",
   "description": "AI-powered app testing & evidence generator - Claude Code Plugin",
   "type": "module",
