@@ -1,5 +1,7 @@
 # DiscoveryLab
 
+![gecko](assets/capa-github-mini.png)
+
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-brightgreen?style=flat-square)
 [![npm](https://img.shields.io/npm/v/@veolab/discoverylab.svg?style=flat-square)](https://www.npmjs.com/package/@veolab/discoverylab)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](https://opensource.org/licenses/MIT)
