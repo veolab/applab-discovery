@@ -1,9 +1,9 @@
 # DiscoveryLab
 
-<p>
-  <img src="assets/mascote.png" alt="Mascote" height="200">
-  <img src="assets/emojis.png" alt="Features" height="150">
-</p>
+<div align="center">
+    <img src="assets/mascote.png" alt="Mascote" height="200">
+    <img src="assets/emojis.png" alt="Features" height="150">
+</div>
 
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-brightgreen?style=flat-square)
 [![npm](https://img.shields.io/npm/v/@veolab/discoverylab.svg?style=flat-square)](https://www.npmjs.com/package/@veolab/discoverylab)
