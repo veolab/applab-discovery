@@ -1,5 +1,11 @@
 # AppLab Discovery
 
+[![npm version](https://img.shields.io/npm/v/@veolab/discoverylab.svg)](https://www.npmjs.com/package/@veolab/discoverylab)
+[![npm downloads](https://img.shields.io/npm/dm/@veolab/discoverylab.svg)](https://www.npmjs.com/package/@veolab/discoverylab)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
+[![GitHub stars](https://img.shields.io/github/stars/veolab/applab-discovery.svg?style=social)](https://github.com/veolab/applab-discovery)
+
 > AI-Powered App Testing & Marketing Asset Generator
 
 A localhost-first tool for developers that combines automated testing, AI analysis, and marketing asset generation. Distributed as a Claude Code Plugin (MCP Server).
@@ -10,8 +16,6 @@ A localhost-first tool for developers that combines automated testing, AI analys
 
 ### Core Features
 - **Video Analysis** - Extract frames, OCR text, detect features using Apple Intelligence
-- **3D Mockups** - Professional device mockups (iPhone, Android, Browser)
-- **Text Effects** - Behind-object, title, subtitle overlays
 - **Screen Capture** - Record emulators, windows, or web apps
 - **Maestro Integration** - Automated mobile app testing
 - **Playwright Integration** - Automated web app testing with recording (uses user's Chrome)
@@ -208,7 +212,5 @@ MIT - See LICENSE file
 ## Credits
 
 Built with:
-- Three.js (3D mockups)
-- Remotion (video rendering)
 - Apple Vision & NaturalLanguage frameworks
 - Claude MCP SDK

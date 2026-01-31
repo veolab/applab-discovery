@@ -168,11 +168,11 @@ https://mycompany.atlassian.net/browse/PROJ-123"
 
 ```
 # Natural language prompt:
-"Create iPhone mockups from my latest recording for the App Store"
+"Create marketing assets from my latest recording for the App Store"
 
 # Claude will:
 1. dlab.project.list - Find latest project
-2. Use canvas tools to generate 3D mockups
+2. Use Grid Composer to create screenshot compositions
 3. Export with App Store dimensions
 ```
 
