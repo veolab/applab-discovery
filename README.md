@@ -34,26 +34,10 @@ flowchart LR
 
 ## Quick Start
 
-**Install:**
 ```bash
 npm install -g @veolab/discoverylab
-```
-
-**Configure** `~/.claude.json`:
-```json
-{
-  "mcpServers": {
-    "discoverylab": {
-      "command": "npx",
-      "args": ["-y", "@veolab/discoverylab@latest", "mcp"]
-    }
-  }
-}
-```
-
-**Run:**
-```bash
-discoverylab serve
+discoverylab install   # configures Claude Code MCP
+discoverylab serve     # opens web UI
 ```
 
 ## Features

@@ -134,6 +134,53 @@ program
   });
 
 // ============================================================================
+// INSTALL COMMAND (auto-configure MCP)
+// ============================================================================
+program
+  .command('install')
+  .description('Install DiscoveryLab as Claude Code MCP server')
+  .action(async () => {
+    const { homedir } = await import('node:os');
+    const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+
+    const claudeConfigPath = join(homedir(), '.claude.json');
+    console.log(chalk.cyan('\n  Installing DiscoveryLab MCP...\n'));
+
+    try {
+      // Read existing config or create new one
+      let config: { mcpServers?: Record<string, unknown> } = {};
+      if (existsSync(claudeConfigPath)) {
+        const content = readFileSync(claudeConfigPath, 'utf-8');
+        config = JSON.parse(content);
+      }
+
+      // Ensure mcpServers exists
+      if (!config.mcpServers) {
+        config.mcpServers = {};
+      }
+
+      // Add discoverylab server
+      config.mcpServers.discoverylab = {
+        command: 'npx',
+        args: ['-y', '@veolab/discoverylab@latest', 'mcp']
+      };
+
+      // Write back
+      writeFileSync(claudeConfigPath, JSON.stringify(config, null, 2));
+
+      console.log(chalk.green('  ✓ Added to ~/.claude.json'));
+      console.log();
+      console.log(chalk.white('  Restart Claude Code to activate.'));
+      console.log(chalk.gray('  Or run: discoverylab serve'));
+      console.log();
+    } catch (error) {
+      console.error(chalk.red(`  Failed to install: ${error}`));
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
 // MCP COMMAND (for Claude Code integration)
 // ============================================================================
 program
