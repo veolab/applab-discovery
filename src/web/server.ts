@@ -6062,9 +6062,93 @@ app.post('/api/recorder/stop', async (c) => {
       data: session,
     });
 
+    // Auto-create project from recording
+    let projectId: string | null = null;
+    let ocrInProgress = false;
+
+    try {
+      const { readFileSync, existsSync, readdirSync, copyFileSync, mkdirSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { homedir } = await import('node:os');
+
+      const recordingId = session?.id;
+      if (recordingId) {
+        const recordingDir = join(homedir(), '.discoverylab', 'recordings', recordingId);
+        const sessionPath = join(recordingDir, 'session.json');
+
+        if (existsSync(sessionPath)) {
+          const sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
+          const sessionName = sessionData?.name || sessionData?.session?.name || `Recording ${recordingId}`;
+
+          const sqlite = getSqlite();
+          projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          const now = Date.now();
+
+          sqlite.prepare(`
+            INSERT INTO projects (id, name, video_path, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(projectId, sessionName, recordingDir, 'ready', now, now);
+
+          // Copy screenshots to project frames directory
+          const framesDir = join(DATA_DIR, 'projects', projectId, 'frames');
+          mkdirSync(framesDir, { recursive: true });
+
+          const screenshotsDir = join(recordingDir, 'screenshots');
+          let thumbnailPath: string | null = null;
+          let frameCount = 0;
+          const screenshotFiles: string[] = [];
+
+          if (existsSync(screenshotsDir)) {
+            const screenshots = readdirSync(screenshotsDir).filter(f => f.endsWith('.png')).sort();
+            frameCount = screenshots.length;
+            screenshotFiles.push(...screenshots);
+
+            screenshots.forEach((file, index) => {
+              const src = join(screenshotsDir, file);
+              const dest = join(framesDir, `frame_${(index + 1).toString().padStart(4, '0')}.png`);
+              copyFileSync(src, dest);
+
+              if (index === 0) {
+                thumbnailPath = dest;
+              }
+
+              const frameId = `frame_${projectId}_${(index + 1).toString().padStart(4, '0')}`;
+              sqlite.prepare(`
+                INSERT INTO frames (id, project_id, frame_number, timestamp, image_path, is_key_frame, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+              `).run(frameId, projectId, index + 1, index * 1.0, dest, index === 0 ? 1 : 0, now);
+            });
+
+            sqlite.prepare(`
+              UPDATE projects SET thumbnail_path = ?, frame_count = ?, updated_at = ? WHERE id = ?
+            `).run(thumbnailPath, frameCount, now, projectId);
+          }
+
+          // Trigger OCR if we have screenshots
+          if (frameCount > 0) {
+            sqlite.prepare(`UPDATE projects SET status = ?, updated_at = ? WHERE id = ?`).run('analyzing', Date.now(), projectId);
+            ocrInProgress = true;
+            // Fire-and-forget OCR
+            runOCRInBackground(projectId, screenshotsDir, screenshotFiles).catch(err => {
+              console.error(`[RecorderStop] OCR failed for project ${projectId}:`, err);
+            });
+          } else {
+            sqlite.prepare(`UPDATE projects SET status = ?, updated_at = ? WHERE id = ?`).run('completed', Date.now(), projectId);
+          }
+
+          console.log(`[RecorderStop] Auto-created project ${projectId} with ${frameCount} frames`);
+        }
+      }
+    } catch (autoSaveError) {
+      console.error('[RecorderStop] Auto-save project failed:', autoSaveError);
+      // Non-fatal: recording was still saved, just project creation failed
+    }
+
     return c.json({
       success: true,
       session,
+      projectId,
+      ocrInProgress,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -6445,10 +6529,24 @@ app.post('/api/recorder/recordings/:id/create-project', async (c) => {
       `).run(thumbnailPath, frameCount, now, projectId);
     }
 
+    // Trigger OCR analysis if we have screenshots
+    let ocrInProgress = false;
+    if (frameCount > 0 && existsSync(screenshotsDir)) {
+      const screenshotFiles = readdirSync(screenshotsDir).filter(f => f.endsWith('.png')).sort();
+      if (screenshotFiles.length > 0) {
+        sqlite.prepare(`UPDATE projects SET status = ?, updated_at = ? WHERE id = ?`).run('analyzing', Date.now(), projectId);
+        ocrInProgress = true;
+        runOCRInBackground(projectId, screenshotsDir, screenshotFiles).catch(err => {
+          console.error(`[CreateProject] OCR failed for project ${projectId}:`, err);
+        });
+      }
+    }
+
     return c.json({
       success: true,
       projectId,
       frameCount,
+      ocrInProgress,
       message: 'Project created from recording',
     });
   } catch (error) {

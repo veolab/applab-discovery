@@ -12618,7 +12618,8 @@
                     }
                     break;
                 case 'stopped':
-                    if (payload) {
+                    // Guard: if recorderSession was already cleared (auto-save handled it), skip
+                    if (payload && recorderSession !== null) {
                         handleRecordingStopped(payload);
                     }
                     break;
@@ -12946,6 +12947,12 @@
             try {
                 showToast('Stopping recording...', 'info');
 
+                // Close WebSocket BEFORE fetch to prevent race condition with 'stopped' event
+                if (recorderWs) {
+                    recorderWs.close();
+                    recorderWs = null;
+                }
+
                 const response = await fetch('/api/recorder/stop', { method: 'POST' });
                 const data = await response.json();
 
@@ -12953,7 +12960,24 @@
                     throw new Error(data.error || 'Failed to stop recording');
                 }
 
-                handleRecordingStopped(data.session);
+                // If backend auto-created a project, navigate directly to projects
+                if (data.projectId) {
+                    stopRecorderTimer();
+                    recorderSession = null;
+                    const msg = data.ocrInProgress ? 'Project saved! Analyzing screenshots...' : 'Project saved!';
+                    showToast(msg, 'success');
+
+                    // Reset recorder UI to start state
+                    document.getElementById('recorderStart').style.display = 'block';
+                    document.getElementById('recorderActive').style.display = 'none';
+                    document.getElementById('recorderComplete').style.display = 'none';
+
+                    switchView('projects');
+                    loadProjects();
+                } else {
+                    // Fallback: no auto-save, show manual save UI
+                    handleRecordingStopped(data.session);
+                }
 
             } catch (error) {
                 showToast(error.message || 'Failed to stop recording', 'error');
