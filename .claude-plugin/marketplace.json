@@ -1,15 +1,39 @@
 {
   "name": "veolab-plugins",
   "owner": {
-    "name": "Anderson Melo"
+    "name": "Anderson Melo",
+    "email": "anderson.90@gmail.com"
+  },
+  "metadata": {
+    "description": "VeoLab plugins for Claude Code - AI-powered app testing and development tools"
   },
   "plugins": [
     {
       "name": "discoverylab",
       "source": ".",
-      "description": "AI-powered app testing & marketing asset generator",
-      "version": "0.1.0",
-      "keywords": ["app-testing", "maestro", "playwright", "mcp", "mobile", "web", "screenshots"]
+      "description": "AI-powered app testing & marketing asset generator. Record mobile/web apps, run automated tests with Maestro & Playwright, and generate professional screenshots, GIFs, and test reports.",
+      "version": "0.1.4",
+      "author": {
+        "name": "Anderson Melo"
+      },
+      "homepage": "https://github.com/veolab/applab-discovery",
+      "repository": "https://github.com/veolab/applab-discovery",
+      "license": "MIT",
+      "keywords": [
+        "app-testing",
+        "screen-recording",
+        "maestro",
+        "playwright",
+        "screenshots",
+        "mcp",
+        "mobile",
+        "web",
+        "ai",
+        "ocr",
+        "test-automation",
+        "marketing-assets"
+      ],
+      "category": "testing"
     }
   ]
 }
