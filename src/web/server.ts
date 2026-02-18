@@ -7,7 +7,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { readFileSync, existsSync } from 'node:fs';
-import { execSync, spawn } from 'node:child_process';
+import { exec, execSync, spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eq, desc } from 'drizzle-orm';
@@ -564,16 +564,16 @@ app.get('/setup', async (c) => {
 // STATIC FILES
 // ============================================================================
 app.get('/', (c) => {
-  // Use process.cwd() as the base since __dirname doesn't work reliably with bundlers
   const cwd = process.cwd();
 
   // Check multiple possible locations for the HTML file
+  // Prioritize __dirname (absolute) over process.cwd() (relative) for npm-installed packages
   const possiblePaths = [
-    join(cwd, 'src', 'web', 'index.html'),        // Development: running from project root
-    join(cwd, 'dist', 'web', 'index.html'),       // Production: bundled
-    join(__dirname, 'index.html'),                 // Same directory as server
+    join(__dirname, 'index.html'),                 // Production: bundled (dist/index.html alongside server)
     join(__dirname, '..', 'web', 'index.html'),   // Parent/web
     join(__dirname, '..', '..', 'src', 'web', 'index.html'), // Two levels up/src/web
+    join(cwd, 'src', 'web', 'index.html'),        // Development: running from project root
+    join(cwd, 'dist', 'index.html'),              // Production: running from project root
   ];
 
   for (const path of possiblePaths) {
@@ -2900,10 +2900,12 @@ app.get('/assets/*', async (c) => {
     const cwd = process.cwd();
 
     // Check multiple possible locations for assets
+    // Prioritize __dirname (absolute) over process.cwd() for npm-installed packages
     const possiblePaths = [
-      join(cwd, 'assets', assetPath),
-      join(cwd, 'src', 'assets', assetPath),
-      join(__dirname, '..', '..', 'assets', assetPath),
+      join(__dirname, '..', 'assets', assetPath),    // Production: dist/../assets
+      join(__dirname, '..', '..', 'assets', assetPath), // Alternative structure
+      join(cwd, 'assets', assetPath),                // Development: running from project root
+      join(cwd, 'src', 'assets', assetPath),         // Development: src/assets
     ];
 
     for (const path of possiblePaths) {
@@ -4464,17 +4466,20 @@ app.post('/api/testing/mobile/auto-capture/start', async (c) => {
     }
 
     // Capture screenshots every 2 seconds during test execution
+    const { promisify } = await import('node:util');
+    const execCaptureAsync = promisify(exec);
+
     autoCaptureInterval = setInterval(async () => {
       try {
         const screenshotPath = join(screenshotsDir, `auto_${Date.now()}_${autoCaptureScreenshotCount}.png`);
         autoCaptureScreenshotCount++;
 
         if (platform === 'ios') {
-          execSync(`xcrun simctl io booted screenshot "${screenshotPath}"`, { timeout: 5000 });
+          await execCaptureAsync(`xcrun simctl io booted screenshot "${screenshotPath}"`, { timeout: 5000 });
         } else {
           const adbPath = ADB_PATH || 'adb';
           // For Android, capture to device then pull
-          execSync(`"${adbPath}" shell screencap -p /sdcard/auto_capture.png && "${adbPath}" pull /sdcard/auto_capture.png "${screenshotPath}"`, { timeout: 5000 });
+          await execCaptureAsync(`"${adbPath}" shell screencap -p /sdcard/auto_capture.png && "${adbPath}" pull /sdcard/auto_capture.png "${screenshotPath}"`, { timeout: 5000 });
         }
 
         console.log(`[AutoCapture] Screenshot ${autoCaptureScreenshotCount}: ${screenshotPath}`);
@@ -6717,8 +6722,8 @@ function startLiveStream(platform: 'ios' | 'android', deviceId?: string): void {
     } catch {}
   }
 
-  // Capture at ~10 FPS (every 100ms)
-  liveStreamInterval = setInterval(captureAndBroadcastScreen, 150);
+  // Capture at ~2 FPS (every 500ms) - balanced between smoothness and CPU usage
+  liveStreamInterval = setInterval(captureAndBroadcastScreen, 500);
 
   broadcastToClients({
     type: 'liveStreamStarted',
@@ -6876,6 +6881,12 @@ export async function startServer(port: number = 3847): Promise<void> {
         ws.on('close', () => {
           wsClients.delete(ws);
           console.log('WebSocket client disconnected');
+
+          // Auto-stop live stream when all clients disconnect
+          if (wsClients.size === 0 && liveStreamInterval) {
+            console.log('[LiveStream] All clients disconnected, auto-stopping live stream');
+            stopLiveStream();
+          }
         });
 
         // Send current recorder status on connect
@@ -6895,6 +6906,13 @@ export async function startServer(port: number = 3847): Promise<void> {
 }
 
 export function stopServer(): void {
+  // Stop live stream and auto-capture intervals before closing
+  stopLiveStream();
+  if (autoCaptureInterval) {
+    clearInterval(autoCaptureInterval);
+    autoCaptureInterval = null;
+  }
+
   if (wss) {
     wss.close();
     wss = null;

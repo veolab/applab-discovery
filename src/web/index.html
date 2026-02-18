@@ -5130,6 +5130,36 @@
             margin-top: 16px;
         }
 
+        /* FAB stop button for live stream */
+        .live-stream-fab {
+            display: none;
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: #e53935;
+            color: white;
+            border: none;
+            cursor: pointer;
+            z-index: 10000;
+            box-shadow: 0 4px 16px rgba(229, 57, 53, 0.4);
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .live-stream-fab.visible {
+            display: flex;
+        }
+        .live-stream-fab:hover {
+            transform: scale(1.1);
+            box-shadow: 0 6px 20px rgba(229, 57, 53, 0.6);
+        }
+        .live-stream-fab:active {
+            transform: scale(0.95);
+        }
+
         /* Cursor for web viewer */
         .live-viewer-cursor {
             position: absolute;
@@ -7847,6 +7877,8 @@
         function closeAgentMode() {
             const overlay = document.getElementById('agentModeOverlay');
             overlay.classList.remove('active');
+
+            const wasLive = agentModeState.live;
             agentModeState.active = false;
             agentModeState.live = false;
             setAgentLayout('web');
@@ -7881,6 +7913,12 @@
                 terminal.innerHTML = '';
             }
             hideFloatingTerminal();
+
+            // Stop live stream if it was in live agent mode and no active recording
+            // (if recording is active, stopMobileRecording handles the cleanup)
+            if (wasLive && liveStreamState?.active && !mobileRecordingState?.active) {
+                stopLiveStream('mobile');
+            }
         }
 
         // =====================================================================
@@ -11990,6 +12028,16 @@
             }, 500);
         });
 
+        // Cleanup on page unload - stop live stream and close WebSocket
+        window.addEventListener('beforeunload', () => {
+            if (liveStreamState && liveStreamState.active) {
+                navigator.sendBeacon('/api/live-stream/stop', '');
+            }
+            if (typeof recorderWs !== 'undefined' && recorderWs && recorderWs.readyState === WebSocket.OPEN) {
+                recorderWs.close();
+            }
+        });
+
         // Mobile Recording State
         let mobileRecordingState = {
             active: false,
@@ -14082,6 +14130,10 @@
                     fps: 0
                 };
 
+                // Show FAB stop button
+                const fab = document.getElementById('liveStreamFab');
+                if (fab) fab.classList.add('visible');
+
                 // Start the stream on server
                 const response = await fetch('/api/live-stream/start', {
                     method: 'POST',
@@ -14105,6 +14157,10 @@
             try {
                 liveStreamState.active = false;
                 mobileReplayState.active = false;
+
+                // Hide FAB stop button
+                const fab = document.getElementById('liveStreamFab');
+                if (fab) fab.classList.remove('visible');
 
                 // Hide the viewer
                 const viewer = document.getElementById('mobileLiveViewer');
@@ -16106,5 +16162,12 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
         // Initialize
         loadProjects();
     </script>
+
+    <!-- FAB stop button for live stream -->
+    <button id="liveStreamFab" class="live-stream-fab" onclick="stopLiveStream('mobile')" title="Stop Live Stream">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12" rx="2"/>
+        </svg>
+    </button>
 </body>
 </html>
