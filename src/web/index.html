@@ -7598,6 +7598,10 @@
             const analysisLiveViewer = document.getElementById('analysisLiveViewer');
             if (analysisLiveViewer) analysisLiveViewer.classList.remove('active', 'fullscreen');
 
+            // Hide FAB stop button
+            const fab = document.getElementById('liveStreamFab');
+            if (fab) fab.classList.remove('visible');
+
             // Close agent mode overlay
             const agentOverlay = document.getElementById('agentModeOverlay');
             if (agentOverlay && agentOverlay.classList.contains('active')) {
@@ -9667,13 +9671,13 @@
 
         // Stop Mobile Screen Recording
         async function stopCaptureMobile() {
-            try {
-                // Stop timer
-                if (captureMobileTimer) {
-                    clearInterval(captureMobileTimer);
-                    captureMobileTimer = null;
-                }
+            // Stop timer immediately
+            if (captureMobileTimer) {
+                clearInterval(captureMobileTimer);
+                captureMobileTimer = null;
+            }
 
+            try {
                 const response = await fetch('/api/capture/mobile/stop', {
                     method: 'POST'
                 });
@@ -9684,12 +9688,6 @@
                     throw new Error(data.error || 'Failed to stop recording');
                 }
 
-                // Reset UI
-                document.getElementById('captureMobileControls').style.display = 'block';
-                document.getElementById('captureMobileActive').style.display = 'none';
-                document.getElementById('captureDeviceDropdown').disabled = false;
-                document.getElementById('captureMobileTimer').textContent = '00:00';
-
                 showToast('Recording saved! Analyzing with OCR...', 'success');
 
                 // Go to projects view - the project will show as "processing"
@@ -9698,6 +9696,12 @@
 
             } catch (error) {
                 showToast('Failed to stop recording: ' + error.message, 'error');
+            } finally {
+                // Always reset UI regardless of fetch result
+                document.getElementById('captureMobileControls').style.display = 'block';
+                document.getElementById('captureMobileActive').style.display = 'none';
+                document.getElementById('captureDeviceDropdown').disabled = false;
+                document.getElementById('captureMobileTimer').textContent = '00:00';
             }
         }
 
@@ -9745,13 +9749,13 @@
 
         // Stop Web Browser Recording
         async function stopCaptureWeb() {
-            try {
-                // Stop timer
-                if (captureWebTimer) {
-                    clearInterval(captureWebTimer);
-                    captureWebTimer = null;
-                }
+            // Stop timer immediately
+            if (captureWebTimer) {
+                clearInterval(captureWebTimer);
+                captureWebTimer = null;
+            }
 
+            try {
                 const response = await fetch('/api/capture/web/stop', {
                     method: 'POST'
                 });
@@ -9762,12 +9766,6 @@
                     throw new Error(data.error || 'Failed to stop recording');
                 }
 
-                // Reset UI
-                document.getElementById('captureWebControls').style.display = 'block';
-                document.getElementById('captureWebActive').style.display = 'none';
-                document.getElementById('captureWebUrl').disabled = false;
-                document.getElementById('captureWebTimer').textContent = '00:00';
-
                 showToast('Recording saved! Analyzing with OCR...', 'success');
 
                 // Go to projects view - the project will show as "processing"
@@ -9776,6 +9774,12 @@
 
             } catch (error) {
                 showToast('Failed to stop recording: ' + error.message, 'error');
+            } finally {
+                // Always reset UI regardless of fetch result
+                document.getElementById('captureWebControls').style.display = 'block';
+                document.getElementById('captureWebActive').style.display = 'none';
+                document.getElementById('captureWebUrl').disabled = false;
+                document.getElementById('captureWebTimer').textContent = '00:00';
             }
         }
 
@@ -12954,39 +12958,39 @@
 
             } catch (error) {
                 showToast('Failed to stop recording', 'error');
+            } finally {
+                // Always stop live stream regardless of fetch result
+                await stopLiveStream('mobile').catch(() => {});
+
+                // Disable click capture
+                const screens = document.querySelectorAll('.live-viewer-device-screen');
+                screens.forEach(screen => screen.classList.remove('recording'));
+
+                // Reset recording state
+                mobileRecordingState = {
+                    active: false,
+                    sessionId: null,
+                    platform: null,
+                    deviceName: null,
+                    startTime: null,
+                    timerInterval: null,
+                    captureMode: 'manual',
+                    deviceWidth: 390,
+                    deviceHeight: 844
+                };
+
+                // Show complete state inline (not redirect to another tab)
+                if (recordingData) {
+                    showMobileRecordingComplete(recordingData);
+                } else {
+                    // If failed, reset to start state
+                    document.getElementById('mobileRecordingStart').style.display = 'block';
+                    document.getElementById('mobileRecordingActive').style.display = 'none';
+                    document.getElementById('mobileRecordingComplete').style.display = 'none';
+                }
+
+                updateMobileChatStopButtonVisibility();
             }
-
-            // Stop live stream
-            await stopLiveStream('mobile');
-
-            // Disable click capture
-            const screens = document.querySelectorAll('.live-viewer-device-screen');
-            screens.forEach(screen => screen.classList.remove('recording'));
-
-            // Reset recording state
-            mobileRecordingState = {
-                active: false,
-                sessionId: null,
-                platform: null,
-                deviceName: null,
-                startTime: null,
-                timerInterval: null,
-                captureMode: 'manual',
-                deviceWidth: 390,
-                deviceHeight: 844
-            };
-
-            // Show complete state inline (not redirect to another tab)
-            if (recordingData) {
-                showMobileRecordingComplete(recordingData);
-            } else {
-                // If failed, reset to start state
-                document.getElementById('mobileRecordingStart').style.display = 'block';
-                document.getElementById('mobileRecordingActive').style.display = 'none';
-                document.getElementById('mobileRecordingComplete').style.display = 'none';
-            }
-
-            updateMobileChatStopButtonVisibility();
         }
 
         function showMobileRecordingComplete(data) {
@@ -14111,6 +14115,7 @@
 
         // Analysis polling state
         let analysisPollingInterval = null;
+        const ANALYSIS_POLLING_MAX_DURATION = 5 * 60 * 1000; // 5 minutes
 
         // Start polling for analysis completion
         function startAnalysisPolling(projectId) {
@@ -14121,8 +14126,20 @@
 
             console.log(`[Polling] Starting analysis polling for project ${projectId}`);
             let lastStatus = projects.find(p => p.id === projectId)?.status || '';
+            const pollingStartTime = Date.now();
 
             analysisPollingInterval = setInterval(async () => {
+                // Timeout: stop polling after max duration
+                if (Date.now() - pollingStartTime > ANALYSIS_POLLING_MAX_DURATION) {
+                    clearInterval(analysisPollingInterval);
+                    analysisPollingInterval = null;
+                    console.warn(`[Polling] Analysis polling timed out for ${projectId}`);
+                    showToast('Analysis timed out. Check the project later.', 'warning');
+                    updateProjectStatusInState(projectId, 'timeout');
+                    if (currentView === 'projects') renderProjects();
+                    return;
+                }
+
                 try {
                     const response = await fetch(`/api/projects/${projectId}/analysis-status`);
                     const data = await response.json();

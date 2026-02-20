@@ -1789,6 +1789,7 @@ let captureSession: {
   screenshotsDir?: string;
   process?: any;
   browser?: any;
+  context?: any;
   page?: any;
   projectId?: string;
 } | null = null;
@@ -1997,6 +1998,7 @@ app.post('/api/capture/web/start', async (c) => {
         startTime: Date.now(),
         screenshotsDir,
         browser,
+        context,
         page,
         projectId
       };
@@ -2049,6 +2051,9 @@ app.post('/api/capture/web/stop', async (c) => {
     // Close browser to finalize video
     if (session.page) {
       await session.page.close();
+    }
+    if (session.context) {
+      await session.context.close();
     }
     if (session.browser) {
       await session.browser.close();
