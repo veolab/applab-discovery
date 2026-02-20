@@ -290,6 +290,10 @@ User: Done
 Done! I've attached 12 screenshots and a test report to JIRA-456.
 ```
 
+## UI Modal Design Pattern
+
+All dynamically-created modals MUST follow the minimalist landscape style. Reference implementation: `openJiraSettingsModal()` in `src/web/index.html`. See [CLAUDE.md](./CLAUDE.md) for detailed style rules.
+
 ## Contributing
 
 See [CLAUDE.md](./CLAUDE.md) for development instructions and code patterns.

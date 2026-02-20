@@ -1019,8 +1019,8 @@ async function fetchJiraIssueDetails(
   issueType: string | null;
   reporterName: string | null;
 } | null> {
-  const jiraEmail = process.env.JIRA_EMAIL;
-  const jiraToken = process.env.JIRA_API_TOKEN;
+  const jiraEmail = jiraSettings.email || process.env.JIRA_EMAIL;
+  const jiraToken = jiraSettings.apiToken || process.env.JIRA_API_TOKEN;
   if (!jiraEmail || !jiraToken) return null;
 
   try {
@@ -1079,7 +1079,7 @@ async function extractLinkMetadata(
     switch (type) {
       case 'jira': {
         const ticketKey = extractJiraIssueKey(url);
-        const baseUrl = process.env.JIRA_BASE_URL || parsedUrl.origin;
+        const baseUrl = jiraSettings.baseUrl || process.env.JIRA_BASE_URL || parsedUrl.origin;
         const metadata: Record<string, unknown> = {
           ticketKey,
           domain: parsedUrl.hostname,
@@ -1398,6 +1398,42 @@ app.post('/api/ai/generate-task-info', async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
+  }
+});
+
+// AI-powered Jira card summary
+app.post('/api/ai/jira-summary', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { title, status, description, assigneeName, priority, issueType, reporterName } = body;
+
+    if (!title && !description) {
+      return c.json({ error: 'No Jira data to summarize' }, 400);
+    }
+
+    const provider = await getLLMProvider();
+    if (!provider) {
+      return c.json({ error: 'No LLM provider available', summary: null });
+    }
+
+    const jiraDataParts = [
+      title ? `Title: ${title}` : '',
+      status ? `Status: ${status}` : '',
+      issueType ? `Type: ${issueType}` : '',
+      priority ? `Priority: ${priority}` : '',
+      assigneeName ? `Assignee: ${assigneeName}` : '',
+      reporterName ? `Reporter: ${reporterName}` : '',
+      description ? `Description: ${description.slice(0, 1500)}` : '',
+    ].filter(Boolean).join('\n');
+
+    const prompt = `Summarize this Jira card in 2-3 concise sentences. Focus on what the task is about, its current status, and key details. Be direct, no filler words.\n\n${jiraDataParts}`;
+
+    const summary = await provider.sendMessage(prompt);
+
+    return c.json({ success: true, summary: summary.trim() });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message, summary: null }, 500);
   }
 });
 
@@ -3248,13 +3284,23 @@ app.get('/api/integrations/jira-mcp/status', async (c) => {
       available = configured && claudeCliAvailable;
     }
 
+    // Also check if Jira API settings are configured (direct REST API)
+    const jiraApiConfigured = !!(jiraSettings.baseUrl && jiraSettings.email && jiraSettings.apiToken);
+    if (jiraApiConfigured && !configured) {
+      configured = true;
+      available = true;
+      source = 'settings' as typeof source;
+      serverName = 'REST API (saved credentials)';
+    }
+
     return c.json({
       available,
       configured,
       claudeCliAvailable,
       serverName,
       source,
-      cliError
+      cliError,
+      jiraApiConfigured
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -5915,6 +5961,78 @@ app.put('/api/settings/llm', async (c) => {
     writeFileSync(settingsPath, JSON.stringify(llmSettings, null, 2));
 
     return c.json({ success: true, message: 'LLM settings saved' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// ============================================================================
+// JIRA SETTINGS API
+// ============================================================================
+
+// In-memory storage for Jira settings (persisted to file)
+let jiraSettings: {
+  baseUrl?: string;
+  email?: string;
+  apiToken?: string;
+} = {};
+
+// Load Jira settings from file on startup
+(async () => {
+  try {
+    const { readFileSync, existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const settingsPath = join(DATA_DIR, 'jira-settings.json');
+    if (existsSync(settingsPath)) {
+      jiraSettings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      // Sync to env vars so existing code picks them up
+      if (jiraSettings.baseUrl) process.env.JIRA_BASE_URL = jiraSettings.baseUrl;
+      if (jiraSettings.email) process.env.JIRA_EMAIL = jiraSettings.email;
+      if (jiraSettings.apiToken) process.env.JIRA_API_TOKEN = jiraSettings.apiToken;
+      console.log('[Jira Settings] Loaded from file');
+    }
+  } catch (e) {
+    console.log('[Jira Settings] No saved settings found');
+  }
+})();
+
+// Get Jira settings (masked)
+app.get('/api/settings/jira', async (c) => {
+  return c.json({
+    baseUrl: jiraSettings.baseUrl || '',
+    email: jiraSettings.email || '',
+    apiToken: jiraSettings.apiToken ? '••••••••' + jiraSettings.apiToken.slice(-4) : '',
+    configured: !!(jiraSettings.baseUrl && jiraSettings.email && jiraSettings.apiToken)
+  });
+});
+
+// Save Jira settings
+app.put('/api/settings/jira', async (c) => {
+  try {
+    const { writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const body = await c.req.json();
+
+    // Only update if new value is provided (not masked)
+    if (body.baseUrl !== undefined) {
+      jiraSettings.baseUrl = body.baseUrl;
+      if (body.baseUrl) process.env.JIRA_BASE_URL = body.baseUrl;
+    }
+    if (body.email !== undefined) {
+      jiraSettings.email = body.email;
+      if (body.email) process.env.JIRA_EMAIL = body.email;
+    }
+    if (body.apiToken && !body.apiToken.startsWith('••')) {
+      jiraSettings.apiToken = body.apiToken;
+      process.env.JIRA_API_TOKEN = body.apiToken;
+    }
+
+    // Persist to file
+    const settingsPath = join(DATA_DIR, 'jira-settings.json');
+    writeFileSync(settingsPath, JSON.stringify(jiraSettings, null, 2));
+
+    return c.json({ success: true, message: 'Jira settings saved' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);

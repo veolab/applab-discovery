@@ -257,3 +257,23 @@ dlab.taskhub.testmap.get {
 ### Shell Environment
 - Some commands may fail due to PATH issues
 - The `(eval):1: no such file or directory` error is a zsh config issue, not a code bug
+
+## UI Modal Design Pattern
+
+All dynamically-created modals MUST follow the same minimalist landscape style. Use `openJiraSettingsModal()` in `src/web/index.html` as the reference implementation.
+
+### Reference Files
+- **Reference modal**: `openJiraSettingsModal()` in `src/web/index.html`
+- **Second example**: `openAddLinkModal()` in `src/web/index.html`
+
+### Style Rules
+- Landscape layout: `max-width: 600px`, use CSS grid (`grid-template-columns: 1fr 1fr`) for multi-field forms
+- Scoped CSS via `#modalId .class` inside inline `<style>` in innerHTML
+- Compact status badge: inline-flex, pill shape (`border-radius: 20px`), small dot + text
+- Labels: `font-size: 11px`, `font-weight: 500`, `color: var(--text-secondary)`, text-only (no icons)
+- Inputs: `padding: 7px 10px`, `font-size: 12px`, `background: var(--bg-primary)`, `border-radius: 6px`
+- Hints: `font-size: 10px`, `color: var(--text-muted)`, minimal margin-top
+- Modal body: compact padding (`12px 16px`)
+- Button row: `justify-content: flex-end`, Cancel (btn-secondary) + Action (btn-primary)
+- Full-width fields use `grid-column: 1 / -1`
+- Close button: use `class="icon-btn"` with 18x18 SVG X icon (same as Settings modal). Never use `modal-close` class for dynamic modals

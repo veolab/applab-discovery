@@ -4193,8 +4193,10 @@
 
         .task-hub-card-body {
             padding: 12px 16px;
-            max-height: 200px;
+            padding-bottom: 0;
+            max-height: 260px;
             overflow-y: auto;
+            position: relative;
         }
 
         .task-hub-link-item {
@@ -4291,6 +4293,18 @@
             border: 1px solid var(--border-subtle);
         }
 
+        .task-hub-ai-summary-badge {
+            font-size: 9px;
+            padding: 1px 5px;
+            border-radius: 4px;
+            background: rgba(139, 92, 246, 0.15);
+            color: #a78bfa;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+        }
+
         .task-hub-link-assignee {
             display: inline-flex;
             align-items: center;
@@ -4360,11 +4374,15 @@
             padding: 10px;
             border: 1px dashed var(--border);
             border-radius: 8px;
-            background: transparent;
+            background: var(--bg-surface);
             color: var(--text-muted);
             font-size: 12px;
             cursor: pointer;
             transition: all 0.15s;
+            position: sticky;
+            bottom: 0;
+            margin-top: 8px;
+            z-index: 2;
         }
 
         .task-hub-add-btn:hover {
@@ -4378,6 +4396,385 @@
             padding: 20px;
             color: var(--text-muted);
             font-size: 12px;
+        }
+
+        /* Card Detail Modal */
+        .card-detail-modal {
+            max-width: 560px;
+            width: 90vw;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+        }
+
+        .card-detail-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 16px 20px;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .card-detail-header .task-hub-card-icon {
+            width: 36px;
+            height: 36px;
+        }
+
+        .card-detail-header-title {
+            flex: 1;
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .card-detail-close {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 6px;
+            transition: all 0.15s;
+        }
+
+        .card-detail-close:hover {
+            background: var(--bg-surface);
+            color: var(--text-primary);
+        }
+
+        .card-detail-body {
+            padding: 20px;
+            max-height: 60vh;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .card-detail-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .card-detail-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+        }
+
+        .card-detail-chip.status {
+            border: none;
+        }
+
+        .card-detail-chip.status.in-progress { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+        .card-detail-chip.status.done { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+        .card-detail-chip.status.todo { background: rgba(156, 163, 175, 0.15); color: #9ca3af; }
+        .card-detail-chip.status.blocked { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+
+        .card-detail-section {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .card-detail-section-label {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+        }
+
+        .card-detail-ai-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            background: rgba(139, 92, 246, 0.15);
+            color: #a78bfa;
+            margin-bottom: 4px;
+        }
+
+        .card-detail-description {
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+        }
+
+        .card-detail-people {
+            display: flex;
+            gap: 16px;
+        }
+
+        .card-detail-person {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .card-detail-person svg {
+            width: 16px;
+            height: 16px;
+            opacity: 0.6;
+        }
+
+        .card-detail-person-role {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-right: 2px;
+        }
+
+        .card-detail-footer {
+            padding: 16px 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .card-detail-open-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background: #2684FF;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .card-detail-open-btn:hover {
+            background: #1a6fe0;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(38, 132, 255, 0.3);
+        }
+
+        /* Task Hub Sticky Sidebar — Floating Tiles */
+        #taskHubStickyBar {
+            position: fixed;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 500;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.4s cubic-bezier(.4,0,.2,1);
+        }
+
+        #taskHubStickyBar.visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .sticky-tile {
+            position: relative;
+            width: 130px;
+            padding: 14px 14px 12px;
+            border-radius: 14px;
+            cursor: pointer;
+            transition: transform 0.35s cubic-bezier(.4,0,.2,1), box-shadow 0.35s cubic-bezier(.4,0,.2,1);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        /* Staggered rotations */
+        .sticky-tile:nth-child(1) { transform: rotate(-3deg); }
+        .sticky-tile:nth-child(2) { transform: rotate(2.5deg); }
+        .sticky-tile:nth-child(3) { transform: rotate(-1.8deg); }
+        .sticky-tile:nth-child(4) { transform: rotate(3.2deg); }
+
+        .sticky-tile:hover {
+            transform: rotate(0deg) translateX(-6px) scale(1.04) !important;
+        }
+
+        /* Type-specific backgrounds & glows */
+        .sticky-tile.tile-jira {
+            background: linear-gradient(135deg, rgba(38,132,255,0.12) 0%, rgba(0,82,204,0.18) 100%);
+            box-shadow: 0 6px 20px rgba(38,132,255,0.12), inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .sticky-tile.tile-jira:hover {
+            box-shadow: 0 12px 32px rgba(38,132,255,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
+            border-color: rgba(38,132,255,0.3);
+        }
+
+        .sticky-tile.tile-figma {
+            background: linear-gradient(135deg, rgba(242,78,30,0.1) 0%, rgba(162,89,255,0.14) 100%);
+            box-shadow: 0 6px 20px rgba(242,78,30,0.1), inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .sticky-tile.tile-figma:hover {
+            box-shadow: 0 12px 32px rgba(242,78,30,0.2), inset 0 1px 0 rgba(255,255,255,0.06);
+            border-color: rgba(242,78,30,0.3);
+        }
+
+        .sticky-tile.tile-notion {
+            background: linear-gradient(135deg, rgba(255,255,255,0.06) 0%, rgba(180,180,180,0.1) 100%);
+            box-shadow: 0 6px 20px rgba(255,255,255,0.04), inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .sticky-tile.tile-notion:hover {
+            box-shadow: 0 12px 32px rgba(255,255,255,0.08), inset 0 1px 0 rgba(255,255,255,0.06);
+            border-color: rgba(255,255,255,0.15);
+        }
+
+        .sticky-tile.tile-github {
+            background: linear-gradient(135deg, rgba(110,84,148,0.12) 0%, rgba(88,166,255,0.1) 100%);
+            box-shadow: 0 6px 20px rgba(110,84,148,0.1), inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .sticky-tile.tile-github:hover {
+            box-shadow: 0 12px 32px rgba(110,84,148,0.2), inset 0 1px 0 rgba(255,255,255,0.06);
+            border-color: rgba(110,84,148,0.3);
+        }
+
+        .sticky-tile-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .sticky-tile-icon {
+            width: 22px;
+            height: 22px;
+            flex-shrink: 0;
+        }
+
+        .sticky-tile-icon svg {
+            width: 22px;
+            height: 22px;
+        }
+
+        .sticky-tile-type {
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+        }
+
+        .sticky-tile-badge {
+            margin-left: auto;
+            min-width: 18px;
+            height: 18px;
+            padding: 0 5px;
+            border-radius: 9px;
+            font-size: 10px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+
+        .tile-jira .sticky-tile-badge { background: #2684FF; }
+        .tile-figma .sticky-tile-badge { background: #A259FF; }
+        .tile-notion .sticky-tile-badge { background: rgba(255,255,255,0.2); color: var(--text-primary); }
+        .tile-github .sticky-tile-badge { background: #6e5494; }
+
+        .sticky-tile-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-primary);
+            line-height: 1.3;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .sticky-tile-status {
+            display: inline-block;
+            margin-top: 6px;
+            font-size: 9px;
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 4px;
+        }
+
+        .sticky-tile-status.in-progress { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }
+        .sticky-tile-status.done { background: rgba(34, 197, 94, 0.18); color: #4ade80; }
+        .sticky-tile-status.todo { background: rgba(156, 163, 175, 0.18); color: #9ca3af; }
+        .sticky-tile-status.blocked { background: rgba(239, 68, 68, 0.18); color: #f87171; }
+
+        .sticky-tile-multi {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        /* Dropdown from tile */
+        .sticky-tile-dropdown {
+            position: absolute;
+            right: calc(100% + 10px);
+            top: 0;
+            min-width: 220px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+            overflow: hidden;
+            display: none;
+            z-index: 510;
+        }
+
+        .sticky-tile-dropdown.active {
+            display: block;
+        }
+
+        .sticky-tile-dropdown-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 11px 14px;
+            font-size: 12px;
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: background 0.1s;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .sticky-tile-dropdown-item:last-child {
+            border-bottom: none;
+        }
+
+        .sticky-tile-dropdown-item:hover {
+            background: var(--bg-elevated);
+        }
+
+        .sticky-tile-dropdown-item .dd-title {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .sticky-tile-dropdown-item .dd-status {
+            font-size: 9px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            flex-shrink: 0;
         }
 
         /* Task Info Panel */
@@ -6886,8 +7283,9 @@
             if (infoBtn) {
                 infoBtn.textContent = jiraMcpStatus.available ? 'i' : '!';
                 infoBtn.title = jiraMcpStatus.available
-                    ? 'Jira MCP info'
-                    : 'Jira MCP setup required';
+                    ? 'Jira settings'
+                    : 'Jira setup required';
+                infoBtn.onclick = () => openJiraSettingsModal();
             }
         }
 
@@ -6912,7 +7310,8 @@
                     source: data.source || 'none',
                     error: data.cliError || null,
                     checking: false,
-                    lastCheckedAt: new Date().toISOString()
+                    lastCheckedAt: new Date().toISOString(),
+                    jiraApiConfigured: !!data.jiraApiConfigured
                 };
             } catch (error) {
                 jiraMcpStatus = {
@@ -6928,82 +7327,102 @@
             updateJiraMcpStatusUI();
         }
 
-        function openJiraMcpInfoModal() {
-            const existing = document.getElementById('jiraMcpInfoModal');
+        async function openJiraSettingsModal() {
+            const existing = document.getElementById('jiraSettingsModal');
             if (existing) existing.remove();
+
+            // Fetch current settings
+            let settings = { baseUrl: '', email: '', apiToken: '', configured: false };
+            try {
+                const resp = await fetch('/api/settings/jira');
+                if (resp.ok) settings = await resp.json();
+            } catch (e) { /* use defaults */ }
 
             const modal = document.createElement('div');
             modal.className = 'modal-overlay active';
-            modal.id = 'jiraMcpInfoModal';
+            modal.id = 'jiraSettingsModal';
             modal.innerHTML = `
                 <style>
-                    #jiraMcpInfoModal .jira-mcp-modal { max-width: 820px; overflow: hidden; }
-                    #jiraMcpInfoModal .jira-mcp-body { overflow: hidden; }
-                    #jiraMcpInfoModal .jira-options-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-                    #jiraMcpInfoModal .jira-option-card { background: var(--bg-primary); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; }
-                    #jiraMcpInfoModal .jira-option-title { font-weight: 600; color: var(--text-primary); margin-bottom: 12px; font-size: 13px; }
-                    #jiraMcpInfoModal .jira-option-steps { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-muted); flex: 1; }
-                    #jiraMcpInfoModal .jira-buttons-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
-                    @media (max-width: 700px) {
-                        #jiraMcpInfoModal .jira-mcp-modal { max-width: 95vw; max-height: 90vh; }
-                        #jiraMcpInfoModal .jira-mcp-body { overflow-y: auto; max-height: calc(90vh - 60px); }
-                        #jiraMcpInfoModal .jira-options-grid { grid-template-columns: 1fr; }
-                    }
+                    #jiraSettingsModal .jira-settings-modal { max-width: 600px; }
+                    #jiraSettingsModal .jira-settings-status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--bg-tertiary); border-radius: 20px; font-size: 11px; color: var(--text-secondary); margin-bottom: 8px; }
+                    #jiraSettingsModal .jira-settings-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+                    #jiraSettingsModal .jira-settings-dot.connected { background: var(--success, #22c55e); }
+                    #jiraSettingsModal .jira-settings-dot.disconnected { background: var(--text-muted); }
+                    #jiraSettingsModal .jira-fields-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+                    #jiraSettingsModal .jira-field-full { grid-column: 1 / -1; }
+                    #jiraSettingsModal .jira-field { }
+                    #jiraSettingsModal .jira-field label { display: block; font-size: 11px; font-weight: 500; color: var(--text-secondary); margin-bottom: 3px; }
+                    #jiraSettingsModal .jira-field input { width: 100%; padding: 7px 10px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 12px; box-sizing: border-box; }
+                    #jiraSettingsModal .jira-field input:focus { outline: none; border-color: var(--accent); }
+                    #jiraSettingsModal .jira-field .jira-field-hint { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+                    #jiraSettingsModal .jira-btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
                 </style>
-                <div class="modal jira-mcp-modal">
+                <div class="modal jira-settings-modal">
                     <div class="modal-header">
-                        <div class="modal-title">Jira MCP Integration</div>
-                        <button class="modal-close" onclick="document.getElementById('jiraMcpInfoModal')?.remove()">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <div class="modal-title">Jira Settings</div>
+                        <button class="icon-btn" onclick="document.getElementById('jiraSettingsModal')?.remove()">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <line x1="18" y1="6" x2="6" y2="18"/>
                                 <line x1="6" y1="6" x2="18" y2="18"/>
                             </svg>
                         </button>
                     </div>
-                    <div class="modal-body jira-mcp-body" style="display: flex; flex-direction: column; gap: 16px;">
-                        <p style="margin: 0; color: var(--text-secondary); font-size: 13px; text-align: center;">
-                            Enrich Jira links with status, description, and assignee details. Optional - cards update automatically when configured.
-                        </p>
-                        <div class="jira-options-grid">
-                            <div class="jira-option-card">
-                                <div class="jira-option-title">Option A: Atlassian Remote MCP (OAuth)</div>
-                                <div class="jira-option-steps">
-                                    <div>1. Install and authenticate via OAuth</div>
-                                    <div>2. Add server to Claude config (<code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">mcpServers</code>)</div>
-                                    <div>3. Click Reload to verify</div>
-                                </div>
-                                <a class="btn btn-secondary" href="https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/" target="_blank" rel="noopener" style="margin-top: 12px; width: 100%; text-align: center;">
-                                    Atlassian Remote MCP Guide
-                                </a>
+                    <div class="modal-body" style="padding: 12px 16px;">
+                        <div class="jira-settings-status">
+                            <div class="jira-settings-dot ${settings.configured ? 'connected' : 'disconnected'}"></div>
+                            ${settings.configured ? 'Connected' : 'Not configured'}
+                        </div>
+                        <div class="jira-fields-grid">
+                            <div class="jira-field jira-field-full">
+                                <label>Base URL</label>
+                                <input type="url" id="jiraBaseUrl" value="${settings.baseUrl || ''}" placeholder="https://yourcompany.atlassian.net" autocomplete="off">
                             </div>
-                            <div class="jira-option-card">
-                                <div class="jira-option-title">Option B: mcp-atlassian (API Token / PAT)</div>
-                                <div class="jira-option-steps">
-                                    <div>1. Create an API token (Cloud) or PAT (Server/DC)</div>
-                                    <div>2. Configure <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">JIRA_URL</code>, <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">JIRA_USERNAME</code>, <code style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">JIRA_API_TOKEN</code></div>
-                                    <div>3. Add MCP server to Claude config and Reload</div>
-                                </div>
-                                <div style="display: flex; gap: 8px; margin-top: 12px;">
-                                    <a class="btn btn-secondary" href="https://personal-1d37018d.mintlify.app/docs/authentication" target="_blank" rel="noopener" style="flex: 1; text-align: center;">
-                                        Auth Guide
-                                    </a>
-                                    <a class="btn btn-secondary" href="https://github.com/sooperset/mcp-atlassian?tab=readme-ov-file" target="_blank" rel="noopener" style="flex: 1; text-align: center;">
-                                        README
-                                    </a>
-                                </div>
+                            <div class="jira-field">
+                                <label>Email</label>
+                                <input type="email" id="jiraEmail" value="${settings.email || ''}" placeholder="you@company.com" autocomplete="off">
+                            </div>
+                            <div class="jira-field">
+                                <label>API Token</label>
+                                <input type="password" id="jiraApiToken" value="${settings.apiToken || ''}" placeholder="Your Jira API token" autocomplete="off">
+                                <div class="jira-field-hint"><a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" style="color: var(--accent);">Create API token</a></div>
                             </div>
                         </div>
-                        <div class="jira-buttons-row">
-                            <button class="claude-code-btn" onclick="askClaudeToInstall('jira-mcp')" title="Install with Claude Code">
-                                <img src="/assets/icons/claude-ai-icon.svg" alt="Claude" />
-                                Install with Claude
-                            </button>
+                        <div class="jira-btn-row">
+                            <button class="btn btn-secondary" onclick="document.getElementById('jiraSettingsModal')?.remove()">Cancel</button>
+                            <button class="btn btn-primary" onclick="saveJiraSettings()">Save</button>
                         </div>
                     </div>
                 </div>
             `;
             document.body.appendChild(modal);
         }
+
+        async function saveJiraSettings() {
+            const baseUrl = document.getElementById('jiraBaseUrl')?.value?.trim() || '';
+            const email = document.getElementById('jiraEmail')?.value?.trim() || '';
+            const apiToken = document.getElementById('jiraApiToken')?.value || '';
+
+            try {
+                const resp = await fetch('/api/settings/jira', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ baseUrl, email, apiToken })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    showToast('Jira settings saved', 'success');
+                    document.getElementById('jiraSettingsModal')?.remove();
+                    refreshJiraMcpStatus();
+                } else {
+                    showToast(data.error || 'Failed to save', 'error');
+                }
+            } catch (e) {
+                showToast('Failed to save Jira settings', 'error');
+            }
+        }
+
+        // Keep backward compatibility alias
+        function openJiraMcpInfoModal() { openJiraSettingsModal(); }
 
         const aiIconSvg = `
             <svg class="ai-platform-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -10024,7 +10443,7 @@
                                 <span class="integration-status-dot pending" id="jiraMcpDot"></span>
                                 <span class="project-integration-text" id="jiraMcpText">checking...</span>
                                 <button class="project-integration-btn" onclick="refreshJiraMcpStatus()" title="Reload status">Reload</button>
-                                <button class="project-integration-btn icon" id="jiraMcpInfoBtn" onclick="openJiraMcpInfoModal()" title="Info">!</button>
+                                <button class="project-integration-btn icon" id="jiraMcpInfoBtn" onclick="openJiraSettingsModal()" title="Jira Settings">!</button>
                             </div>
                         </div>
                     </div>
@@ -10345,10 +10764,10 @@
 
         // Icons for each link type
         const taskHubIcons = {
-            jira: `<svg width="18" height="18" viewBox="0 0 24 24" fill="#2196F3"><path d="M11.53 2c-.63 0-1.25.24-1.72.72L2.72 9.81c-.95.95-.95 2.49 0 3.44l6.97 6.97c.95.95 2.49.95 3.44 0l7.09-7.09c.47-.47.72-1.09.72-1.72V4.34c0-1.29-1.05-2.34-2.34-2.34H11.53zM17 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>`,
-            notion: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.98-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466l1.823 1.447zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.84-.046.933-.56.933-1.167V6.354c0-.606-.233-.933-.746-.886l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.746 0-.933-.234-1.495-.933l-4.577-7.186v6.952l1.448.327s0 .84-1.168.84l-3.22.186c-.094-.187 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.453-.233 4.764 7.279v-6.44l-1.215-.14c-.093-.514.28-.886.747-.933l3.225-.186zM2.1 1.155L16.055.286c1.726-.14 2.146.047 2.892.607l3.966 2.799c.513.373.7.84.7 1.448v16.31c0 1.168-.42 1.869-1.915 1.962L5.854 24.28c-1.12.047-1.68-.14-2.287-.887L1.13 19.986c-.513-.653-.746-1.306-.746-2.053V2.976c0-.933.42-1.727 1.726-1.82z"/></svg>`,
-            figma: `<svg width="18" height="18" viewBox="0 0 24 24" fill="#F24E1E"><path d="M8 24c2.2 0 4-1.8 4-4v-4H8c-2.2 0-4 1.8-4 4s1.8 4 4 4zM4 12c0-2.2 1.8-4 4-4h4v8H8c-2.2 0-4-1.8-4-4zM4 4c0-2.2 1.8-4 4-4h4v8H8C5.8 8 4 6.2 4 4zM12 0h4c2.2 0 4 1.8 4 4s-1.8 4-4 4h-4V0zM20 12c0 2.2-1.8 4-4 4s-4-1.8-4-4 1.8-4 4-4 4 1.8 4 4z"/></svg>`,
-            github: `<svg width="18" height="18" viewBox="0 0 24 24" fill="#6e5494"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>`
+            jira: `<svg width="18" height="18" viewBox="0 0 256 256" fill="none"><defs><linearGradient id="jiraGradA" x1="48.3%" y1="57.2%" x2="28.7%" y2="37.4%"><stop offset="18%" stop-color="#0052CC"/><stop offset="100%" stop-color="#2684FF"/></linearGradient><linearGradient id="jiraGradB" x1="52.2%" y1="42.4%" x2="71.2%" y2="62.6%"><stop offset="18%" stop-color="#0052CC"/><stop offset="100%" stop-color="#2684FF"/></linearGradient></defs><path d="M244.658 0H121.707a55.502 55.502 0 0 0 55.502 55.502h22.649V77.37c.02 30.625 24.841 55.447 55.5 55.502V10.666C255.358 4.777 250.581 0 244.658 0z" fill="#2684FF"/><path d="M183.822 61.262H60.872c.019 30.625 24.84 55.447 55.501 55.502h22.649v21.868c.02 30.597 24.798 55.408 55.396 55.502V71.928c0-5.891-4.776-10.666-10.596-10.666z" fill="url(#jiraGradA)"/><path d="M122.951 122.489H0c0 30.653 24.841 55.502 55.502 55.502h22.72v21.796c.02 30.625 24.824 55.447 55.466 55.502V133.155c0-5.891-4.776-10.666-10.737-10.666z" fill="url(#jiraGradB)"/></svg>`,
+            notion: `<svg width="18" height="18" viewBox="0 0 100 100" fill="none"><path d="M6.017 4.313l55.333-4.087c6.797-.583 8.543-.19 12.817 2.917l17.663 12.443c2.913 2.14 3.883 2.723 3.883 5.053v68.243c0 4.277-1.553 6.807-6.99 7.193L24.467 99.967c-4.08.193-6.023-.39-8.16-3.113L3.3 79.94c-2.333-3.113-3.3-5.443-3.3-8.167V11.113c0-3.497 1.553-6.413 6.017-6.8z" fill="#fff"/><path fill-rule="evenodd" clip-rule="evenodd" d="M61.35.227l-55.333 4.087C1.553 4.7 0 7.617 0 11.113v60.66c0 2.723.967 5.053 3.3 8.167l13.007 16.913c2.137 2.723 4.08 3.307 8.16 3.113l64.257-3.89c5.433-.387 6.99-2.917 6.99-7.193V20.64c0-2.21-.873-2.847-3.443-4.733L75.5 3.57C71.233.453 69.487.067 62.69.65l-1.34.1v-.523zM25.723 19.01c-5.167.383-6.343.467-9.283-1.867L8.973 11.5c-.78-.78-.39-1.753 1.163-1.947l52.647-3.887c4.473-.387 6.733.973 8.477 2.333l9.07 6.607c.39.193 1.36 1.36.193 1.36l-54.43 3.073-.37-.03zM19.457 88.3V32.197c0-2.53.78-3.697 3.113-3.89L86.1 24.42c2.14-.193 3.11 1.167 3.11 3.693v55.717c0 2.53-.39 4.667-3.887 4.86l-60.377 3.5c-3.497.193-5.157-.973-5.49-3.89zM79.1 36.053c.39 1.753 0 3.5-1.75 3.7l-2.92.577v42.773c-2.527 1.36-4.853 2.14-6.793 2.14-3.107 0-3.883-.977-6.21-3.887l-19.03-29.887v28.907l6.02 1.363s0 3.5-4.857 3.5l-13.39.777c-.39-.78 0-2.723 1.357-3.11l3.497-.977V38.197l-4.857-.39c-.39-1.753.583-4.277 3.3-4.473l14.367-.977 19.8 30.27V35.467l-5.053-.583c-.39-2.143 1.163-3.7 3.103-3.89l13.4-.94z" fill="#000"/></svg>`,
+            figma: `<svg width="18" height="18" viewBox="0 0 38 57" fill="none"><path fill="#F24E1E" d="M19 28.5a9.5 9.5 0 1 1 19 0 9.5 9.5 0 0 1-19 0z"/><path fill="#FF7262" d="M0 47.5A9.5 9.5 0 0 1 9.5 38H19v9.5a9.5 9.5 0 1 1-19 0z"/><path fill="#A259FF" d="M19 0v19h9.5a9.5 9.5 0 1 0 0-19H19z"/><path fill="#1ABCFE" d="M0 9.5A9.5 9.5 0 0 0 9.5 19H19V0H9.5A9.5 9.5 0 0 0 0 9.5z"/><path fill="#0ACF83" d="M0 28.5A9.5 9.5 0 0 0 9.5 38H19V19H9.5A9.5 9.5 0 0 0 0 28.5z"/></svg>`,
+            github: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>`
         };
 
         function getLinksArray(project) {
@@ -10521,17 +10940,27 @@
                 safeAssignee ? `<span class="task-hub-link-assignee">${userIconSvg}${safeAssignee}</span>` : '',
             ].filter(Boolean);
 
-            const jiraDetails = isJira && (safeDescription || jiraDetailChips.length > 0)
+            const aiSummary = metadata.aiSummary ? escapeHtml(String(metadata.aiSummary)) : '';
+            const jiraDetails = isJira && (aiSummary || safeDescription || jiraDetailChips.length > 0)
                 ? `
                     <div class="task-hub-jira-details">
-                        ${safeDescription ? `<div class="task-hub-link-description">${safeDescription}</div>` : ''}
+                        ${aiSummary ? `
+                            <div class="task-hub-link-description">
+                                <span class="task-hub-ai-summary-badge">AI Summary</span>
+                                ${aiSummary}
+                            </div>
+                        ` : safeDescription ? `<div class="task-hub-link-description">${safeDescription}</div>` : ''}
                         ${jiraDetailChips.length > 0 ? `<div class="task-hub-link-detail-row">${jiraDetailChips.join('')}</div>` : ''}
                     </div>
                 `
                 : '';
 
+            const onclickAction = isJira
+                ? `openCardDetailModal('${link.id}')`
+                : `window.open(${safeUrl}, '_blank')`;
+
             return `
-                <div class="task-hub-link-item" onclick="window.open(${safeUrl}, '_blank')">
+                <div class="task-hub-link-item" onclick="${onclickAction}">
                     <div class="task-hub-link-info">
                         <div class="task-hub-link-title">${safeTitle}</div>
                         <div class="task-hub-link-meta">
@@ -10648,40 +11077,48 @@
                 figma: 'Figma Design',
                 github: 'GitHub Issue/PR'
             };
+            const hints = {
+                jira: 'Paste your Jira issue URL (e.g. PROJ-123)',
+                notion: 'Paste the Notion page share link',
+                figma: 'Paste the Figma file or frame URL',
+                github: 'Paste a GitHub issue or PR URL'
+            };
 
             const modal = document.createElement('div');
             modal.className = 'modal-overlay active';
             modal.id = 'addLinkModal';
             modal.innerHTML = `
-                <div class="modal" style="max-width: 480px;">
+                <style>
+                    #addLinkModal .add-link-modal-inner { max-width: 480px; }
+                    #addLinkModal .add-link-field { margin-bottom: 12px; }
+                    #addLinkModal .add-link-field label { display: block; font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-bottom: 4px; }
+                    #addLinkModal .add-link-field input { width: 100%; padding: 8px 10px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 13px; box-sizing: border-box; }
+                    #addLinkModal .add-link-field input:focus { outline: none; border-color: var(--accent); }
+                    #addLinkModal .add-link-field .add-link-hint { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+                    #addLinkModal .add-link-btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+                </style>
+                <div class="modal add-link-modal-inner">
                     <div class="modal-header">
                         <div class="modal-title">Add ${titles[type]}</div>
-                        <button class="modal-close" onclick="closeAddLinkModal()">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <button class="icon-btn" onclick="closeAddLinkModal()">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <line x1="18" y1="6" x2="6" y2="18"/>
                                 <line x1="6" y1="6" x2="18" y2="18"/>
                             </svg>
                         </button>
                     </div>
-                    <div class="add-link-modal-body">
-                        <div class="link-input-group">
-                            <label>
-                                ${taskHubIcons[type]}
-                                ${titles[type]} URL
-                            </label>
+                    <div class="modal-body" style="display: flex; flex-direction: column; gap: 4px;">
+                        <div class="add-link-field">
+                            <label>URL</label>
                             <input type="url" id="addLinkUrl" placeholder="${placeholders[type]}" autofocus>
+                            <div class="add-link-hint">${hints[type]}</div>
                         </div>
-                        <div class="link-input-group" style="margin-top: 12px;">
-                            <label>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                                </svg>
-                                Title (optional)
-                            </label>
+                        <div class="add-link-field">
+                            <label>Title (optional)</label>
                             <input type="text" id="addLinkTitle" placeholder="Auto-detected from URL">
+                            <div class="add-link-hint">Leave blank to auto-detect from the URL</div>
                         </div>
-                        <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;">
+                        <div class="add-link-btn-row">
                             <button class="btn btn-secondary" onclick="closeAddLinkModal()">Cancel</button>
                             <button class="btn btn-primary" onclick="saveTaskHubLink()">Add Link</button>
                         </div>
@@ -10839,6 +11276,251 @@
             if (section && currentProject) {
                 section.innerHTML = renderTaskHub(currentProject);
             }
+            renderTaskHubStickyBar(currentProject);
+        }
+
+        // Card Detail Modal (Jira)
+        function openCardDetailModal(linkId) {
+            const links = currentProject ? getLinksArray(currentProject) : [];
+            const link = links.find(l => l.id === linkId);
+            if (!link) return;
+
+            const metadata = link?.metadata && typeof link.metadata === 'object' ? link.metadata : {};
+            const safeTitle = escapeHtml(link.title || 'Untitled');
+            const statusValue = link.status || metadata.status || null;
+            const statusClass = statusValue ? String(statusValue).toLowerCase().replace(/\\s+/g, '-') : '';
+            const safeStatus = statusValue ? escapeHtml(String(statusValue)) : '';
+            const priority = metadata.priority ? escapeHtml(String(metadata.priority)) : '';
+            const issueType = metadata.issueType ? escapeHtml(String(metadata.issueType)) : '';
+            const assigneeName = metadata.assigneeName ? escapeHtml(String(metadata.assigneeName)) : '';
+            const reporterName = metadata.reporterName ? escapeHtml(String(metadata.reporterName)) : '';
+            const description = metadata.description ? escapeHtml(String(metadata.description)) : '';
+            const aiSummary = metadata.aiSummary ? escapeHtml(String(metadata.aiSummary)) : '';
+            const safeUrl = link.url || '';
+
+            const chipsHtml = [
+                safeStatus ? `<span class="card-detail-chip status ${statusClass}">${safeStatus}</span>` : '',
+                priority ? `<span class="card-detail-chip">${priority}</span>` : '',
+                issueType ? `<span class="card-detail-chip">${issueType}</span>` : '',
+            ].filter(Boolean).join('');
+
+            const summaryHtml = aiSummary ? `
+                <div class="card-detail-section">
+                    <div class="card-detail-ai-badge">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                        AI Summary
+                    </div>
+                    <div class="card-detail-description">${aiSummary}</div>
+                </div>
+            ` : '';
+
+            const descriptionHtml = description ? `
+                <div class="card-detail-section">
+                    <div class="card-detail-section-label">Description</div>
+                    <div class="card-detail-description">${description}</div>
+                </div>
+            ` : '';
+
+            const peopleHtml = (assigneeName || reporterName) ? `
+                <div class="card-detail-people">
+                    ${assigneeName ? `<div class="card-detail-person"><span class="card-detail-person-role">Assignee</span>${userIconSvg}${assigneeName}</div>` : ''}
+                    ${reporterName ? `<div class="card-detail-person"><span class="card-detail-person-role">Reporter</span>${userIconSvg}${reporterName}</div>` : ''}
+                </div>
+            ` : '';
+
+            const iconType = link.type || 'jira';
+            const iconBg = { jira: 'rgba(38, 132, 255, 0.15)', figma: 'rgba(242, 78, 30, 0.15)', notion: 'rgba(0, 0, 0, 0.1)', github: 'rgba(110, 84, 148, 0.15)' };
+
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay active';
+            modal.id = 'cardDetailModal';
+            modal.onclick = (e) => { if (e.target === modal) closeCardDetailModal(); };
+            modal.innerHTML = `
+                <div class="card-detail-modal">
+                    <div class="card-detail-header">
+                        <div class="task-hub-card-icon" style="background: ${iconBg[iconType] || iconBg.jira}">${taskHubIcons[iconType] || taskHubIcons.jira}</div>
+                        <div class="card-detail-header-title">${safeTitle}</div>
+                        <button class="card-detail-close" onclick="closeCardDetailModal()">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="card-detail-body">
+                        ${chipsHtml ? `<div class="card-detail-chips">${chipsHtml}</div>` : ''}
+                        ${summaryHtml}
+                        ${descriptionHtml}
+                        ${peopleHtml}
+                    </div>
+                    <div class="card-detail-footer">
+                        <button class="card-detail-open-btn" onclick="window.open('${safeUrl.replace(/'/g, "\\'")}', '_blank')">
+                            Open in ${iconType.charAt(0).toUpperCase() + iconType.slice(1)}
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                                <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+
+        function closeCardDetailModal() {
+            const modal = document.getElementById('cardDetailModal');
+            if (modal) modal.remove();
+        }
+
+        // Media Lightbox (prepared for future attachments)
+        function openMediaLightbox(mediaUrl, mediaType) {
+            let lightbox = document.getElementById('mediaLightbox');
+            if (lightbox) lightbox.remove();
+
+            const isVideo = mediaType === 'video';
+            lightbox = document.createElement('div');
+            lightbox.id = 'mediaLightbox';
+            lightbox.className = 'screenshot-lightbox active';
+            lightbox.onclick = (e) => { if (e.target === lightbox) closeMediaLightbox(); };
+            lightbox.innerHTML = `
+                <div class="lightbox-content">
+                    <button class="lightbox-close" onclick="closeMediaLightbox()">&times;</button>
+                    ${isVideo
+                        ? `<video class="lightbox-image" controls autoplay src="${escapeHtml(mediaUrl)}" style="max-width: 90vw; max-height: 85vh;"></video>`
+                        : `<img class="lightbox-image" src="${escapeHtml(mediaUrl)}">`
+                    }
+                </div>
+            `;
+            document.body.appendChild(lightbox);
+        }
+
+        function closeMediaLightbox() {
+            const lb = document.getElementById('mediaLightbox');
+            if (lb) lb.remove();
+        }
+
+        // Sticky Sidebar
+        function renderTaskHubStickyBar(project) {
+            let bar = document.getElementById('taskHubStickyBar');
+            if (!project) {
+                if (bar) bar.remove();
+                return;
+            }
+
+            const links = getLinksArray(project);
+            if (links.length === 0) {
+                if (bar) bar.remove();
+                return;
+            }
+
+            const typeGroups = {};
+            links.forEach(l => {
+                if (!typeGroups[l.type]) typeGroups[l.type] = [];
+                typeGroups[l.type].push(l);
+            });
+
+            if (!bar) {
+                bar = document.createElement('div');
+                bar.id = 'taskHubStickyBar';
+                document.body.appendChild(bar);
+            }
+
+            const typeLabels = { jira: 'Jira', figma: 'Figma', notion: 'Notion', github: 'GitHub' };
+            const typeOrder = ['jira', 'figma', 'notion', 'github'];
+
+            bar.innerHTML = typeOrder.filter(t => typeGroups[t]).map(type => {
+                const group = typeGroups[type];
+                const count = group.length;
+                const first = group[0];
+                const statusValue = first.status || (first.metadata && first.metadata.status) || '';
+                const statusClass = statusValue ? String(statusValue).toLowerCase().replace(/\s+/g, '-') : '';
+                const safeStatus = statusValue ? escapeHtml(String(statusValue)) : '';
+
+                const titleText = count === 1
+                    ? escapeHtml(first.title || 'Untitled')
+                    : `${count} ${typeLabels[type]} links`;
+
+                return `
+                    <div class="sticky-tile tile-${type}" onclick="handleStickyBarClick('${type}', event)">
+                        <div class="sticky-tile-header">
+                            <span class="sticky-tile-icon">${taskHubIcons[type]}</span>
+                            <span class="sticky-tile-type">${typeLabels[type]}</span>
+                            ${count > 1 ? `<span class="sticky-tile-badge">${count}</span>` : ''}
+                        </div>
+                        <div class="sticky-tile-title">${titleText}</div>
+                        ${count === 1 && safeStatus ? `<span class="sticky-tile-status ${statusClass}">${safeStatus}</span>` : ''}
+                        ${count > 1 ? `<div class="sticky-tile-multi">Click to see all</div>` : ''}
+                        <div class="sticky-tile-dropdown" id="stickyDropdown_${type}">
+                            ${group.map(link => {
+                                const ls = link.status || (link.metadata && link.metadata.status) || '';
+                                const lsc = ls ? String(ls).toLowerCase().replace(/\s+/g, '-') : '';
+                                return `
+                                    <div class="sticky-tile-dropdown-item" onclick="event.stopPropagation(); handleStickyBarItemClick('${type}', '${link.id}', '${(link.url || '').replace(/'/g, "\\'")}')">
+                                        <span class="dd-title">${escapeHtml(link.title || 'Untitled')}</span>
+                                        ${ls ? `<span class="dd-status sticky-tile-status ${lsc}">${escapeHtml(String(ls))}</span>` : ''}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            setupStickyBarObserver();
+        }
+
+        function handleStickyBarClick(type, event) {
+            const links = currentProject ? getLinksArray(currentProject) : [];
+            const group = links.filter(l => l.type === type);
+            if (group.length === 0) return;
+
+            // Close any open dropdowns first
+            document.querySelectorAll('.sticky-tile-dropdown.active').forEach(d => d.classList.remove('active'));
+
+            if (group.length === 1) {
+                handleStickyBarItemClick(type, group[0].id, group[0].url);
+            } else {
+                event.stopPropagation();
+                const dropdown = document.getElementById(`stickyDropdown_${type}`);
+                if (dropdown) dropdown.classList.toggle('active');
+            }
+        }
+
+        function handleStickyBarItemClick(type, linkId, url) {
+            document.querySelectorAll('.sticky-tile-dropdown.active').forEach(d => d.classList.remove('active'));
+            if (type === 'jira') {
+                openCardDetailModal(linkId);
+            } else {
+                window.open(url, '_blank');
+            }
+        }
+
+        let stickyBarObserverSetup = false;
+        function setupStickyBarObserver() {
+            if (stickyBarObserverSetup) return;
+            stickyBarObserverSetup = true;
+
+            const section = document.getElementById('taskHubSection');
+            const bar = document.getElementById('taskHubStickyBar');
+            if (!section || !bar) return;
+
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        bar.classList.remove('visible');
+                    } else {
+                        bar.classList.add('visible');
+                    }
+                });
+            }, { threshold: 0.1 });
+
+            observer.observe(section);
+
+            // Close dropdowns on outside click
+            document.addEventListener('click', (e) => {
+                if (!e.target.closest('.sticky-tile')) {
+                    document.querySelectorAll('.sticky-tile-dropdown.active').forEach(d => d.classList.remove('active'));
+                }
+            });
         }
 
         function ensureTaskHubLinksArray() {
@@ -10871,6 +11553,37 @@
             if (metadata?.assigneeName) link.assignee = metadata.assigneeName;
         }
 
+        async function fetchJiraAiSummary(linkId, metadata) {
+            if (!currentProject) return;
+            try {
+                const resp = await fetch('/api/ai/jira-summary', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title: metadata.title || '',
+                        status: metadata.status || '',
+                        description: metadata.description || '',
+                        assigneeName: metadata.assigneeName || '',
+                        priority: metadata.priority || '',
+                        issueType: metadata.issueType || '',
+                        reporterName: metadata.reporterName || ''
+                    })
+                });
+                const data = await resp.json();
+                if (data.summary) {
+                    const links = getLinksArray(currentProject);
+                    const link = links.find(l => l.id === linkId);
+                    if (link && link.metadata) {
+                        link.metadata.aiSummary = data.summary;
+                        updateTaskHubSection();
+                        await saveProjectLinks();
+                    }
+                }
+            } catch (e) {
+                console.warn('[Jira AI Summary] Failed:', e);
+            }
+        }
+
         async function refreshLinkMetadata(linkId, options = {}) {
             if (!currentProject) return;
 
@@ -10898,6 +11611,12 @@
 
                 if (data.success && data.metadata) {
                     applyLinkMetadata(linkId, data.metadata);
+
+                    // Fetch AI summary for Jira links that have description data
+                    if (link.type === 'jira' && data.metadata.description) {
+                        fetchJiraAiSummary(linkId, data.metadata).catch(() => {});
+                    }
+
                     setTaskHubLinkLoading(linkId, false);
                     updateTaskHubSection();
                     await saveProjectLinks();
