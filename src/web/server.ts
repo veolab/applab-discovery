@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { exec, execSync, spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -637,9 +637,33 @@ type NormalizedProjectRecord = ProjectRecord & {
   taskTestMap: unknown[];
 };
 
+function resolveVideoPath(videoPath: string | null): string | null {
+  if (!videoPath) return null;
+  try {
+    if (!existsSync(videoPath)) return videoPath;
+    if (!statSync(videoPath).isDirectory()) return videoPath;
+
+    // Check video/ subdirectory first (Playwright pattern)
+    const videoDir = join(videoPath, 'video');
+    if (existsSync(videoDir) && statSync(videoDir).isDirectory()) {
+      const videoFiles = readdirSync(videoDir).filter(f => /\.(mp4|mov|webm)$/i.test(f));
+      if (videoFiles.length > 0) return join(videoDir, videoFiles[0]);
+    }
+
+    // Check directly in directory (Maestro pattern: recording.mp4)
+    const directFiles = readdirSync(videoPath).filter(f => /\.(mp4|mov|webm)$/i.test(f));
+    if (directFiles.length > 0) return join(videoPath, directFiles[0]);
+
+    return videoPath;
+  } catch {
+    return videoPath;
+  }
+}
+
 function normalizeProjectRecord(project: ProjectRecord): NormalizedProjectRecord {
   const normalized = {
     ...project,
+    videoPath: resolveVideoPath(project.videoPath),
     tags: parseJsonField(project.tags, [] as string[]),
     taskHubLinks: parseJsonField(project.taskHubLinks, [] as unknown[]),
     taskRequirements: parseJsonField(project.taskRequirements, [] as unknown[]),

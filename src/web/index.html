@@ -13494,7 +13494,8 @@
         }
 
         function connectRecorderWebSocket() {
-            const wsPort = 3848; // WebSocket runs on port 3848
+            const httpPort = parseInt(window.location.port, 10) || 3847;
+            const wsPort = httpPort + 1;
             recorderWs = new WebSocket(`ws://localhost:${wsPort}`);
 
             recorderWs.onopen = () => {
