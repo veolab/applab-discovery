@@ -3887,6 +3887,96 @@
             color: #f87171;
         }
 
+        /* Analysis Terminal (inline, not fixed) */
+        .analysis-terminal {
+            background: rgba(30, 30, 30, 0.95);
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1);
+            font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 12px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .analysis-terminal-header {
+            display: flex;
+            align-items: center;
+            padding: 8px 14px;
+            background: rgba(50, 50, 50, 0.8);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .analysis-terminal-dots {
+            display: flex;
+            gap: 6px;
+        }
+
+        .analysis-terminal-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .analysis-terminal-dot.red { background: #ff5f57; }
+        .analysis-terminal-dot.yellow { background: #febc2e; }
+        .analysis-terminal-dot.green { background: #28c840; }
+
+        .analysis-terminal-title {
+            flex: 1;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .analysis-terminal-content {
+            padding: 10px 14px;
+            color: #e0e0e0;
+            line-height: 1.8;
+        }
+
+        .analysis-terminal-step {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 2px;
+            animation: terminalLineIn 0.2s ease-out;
+        }
+
+        .analysis-terminal-step.running { color: #60a5fa; }
+        .analysis-terminal-step.done { color: #4ade80; }
+        .analysis-terminal-step.failed { color: #f87171; }
+        .analysis-terminal-step.pending { color: rgba(255, 255, 255, 0.4); }
+        .analysis-terminal-step.skipped { color: rgba(255, 255, 255, 0.5); }
+
+        .analysis-terminal-step .step-icon {
+            width: 14px;
+            flex-shrink: 0;
+            text-align: center;
+        }
+
+        .analysis-terminal-step .step-icon.spinner {
+            animation: terminalSpin 1s linear infinite;
+        }
+
+        .analysis-terminal-step .step-detail {
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.4);
+            margin-left: 22px;
+            margin-bottom: 4px;
+        }
+
+        .analysis-terminal-error {
+            color: #f87171;
+            font-size: 11px;
+            margin-left: 22px;
+            margin-top: 4px;
+            padding: 6px 8px;
+            background: rgba(248, 113, 113, 0.1);
+            border-radius: 4px;
+            border-left: 2px solid #f87171;
+        }
+
         /* Media Preview */
         .media-preview {
             aspect-ratio: 16/9;
@@ -6549,8 +6639,8 @@
                             <div class="settings-section">
                                 <label class="settings-label">Image Fit</label>
                                 <div class="toggle-group">
-                                    <button class="toggle-btn active" data-fit="cover">Fill</button>
-                                    <button class="toggle-btn" data-fit="contain">Fit</button>
+                                    <button class="toggle-btn" data-fit="cover">Fill</button>
+                                    <button class="toggle-btn active" data-fit="contain">Fit</button>
                                 </div>
                             </div>
                         </div>
@@ -6638,7 +6728,7 @@
             <div class="status-dot" id="statusDot"></div>
             <span class="status-text" id="statusText">Ready</span>
         </div>
-        <div class="status-right">v0.1.0</div>
+        <div class="status-right" id="footerVersion">v0.0.0</div>
     </footer>
 
     <!-- Shortcuts Modal -->
@@ -6842,6 +6932,15 @@
                                 <div style="display: flex; align-items: center; gap: 8px;">
                                     <div class="tool-dot" id="llmStatusDot" style="width: 8px; height: 8px;"></div>
                                     <span id="llmStatusText" style="font-size: 12px;">Checking...</span>
+                                </div>
+                            </div>
+                            <div class="setting-item" style="margin-bottom: 12px;">
+                                <label class="setting-label">Preferred Provider</label>
+                                <select class="setting-input" id="preferredProvider" style="cursor: pointer;">
+                                    <option value="auto">Auto (priority order)</option>
+                                </select>
+                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
+                                    Auto: Anthropic → OpenAI → Claude CLI → Ollama
                                 </div>
                             </div>
                             <div class="setting-item">
@@ -7508,7 +7607,7 @@
             cellPadding: 16,
             cornerRadius: 16,
             shadowEnabled: true,
-            imageFit: 'cover',
+            imageFit: 'contain',
         };
         // Load saved config from localStorage or use defaults
         let gridConfig = loadGridConfig();
@@ -7921,6 +8020,9 @@
                 document.getElementById('ollamaUrl').value = data.ollamaUrl || 'http://localhost:11434';
                 currentOllamaModel = data.ollamaModel || 'llama3.2';
 
+                // Update preferred provider dropdown
+                updatePreferredProviderDropdown(data.preferredProvider || 'auto');
+
                 // Update status
                 updateLLMStatus();
 
@@ -7928,6 +8030,32 @@
                 checkOllamaStatus();
             } catch (e) {
                 console.log('Failed to load LLM settings:', e);
+            }
+        }
+
+        async function updatePreferredProviderDropdown(currentValue) {
+            const select = document.getElementById('preferredProvider');
+            if (!select) return;
+            try {
+                const response = await fetch('/api/mobile-chat/providers');
+                const data = await response.json();
+                let html = '<option value="auto">Auto (priority order)</option>';
+                for (const p of (data.providers || [])) {
+                    if (p.available && p.configured) {
+                        const selected = currentValue === p.key ? ' selected' : '';
+                        html += `<option value="${p.key}"${selected}>${p.name}</option>`;
+                    }
+                }
+                select.innerHTML = html;
+                // Ensure current value is set even if provider is not currently available
+                if (currentValue && currentValue !== 'auto') {
+                    const exists = [...select.options].some(o => o.value === currentValue);
+                    if (!exists) {
+                        select.value = 'auto';
+                    }
+                }
+            } catch (e) {
+                console.log('Failed to update preferred provider dropdown:', e);
             }
         }
 
@@ -8053,7 +8181,8 @@
                     openaiApiKey: document.getElementById('openaiApiKey')?.value || '',
                     openaiModel: document.getElementById('openaiModel')?.value || 'gpt-5.2',
                     ollamaUrl: document.getElementById('ollamaUrl')?.value || 'http://localhost:11434',
-                    ollamaModel: ollamaModel
+                    ollamaModel: ollamaModel,
+                    preferredProvider: document.getElementById('preferredProvider')?.value || 'auto'
                 };
 
                 await fetch('/api/settings/llm', {
@@ -10533,14 +10662,28 @@
                                 ${getPlatformAiIconHtml()}
                                 App Intelligence
                             </div>
-                            <div class="card analyzing-spinner">
-                                <svg class="spinner" viewBox="0 0 24 24" style="width: 20px; height: 20px;">
-                                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" opacity="0.2"/>
-                                    <path d="M12 2a10 10 0 0 1 10 10" stroke="var(--accent)" stroke-width="2" fill="none" stroke-linecap="round"/>
-                                </svg>
-                                <div>
-                                    <div class="analyzing-text">App Intelligence analyzing...</div>
-                                    <div class="analyzing-subtitle">Extracting text and generating insights</div>
+                            <div class="analysis-terminal" id="analysisTerminal">
+                                <div class="analysis-terminal-header">
+                                    <div class="analysis-terminal-dots">
+                                        <div class="analysis-terminal-dot red"></div>
+                                        <div class="analysis-terminal-dot yellow"></div>
+                                        <div class="analysis-terminal-dot green"></div>
+                                    </div>
+                                    <div class="analysis-terminal-title">App Intelligence</div>
+                                </div>
+                                <div class="analysis-terminal-content" id="analysisTerminalContent">
+                                    <div class="analysis-terminal-step running" id="analysisStep_ocr">
+                                        <span class="step-icon spinner">◐</span>
+                                        <span class="step-text">[1] Extracting text (OCR)...</span>
+                                    </div>
+                                    <div class="analysis-terminal-step pending" id="analysisStep_summary">
+                                        <span class="step-icon">○</span>
+                                        <span class="step-text">[2] Generating AI summary...</span>
+                                    </div>
+                                    <div class="analysis-terminal-step pending" id="analysisStep_save">
+                                        <span class="step-icon">○</span>
+                                        <span class="step-text">[3] Saving results...</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -12743,6 +12886,20 @@
 
         // Load devices when testing tab is shown
         document.addEventListener('DOMContentLoaded', () => {
+            // Fetch app version for footer
+            fetch('/api/info').then(r => r.json()).then(data => {
+                const el = document.getElementById('footerVersion');
+                if (el && data.version) el.textContent = 'v' + data.version;
+            }).catch(() => {});
+
+            // Auto-check dependencies on first load — open Settings if critical deps missing
+            fetch('/api/setup/status').then(r => r.json()).then(data => {
+                if (data.summary && data.summary.requiredMissing && data.summary.requiredMissing.length > 0) {
+                    openSettings();
+                    showToast('Some required dependencies are missing. Check Settings.', 'warning');
+                }
+            }).catch(() => {});
+
             // Initial load delayed to ensure tab is ready
             setTimeout(() => {
                 if (document.getElementById('deviceDropdown')) {
@@ -13412,9 +13569,84 @@
                 case 'mobileChatExecutionResult':
                     handleMobileChatExecutionResult(payload);
                     break;
+                case 'analysisProgress':
+                    handleAnalysisProgress(payload);
+                    break;
                 case 'projectAnalysisUpdated':
                     handleProjectAnalysisUpdated(payload);
                     break;
+            }
+        }
+
+        function handleAnalysisProgress(payload) {
+            if (!payload) return;
+            const { projectId, step, status, detail, error } = payload;
+
+            // Only update if we're viewing this project's analysis
+            if (!currentProject || currentProject.id !== projectId) return;
+
+            if (step === 'error') {
+                // Global error: mark all pending/running steps as failed
+                ['ocr', 'summary', 'save'].forEach(s => {
+                    const el = document.getElementById(`analysisStep_${s}`);
+                    if (el && (el.classList.contains('running') || el.classList.contains('pending'))) {
+                        updateAnalysisTerminalStep(s, 'failed');
+                    }
+                });
+                // Show error message
+                const content = document.getElementById('analysisTerminalContent');
+                if (content && error) {
+                    const errorEl = document.createElement('div');
+                    errorEl.className = 'analysis-terminal-error';
+                    errorEl.textContent = error;
+                    content.appendChild(errorEl);
+                }
+                return;
+            }
+
+            updateAnalysisTerminalStep(step, status, detail);
+        }
+
+        function updateAnalysisTerminalStep(step, status, detail) {
+            const el = document.getElementById(`analysisStep_${step}`);
+            if (!el) return;
+
+            // Update class
+            el.classList.remove('pending', 'running', 'done', 'failed', 'skipped');
+            el.classList.add(status);
+
+            // Update icon
+            const icon = el.querySelector('.step-icon');
+            if (icon) {
+                icon.classList.remove('spinner');
+                switch (status) {
+                    case 'running':
+                        icon.innerHTML = '◐';
+                        icon.classList.add('spinner');
+                        break;
+                    case 'done':
+                        icon.innerHTML = '✓';
+                        break;
+                    case 'failed':
+                        icon.innerHTML = '✗';
+                        break;
+                    case 'skipped':
+                        icon.innerHTML = '–';
+                        break;
+                    default:
+                        icon.innerHTML = '○';
+                }
+            }
+
+            // Add/update detail line
+            if (detail) {
+                let detailEl = el.nextElementSibling;
+                if (!detailEl || !detailEl.classList.contains('step-detail')) {
+                    detailEl = document.createElement('div');
+                    detailEl.className = 'analysis-terminal-step step-detail';
+                    el.parentNode.insertBefore(detailEl, el.nextSibling);
+                }
+                detailEl.textContent = detail;
             }
         }
 
@@ -16822,7 +17054,7 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                 cellPadding: 16,
                 cornerRadius: 16,
                 shadowEnabled: true,
-                imageFit: 'cover',
+                imageFit: 'contain',
             };
             gridPreviewUrl = null;
             isFirstPreview = true;

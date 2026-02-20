@@ -1,6 +1,6 @@
 {
   "name": "@veolab/discoverylab",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "AI-powered app testing & evidence generator - Claude Code Plugin",
   "type": "module",
   "main": "dist/index.js",

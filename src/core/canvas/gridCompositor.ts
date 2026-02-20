@@ -88,7 +88,7 @@ const DEFAULT_CONFIG: GridConfig = {
   shadowEnabled: true,
   shadowBlur: 20,
   outputWidth: 1080,
-  imageFit: 'cover',
+  imageFit: 'contain',
 };
 
 // ============================================================================

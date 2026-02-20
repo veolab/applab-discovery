@@ -242,6 +242,10 @@ dlab.taskhub.testmap.get {
 }
 ```
 
+## Version Display
+
+The footer version is dynamic — it fetches from `/api/info` which reads `package.json` at runtime. **Never hardcode the version in the frontend or backend.** When bumping versions, only update `package.json`.
+
 ## Common Issues
 
 ### Build Errors

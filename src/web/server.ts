@@ -4732,93 +4732,122 @@ async function runClaudeCli(prompt: string): Promise<string> {
   return result.stdout || result.stderr;
 }
 
-// Get configured LLM provider (prioritize API keys over CLI for speed)
+// Helper functions to create individual LLM providers
+function createAnthropicProvider(): LLMProvider | null {
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicKey) return null;
+  const anthropicModel = llmSettings.anthropicModel || 'claude-sonnet-4-20250514';
+  return {
+    name: `anthropic-api (${anthropicModel})`,
+    sendMessage: async (prompt: string) => {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': anthropicKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: anthropicModel,
+          max_tokens: 1024,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+      const data = await response.json() as { content?: Array<{ text?: string }> };
+      return data.content?.[0]?.text || '';
+    }
+  };
+}
+
+function createOpenAIProvider(): LLMProvider | null {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) return null;
+  const openaiModel = llmSettings.openaiModel || 'gpt-5.2';
+  return {
+    name: `openai-api (${openaiModel})`,
+    sendMessage: async (prompt: string) => {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model: openaiModel,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 1024
+        })
+      });
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      return data.choices?.[0]?.message?.content || '';
+    }
+  };
+}
+
+function createClaudeCliProvider(): LLMProvider | null {
+  if (!isClaudeCliAvailable()) return null;
+  return {
+    name: 'claude-cli (local)',
+    sendMessage: runClaudeCli,
+  };
+}
+
+async function createOllamaProvider(): Promise<LLMProvider | null> {
+  try {
+    const ollamaUrl = llmSettings.ollamaUrl || 'http://localhost:11434';
+    const ollamaModel = llmSettings.ollamaModel || 'llama3.2';
+    const response = await fetch(`${ollamaUrl}/api/tags`, { method: 'GET' });
+    if (!response.ok) return null;
+    return {
+      name: `ollama (${ollamaModel})`,
+      sendMessage: async (prompt: string) => {
+        const resp = await fetch(`${ollamaUrl}/api/generate`, {
+          method: 'POST',
+          body: JSON.stringify({
+            model: ollamaModel,
+            prompt,
+            stream: false
+          })
+        });
+        const data = await resp.json() as { response?: string };
+        return data.response || '';
+      }
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Get configured LLM provider (prioritize preferred provider, then fallback to priority order)
 async function getLLMProvider(): Promise<LLMProvider | null> {
   try {
-    // 1. Check for Anthropic API key first (fastest, most reliable)
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    if (anthropicKey) {
-      const anthropicModel = llmSettings.anthropicModel || 'claude-sonnet-4-20250514';
-      return {
-        name: `anthropic-api (${anthropicModel})`,
-        sendMessage: async (prompt: string) => {
-          const response = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': anthropicKey,
-              'anthropic-version': '2023-06-01'
-            },
-            body: JSON.stringify({
-              model: anthropicModel,
-              max_tokens: 1024,
-              messages: [{ role: 'user', content: prompt }]
-            })
-          });
-          const data = await response.json() as { content?: Array<{ text?: string }> };
-          return data.content?.[0]?.text || '';
-        }
-      };
-    }
+    const preferred = llmSettings.preferredProvider;
 
-    // Check for OpenAI API key
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (openaiKey) {
-      const openaiModel = llmSettings.openaiModel || 'gpt-5.2';
-      return {
-        name: `openai-api (${openaiModel})`,
-        sendMessage: async (prompt: string) => {
-          const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${openaiKey}`
-            },
-            body: JSON.stringify({
-              model: openaiModel,
-              messages: [{ role: 'user', content: prompt }],
-              max_tokens: 1024
-            })
-          });
-          const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-          return data.choices?.[0]?.message?.content || '';
-        }
-      };
-    }
-
-    // 3. Claude CLI (local) - default when installed and no API keys configured
-    if (isClaudeCliAvailable()) {
-      return {
-        name: 'claude-cli (local)',
-        sendMessage: runClaudeCli,
-      };
-    }
-
-    // 4. Check for Ollama (local - uses settings or defaults)
-    try {
-      const ollamaUrl = llmSettings.ollamaUrl || 'http://localhost:11434';
-      const ollamaModel = llmSettings.ollamaModel || 'llama3.2';
-      const response = await fetch(`${ollamaUrl}/api/tags`, { method: 'GET' });
-      if (response.ok) {
-        return {
-          name: `ollama (${ollamaModel})`,
-          sendMessage: async (prompt: string) => {
-            const resp = await fetch(`${ollamaUrl}/api/generate`, {
-              method: 'POST',
-              body: JSON.stringify({
-                model: ollamaModel,
-                prompt,
-                stream: false
-              })
-            });
-            const data = await resp.json() as { response?: string };
-            return data.response || '';
-          }
-        };
+    // If a preferred provider is set (not 'auto'), try it first
+    if (preferred && preferred !== 'auto') {
+      let provider: LLMProvider | null = null;
+      switch (preferred) {
+        case 'anthropic': provider = createAnthropicProvider(); break;
+        case 'openai': provider = createOpenAIProvider(); break;
+        case 'claude-cli': provider = createClaudeCliProvider(); break;
+        case 'ollama': provider = await createOllamaProvider(); break;
       }
-    } catch {
-      // Ollama not available
+      if (provider) return provider;
+      // Preferred not available, fall through to auto order
     }
+
+    // Auto priority order: Anthropic → OpenAI → Claude CLI → Ollama
+    const anthropic = createAnthropicProvider();
+    if (anthropic) return anthropic;
+
+    const openai = createOpenAIProvider();
+    if (openai) return openai;
+
+    const claudeCli = createClaudeCliProvider();
+    if (claudeCli) return claudeCli;
+
+    const ollama = await createOllamaProvider();
+    if (ollama) return ollama;
 
     return null;
   } catch {
@@ -4926,14 +4955,21 @@ async function runOCRInBackground(
 ): Promise<void> {
   console.log(`[BackgroundOCR] Starting analysis for project ${projectId} with ${screenshotFiles.length} screenshots`);
 
+  const broadcastProgress = (step: string, status: string, detail?: string, error?: string) => {
+    broadcastToClients({
+      type: 'analysisProgress',
+      data: { projectId, step, status, detail, error }
+    });
+  };
+
   try {
     const { recognizeTextBatch } = await import('../core/analyze/ocr.js');
     const { join } = await import('node:path');
 
-    // Build full paths for screenshots
-    const fullPaths = screenshotFiles.map(f => join(screenshotsDir, f));
+    // Step 1: OCR
+    broadcastProgress('ocr', 'running', `Processing ${screenshotFiles.length} screenshots...`);
 
-    // Run OCR on all screenshots
+    const fullPaths = screenshotFiles.map(f => join(screenshotsDir, f));
     const ocrResult = await recognizeTextBatch(fullPaths, { recognitionLevel: 'accurate' });
 
     let ocrText = '';
@@ -4962,26 +4998,34 @@ async function runOCRInBackground(
     if (ocrResult.success && ocrResult.totalText) {
       ocrText = ocrResult.totalText;
       console.log(`[BackgroundOCR] Extracted ${ocrText.length} characters from ${fullPaths.length} screenshots`);
+      broadcastProgress('ocr', 'done', `Extracted ${ocrText.length} characters`);
 
-      // Try to generate AI summary with LLM
+      // Step 2: AI Summary
+      broadcastProgress('summary', 'running', 'Connecting to LLM provider...');
       const provider = await getLLMProvider();
       if (provider) {
         console.log(`[BackgroundOCR] Generating App Intelligence summary with ${provider.name}...`);
+        broadcastProgress('summary', 'running', `Using ${provider.name}...`);
         aiSummary = await generateAppIntelligenceSummary(provider, ocrText, 'mobile');
         console.log(`[BackgroundOCR] Generated ${aiSummary.length} character summary`);
+        broadcastProgress('summary', 'done', `Generated ${aiSummary.length} character summary`);
       } else {
-        // Fallback to simple word frequency analysis
         const words = ocrText.split(/\s+/).filter(w => w.length > 2);
         const uniqueWords = [...new Set(words.map(w => w.toLowerCase()))];
         const topWords = uniqueWords.slice(0, 20).join(', ');
         aiSummary = `Analyzed ${fullPaths.length} screenshots. Found ${words.length} words.\n\n**Key terms:** ${topWords || 'none detected'}\n\n*Note: Configure ANTHROPIC_API_KEY or OPENAI_API_KEY for enhanced AI analysis.*`;
+        broadcastProgress('summary', 'done', 'No LLM provider — used word frequency fallback');
       }
     } else {
       aiSummary = `Analyzed ${fullPaths.length} screenshots. No text detected via OCR.`;
       console.log('[BackgroundOCR] No text found in screenshots');
+      broadcastProgress('ocr', 'done', 'No text detected');
+      broadcastProgress('summary', 'skipped', 'Skipped — no text to analyze');
     }
 
-    // Update project with analysis results
+    // Step 3: Save
+    broadcastProgress('save', 'running', 'Saving results to database...');
+
     const db = getDatabase();
     await db.update(projects).set({
       status: 'analyzed',
@@ -4992,19 +5036,24 @@ async function runOCRInBackground(
       updatedAt: new Date()
     }).where(eq(projects.id, projectId));
 
+    broadcastProgress('save', 'done', 'Analysis complete');
+
     console.log(`[BackgroundOCR] Analysis complete for project ${projectId}`);
     broadcastToClients({
       type: 'projectAnalysisUpdated',
       data: { projectId, status: 'analyzed' }
     });
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
     console.error(`[BackgroundOCR] Analysis failed for project ${projectId}:`, error);
+
+    broadcastProgress('error', 'failed', undefined, errorMsg);
 
     // Update project status to indicate failure
     const db = getDatabase();
     await db.update(projects).set({
       status: 'analyzed',
-      aiSummary: 'Analysis failed. Try re-analyzing from the project view.',
+      aiSummary: `Analysis failed: ${errorMsg}`,
       ocrEngine: null,
       ocrConfidence: null,
       updatedAt: new Date()
@@ -5823,17 +5872,11 @@ Keep responses concise and action-oriented.`;
 
 // Get available LLM providers status
 app.get('/api/mobile-chat/providers', async (c) => {
-  const providers: Array<{ name: string; available: boolean; configured: boolean }> = [];
-
-  const claudeAvailable = isClaudeCliAvailable();
-  providers.push({
-    name: 'Claude CLI (local)',
-    available: claudeAvailable,
-    configured: claudeAvailable
-  });
+  const providers: Array<{ key: string; name: string; available: boolean; configured: boolean }> = [];
 
   // Check Anthropic API
   providers.push({
+    key: 'anthropic',
     name: 'Anthropic API',
     available: !!process.env.ANTHROPIC_API_KEY,
     configured: !!process.env.ANTHROPIC_API_KEY
@@ -5841,20 +5884,30 @@ app.get('/api/mobile-chat/providers', async (c) => {
 
   // Check OpenAI API
   providers.push({
+    key: 'openai',
     name: 'OpenAI API',
     available: !!process.env.OPENAI_API_KEY,
     configured: !!process.env.OPENAI_API_KEY
   });
 
+  const claudeAvailable = isClaudeCliAvailable();
+  providers.push({
+    key: 'claude-cli',
+    name: 'Claude CLI (local)',
+    available: claudeAvailable,
+    configured: claudeAvailable
+  });
+
   // Check Ollama
   try {
-    const response = await fetch('http://localhost:11434/api/tags', { method: 'GET' });
-    providers.push({ name: 'Ollama', available: response.ok, configured: response.ok });
+    const ollamaUrl = llmSettings.ollamaUrl || 'http://localhost:11434';
+    const response = await fetch(`${ollamaUrl}/api/tags`, { method: 'GET' });
+    providers.push({ key: 'ollama', name: 'Ollama', available: response.ok, configured: response.ok });
   } catch {
-    providers.push({ name: 'Ollama', available: false, configured: false });
+    providers.push({ key: 'ollama', name: 'Ollama', available: false, configured: false });
   }
 
-  return c.json({ providers });
+  return c.json({ providers, preferredProvider: llmSettings.preferredProvider || 'auto' });
 });
 
 // ============================================================================
@@ -5875,9 +5928,23 @@ app.get('/api/setup/status', async (c) => {
 // ============================================================================
 // DATA DIRECTORY INFO
 // ============================================================================
-app.get('/api/info', (c) => {
+app.get('/api/info', async (c) => {
+  let version = '0.0.0';
+  try {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    // Walk up to find package.json (handles dist/ and src/ locations)
+    for (const base of [__dirname, join(__dirname, '..'), join(__dirname, '..', '..')]) {
+      try {
+        const pkg = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8'));
+        if (pkg.version) { version = pkg.version; break; }
+      } catch { /* continue */ }
+    }
+  } catch { /* fallback */ }
   return c.json({
-    version: '0.1.0',
+    version,
     dataDir: DATA_DIR,
   });
 });
@@ -5895,6 +5962,7 @@ let llmSettings: {
   ollamaUrl?: string;
   ollamaModel?: string;
   claudeCliModel?: string;
+  preferredProvider?: 'anthropic' | 'openai' | 'claude-cli' | 'ollama' | 'auto';
 } = {};
 
 // Load LLM settings from file on startup
@@ -5925,7 +5993,8 @@ app.get('/api/settings/llm', async (c) => {
     openaiModel: llmSettings.openaiModel || 'gpt-5.2',
     ollamaUrl: llmSettings.ollamaUrl || 'http://localhost:11434',
     ollamaModel: llmSettings.ollamaModel || 'llama3.2',
-    claudeCliModel: llmSettings.claudeCliModel || process.env.CLAUDE_CLI_MODEL || 'haiku'
+    claudeCliModel: llmSettings.claudeCliModel || process.env.CLAUDE_CLI_MODEL || 'haiku',
+    preferredProvider: llmSettings.preferredProvider || 'auto'
   });
 });
 
@@ -5959,6 +6028,9 @@ app.put('/api/settings/llm', async (c) => {
     }
     if (body.claudeCliModel) {
       llmSettings.claudeCliModel = body.claudeCliModel;
+    }
+    if (body.preferredProvider !== undefined) {
+      llmSettings.preferredProvider = body.preferredProvider;
     }
 
     // Persist to file
@@ -6687,8 +6759,13 @@ app.post('/api/recorder/recordings/:id/create-project', async (c) => {
 function broadcastToClients(message: any): void {
   const data = JSON.stringify(message);
   wsClients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(data);
+    try {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(data);
+      }
+    } catch (err) {
+      console.error('[WebSocket] Failed to send to client, removing:', err);
+      wsClients.delete(client);
     }
   });
 }

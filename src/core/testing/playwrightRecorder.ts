@@ -598,9 +598,11 @@ export class PlaywrightRecorder extends EventEmitter {
     const metadataPath = join(this.session.screenshotsDir, '..', 'session.json');
     writeFileSync(metadataPath, JSON.stringify(this.session, null, 2));
 
-    // Close browser
+    // Close browser (context must close first to finalize video file)
     try {
       await this.context?.close();
+      // Wait for video file to be flushed to disk after context close
+      await new Promise(resolve => setTimeout(resolve, 1000));
       await this.browser?.close();
     } catch {}
 
