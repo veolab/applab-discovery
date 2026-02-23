@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="g" x1="8" y1="4" x2="24" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <!-- Flask body -->
+  <path d="M13 4h6v8l6.5 11a3 3 0 0 1-2.6 4.5H9.1a3 3 0 0 1-2.6-4.5L13 12V4z" fill="url(#g)" opacity="0.9"/>
+  <!-- Flask neck -->
+  <rect x="12" y="2" width="8" height="3" rx="1" fill="#c4b5fd"/>
+  <!-- Liquid line -->
+  <path d="M10.2 20h11.6" stroke="#e0d5ff" stroke-width="0.8" opacity="0.5"/>
+  <!-- Bubbles -->
+  <circle cx="14" cy="22" r="1.2" fill="#e0d5ff" opacity="0.6"/>
+  <circle cx="18" cy="19" r="0.8" fill="#e0d5ff" opacity="0.4"/>
+  <circle cx="16" cy="24" r="0.6" fill="#e0d5ff" opacity="0.5"/>
+</svg>

@@ -2470,8 +2470,13 @@ app.get('/api/grid/backgrounds', async (c) => {
   try {
     const { getAvailableBackgrounds, PRESET_GRADIENTS, PRESET_SOLID_COLORS } = await import('../core/canvas/gridCompositor.js');
 
-    // Get backgrounds from assets folder
-    const backgroundsDir = join(process.cwd(), 'assets', 'backgrounds');
+    // Get backgrounds from assets folder (check multiple locations like /assets/* route)
+    const possibleBgDirs = [
+      join(__dirname, '..', 'assets', 'backgrounds'),
+      join(__dirname, '..', '..', 'assets', 'backgrounds'),
+      join(process.cwd(), 'assets', 'backgrounds'),
+    ];
+    const backgroundsDir = possibleBgDirs.find(d => existsSync(d)) || possibleBgDirs[0];
     const imageBackgrounds = getAvailableBackgrounds(backgroundsDir);
 
     return c.json({
@@ -2520,7 +2525,12 @@ app.post('/api/grid/preview', async (c) => {
 
     // Resolve background image path if using image background
     if (gridConfig.background?.type === 'image' && gridConfig.background?.imageId) {
-      const backgroundsDir = join(process.cwd(), 'assets', 'backgrounds');
+      const possibleBgDirs = [
+        join(__dirname, '..', 'assets', 'backgrounds'),
+        join(__dirname, '..', '..', 'assets', 'backgrounds'),
+        join(process.cwd(), 'assets', 'backgrounds'),
+      ];
+      const backgroundsDir = possibleBgDirs.find(d => existsSync(d)) || possibleBgDirs[0];
       const { getAvailableBackgrounds } = await import('../core/canvas/gridCompositor.js');
       const bgs = getAvailableBackgrounds(backgroundsDir);
       const bg = bgs.find(b => b.id === gridConfig.background.imageId);
@@ -2588,7 +2598,12 @@ app.post('/api/grid/export', async (c) => {
 
     // Resolve background image path
     if (gridConfig.background?.type === 'image' && gridConfig.background?.imageId) {
-      const backgroundsDir = join(process.cwd(), 'assets', 'backgrounds');
+      const possibleBgDirs = [
+        join(__dirname, '..', 'assets', 'backgrounds'),
+        join(__dirname, '..', '..', 'assets', 'backgrounds'),
+        join(process.cwd(), 'assets', 'backgrounds'),
+      ];
+      const backgroundsDir = possibleBgDirs.find(d => existsSync(d)) || possibleBgDirs[0];
       const { getAvailableBackgrounds } = await import('../core/canvas/gridCompositor.js');
       const bgs = getAvailableBackgrounds(backgroundsDir);
       const bg = bgs.find(b => b.id === gridConfig.background.imageId);
