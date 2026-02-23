@@ -6965,7 +6965,7 @@
                                     <option value="auto">Auto (priority order)</option>
                                 </select>
                                 <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
-                                    Auto: Anthropic → OpenAI → Claude CLI → Ollama
+                                    Auto: Anthropic → OpenAI → Ollama → Claude CLI
                                 </div>
                             </div>
                             <div class="setting-item">
@@ -7016,6 +7016,18 @@
                                         <option value="o1-mini">o1-mini ($3/$12)</option>
                                     </optgroup>
                                 </select>
+                            </div>
+                            <div class="setting-item">
+                                <label class="setting-label">Claude CLI Model (Local)</label>
+                                <select class="setting-input" id="claudeCliModel" style="cursor: pointer;">
+                                    <option value="haiku">Haiku 4.5 · Fastest for quick answers (default)</option>
+                                    <option value="sonnet">Sonnet · Better reasoning/coding (higher cost)</option>
+                                    <option value="opus">Opus · Most capable (higher cost)</option>
+                                    <option value="opus[1m]">Opus 1M · Long context beta (requires access)</option>
+                                </select>
+                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
+                                    Haiku 4.5 is the best default for DiscoveryLab: fast, lower cost, and works with image/vision flows.
+                                </div>
                             </div>
                             <div class="setting-item">
                                 <label class="setting-label">Ollama URL (Local - Free)</label>
@@ -8056,6 +8068,44 @@
 
         // LLM Settings
         let currentOllamaModel = 'llama3.2';
+        const LLM_AUTO_PROVIDER_PRIORITY = ['anthropic', 'openai', 'ollama', 'claude-cli'];
+
+        function normalizeOllamaModelName(value) {
+            return String(value || '').trim().toLowerCase();
+        }
+
+        function ollamaModelNamesMatch(installedName, selectedName) {
+            const installed = normalizeOllamaModelName(installedName);
+            const selected = normalizeOllamaModelName(selectedName);
+            if (!installed || !selected) return false;
+            if (installed === selected) return true;
+            return installed.split(':')[0] === selected.split(':')[0];
+        }
+
+        function resolveLLMProviderStatus(data) {
+            const providers = Array.isArray(data?.providers) ? data.providers : [];
+            const preferredProvider = data?.preferredProvider || 'auto';
+            const byKey = new Map(providers.map(p => [p.key, p]));
+            const isReady = (p) => !!(p && p.available && p.configured);
+
+            const resolveAuto = () => {
+                for (const key of LLM_AUTO_PROVIDER_PRIORITY) {
+                    const candidate = byKey.get(key);
+                    if (isReady(candidate)) return candidate;
+                }
+                return null;
+            };
+
+            if (preferredProvider && preferredProvider !== 'auto') {
+                const preferred = byKey.get(preferredProvider);
+                if (isReady(preferred)) {
+                    return { activeProvider: preferred, fallbackFromPreferred: false };
+                }
+                return { activeProvider: resolveAuto(), fallbackFromPreferred: true, preferredProvider };
+            }
+
+            return { activeProvider: resolveAuto(), fallbackFromPreferred: false };
+        }
 
         async function loadLLMSettings() {
             try {
@@ -8067,6 +8117,7 @@
                 document.getElementById('openaiApiKey').value = data.openaiApiKey || '';
                 document.getElementById('openaiModel').value = data.openaiModel || 'gpt-5.2';
                 document.getElementById('ollamaUrl').value = data.ollamaUrl || 'http://localhost:11434';
+                document.getElementById('claudeCliModel').value = data.claudeCliModel || 'haiku';
                 currentOllamaModel = data.ollamaModel || 'llama3.2';
 
                 // Update preferred provider dropdown
@@ -8112,6 +8163,8 @@
             const container = document.getElementById('ollamaModelSelector');
             const badge = document.getElementById('ollamaStatusBadge');
             const refreshIcon = document.getElementById('ollamaRefreshIcon');
+            const ollamaUrlInput = document.getElementById('ollamaUrl');
+            const typedOllamaUrl = (ollamaUrlInput?.value || '').trim();
 
             // Show loading state
             if (refreshIcon) {
@@ -8135,7 +8188,8 @@
             }
 
             try {
-                const response = await fetch('/api/ollama/status');
+                const query = typedOllamaUrl ? `?url=${encodeURIComponent(typedOllamaUrl)}` : '';
+                const response = await fetch(`/api/ollama/status${query}`);
                 const data = await response.json();
 
                 if (refreshIcon) {
@@ -8143,24 +8197,40 @@
                 }
 
                 if (data.running && data.models && data.models.length > 0) {
+                    const selectedModelAvailable = data.selectedModelAvailable !== false;
+                    const selectedModel = data.currentModel || currentOllamaModel || 'llama3.2';
+
                     // Ollama is running and has models
                     if (badge) {
-                        badge.textContent = `${data.models.length} model${data.models.length > 1 ? 's' : ''}`;
-                        badge.style.background = 'rgba(34, 197, 94, 0.15)';
-                        badge.style.color = 'var(--success)';
+                        if (selectedModelAvailable) {
+                            badge.textContent = `${data.models.length} model${data.models.length > 1 ? 's' : ''}`;
+                            badge.style.background = 'rgba(34, 197, 94, 0.15)';
+                            badge.style.color = 'var(--success)';
+                        } else {
+                            badge.textContent = 'Model missing';
+                            badge.style.background = 'rgba(245, 158, 11, 0.15)';
+                            badge.style.color = 'var(--warning)';
+                        }
                     }
                     if (container) {
                         const modelOptions = data.models.map(m => {
                             const sizeMB = Math.round(m.size / 1024 / 1024);
                             const sizeStr = sizeMB > 1024 ? `${(sizeMB / 1024).toFixed(1)}GB` : `${sizeMB}MB`;
-                            const selected = m.name === currentOllamaModel ? 'selected' : '';
+                            const selected = ollamaModelNamesMatch(m.name, selectedModel) ? 'selected' : '';
                             return `<option value="${m.name}" ${selected}>${m.name} (${sizeStr})</option>`;
                         }).join('');
 
                         container.innerHTML = `
-                            <select class="setting-input" id="ollamaModel" style="cursor: pointer;">
-                                ${modelOptions}
-                            </select>
+                            <div style="display: grid; gap: 8px;">
+                                <select class="setting-input" id="ollamaModel" style="cursor: pointer;">
+                                    ${modelOptions}
+                                </select>
+                                ${selectedModelAvailable ? '' : `
+                                    <div style="padding: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 6px; color: var(--warning); font-size: 11px;">
+                                        Selected model "${selectedModel}" is not installed. Choose an available model and save.
+                                    </div>
+                                `}
+                            </div>
                         `;
                     }
                 } else if (data.running) {
@@ -8229,6 +8299,7 @@
                     anthropicModel: document.getElementById('anthropicModel')?.value || 'claude-sonnet-4-20250514',
                     openaiApiKey: document.getElementById('openaiApiKey')?.value || '',
                     openaiModel: document.getElementById('openaiModel')?.value || 'gpt-5.2',
+                    claudeCliModel: document.getElementById('claudeCliModel')?.value || 'haiku',
                     ollamaUrl: document.getElementById('ollamaUrl')?.value || 'http://localhost:11434',
                     ollamaModel: ollamaModel,
                     preferredProvider: document.getElementById('preferredProvider')?.value || 'auto'
@@ -8243,7 +8314,9 @@
                 // Update current model
                 currentOllamaModel = ollamaModel;
 
-                updateLLMStatus();
+                await checkOllamaStatus();
+                await updatePreferredProviderDropdown(settings.preferredProvider || 'auto');
+                await updateLLMStatus();
             } catch (e) {
                 console.error('Failed to save LLM settings:', e);
             }
@@ -8257,17 +8330,21 @@
             try {
                 const response = await fetch('/api/mobile-chat/providers');
                 const data = await response.json();
-
-                const activeProvider = data.providers?.find(p => p.available && p.configured);
+                const resolved = resolveLLMProviderStatus(data);
+                const activeProvider = resolved.activeProvider;
                 if (activeProvider) {
                     statusDot.classList.remove('missing');
                     statusDot.classList.add('installed');
-                    statusText.textContent = `Active: ${activeProvider.name}`;
+                    statusText.textContent = resolved.fallbackFromPreferred
+                        ? `Preferred unavailable, using ${activeProvider.name}`
+                        : `Active: ${activeProvider.name}`;
                     statusText.style.color = 'var(--success)';
                 } else {
                     statusDot.classList.remove('installed');
                     statusDot.classList.add('missing');
-                    statusText.textContent = 'No provider configured';
+                    statusText.textContent = resolved.fallbackFromPreferred
+                        ? 'Preferred provider unavailable'
+                        : 'No provider configured';
                     statusText.style.color = 'var(--error)';
                 }
             } catch (e) {

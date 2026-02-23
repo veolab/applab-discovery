@@ -123,6 +123,28 @@ function runOCRInBackgroundWithWatchdog(
     });
 }
 
+function runProjectAnalysisInBackgroundWithWatchdog(
+  projectId: string,
+  sourceLabel: string
+): void {
+  let finished = false;
+  const watchdog = setTimeout(() => {
+    if (finished) return;
+    void markProjectAnalysisTimeout(projectId, `${sourceLabel} exceeded ${Math.round(BACKGROUND_ANALYSIS_TIMEOUT_MS / 60000)} min`, {
+      silentIfNotAnalyzing: true,
+    });
+  }, BACKGROUND_ANALYSIS_TIMEOUT_MS);
+
+  void analyzeProjectInBackground(projectId)
+    .catch(err => {
+      console.error(`[${sourceLabel}] Project analysis failed for ${projectId}:`, err);
+    })
+    .finally(() => {
+      finished = true;
+      clearTimeout(watchdog);
+    });
+}
+
 // ============================================================================
 // ANDROID SDK DETECTION (like VS Code does it)
 // ============================================================================
@@ -2067,9 +2089,7 @@ app.post('/api/capture/mobile/stop', async (c) => {
       .where(eq(projects.id, projectId));
 
     // Trigger OCR analysis in background
-    analyzeProjectInBackground(projectId).catch(err => {
-      console.error('Background OCR analysis failed:', err);
-    });
+    runProjectAnalysisInBackgroundWithWatchdog(projectId, 'CaptureStop');
 
     return c.json({
       success: true,
@@ -2208,9 +2228,7 @@ app.post('/api/capture/web/stop', async (c) => {
       .where(eq(projects.id, projectId));
 
     // Trigger OCR analysis in background
-    analyzeProjectInBackground(projectId).catch(err => {
-      console.error('Background OCR analysis failed:', err);
-    });
+    runProjectAnalysisInBackgroundWithWatchdog(projectId, 'WebCaptureStop');
 
     return c.json({
       success: true,
@@ -4496,9 +4514,7 @@ app.post('/api/projects/:id/retry-analysis', async (c) => {
         const projectStats = statSync(projectPath);
         if (projectStats.isDirectory()) {
           console.log(`[RetryAnalysis] Restarting directory analysis for ${projectId}`);
-          void analyzeProjectInBackground(projectId).catch(err => {
-            console.error('[RetryAnalysis] Directory analysis failed:', err);
-          });
+          runProjectAnalysisInBackgroundWithWatchdog(projectId, 'RetryAnalysis(directory)');
           return c.json({
             success: true,
             projectId,
@@ -4912,6 +4928,11 @@ const CLAUDE_CLI_TIMEOUT_MS = 90_000;
 const MOBILE_CHAT_LLM_TIMEOUT_MS = 45_000;
 let claudeCliAvailableCache: boolean | null = null;
 
+function getConfiguredClaudeCliModel(): string {
+  const model = llmSettings.claudeCliModel || process.env.CLAUDE_CLI_MODEL || 'haiku';
+  return typeof model === 'string' && model.trim() ? model.trim() : 'haiku';
+}
+
 function isClaudeCliAvailable(): boolean {
   if (claudeCliAvailableCache === true) {
     return claudeCliAvailableCache;
@@ -4998,8 +5019,11 @@ async function runClaudeCliWithArgs(
 }
 
 async function runClaudeCli(prompt: string): Promise<string> {
+  const claudeCliModel = getConfiguredClaudeCliModel();
   const args = [
     '-p',
+    '--model',
+    claudeCliModel,
     '--tools',
     '',
     '--permission-mode',
@@ -5094,6 +5118,7 @@ const CLAUDE_CLI_VISION_TIMEOUT_MS = 120_000;
  * Uses --allowedTools to permit only the Read tool.
  */
 async function runClaudeCliVision(prompt: string, imagePaths: string[]): Promise<string> {
+  const claudeCliModel = getConfiguredClaudeCliModel();
   // Build a prompt that instructs Claude to read and analyze the screenshot files
   const fileList = imagePaths.map(p => `  - ${p}`).join('\n');
   const fullPrompt = `Read and analyze these screenshot image files in order, then follow the instructions below.
@@ -5106,6 +5131,8 @@ ${prompt}`;
 
   const args = [
     '-p',
+    '--model',
+    claudeCliModel,
     '--allowedTools', 'Read',
     '--permission-mode', 'dontAsk',
     '--no-session-persistence',
@@ -5142,25 +5169,162 @@ function createClaudeCliVisionProvider(): ActionDetectorProvider | null {
   };
 }
 
+const OLLAMA_TAGS_TIMEOUT_MS = 3_000;
+const OLLAMA_GENERATE_TIMEOUT_MS = 120_000;
+
+type OllamaModelInfo = {
+  name: string;
+  size?: number;
+  modified_at?: string;
+};
+
+type OllamaStatusSnapshot = {
+  running: boolean;
+  ollamaUrl: string;
+  selectedModel: string;
+  selectedModelAvailable: boolean;
+  models: OllamaModelInfo[];
+  error?: string;
+};
+
+function normalizeOllamaUrl(input: string | undefined | null): string {
+  const raw = typeof input === 'string' ? input.trim() : '';
+  if (!raw) return 'http://localhost:11434';
+  return raw.replace(/\/+$/, '');
+}
+
+function normalizeOllamaModelName(input: string | undefined | null): string {
+  const raw = typeof input === 'string' ? input.trim().toLowerCase() : '';
+  return raw;
+}
+
+function matchesOllamaModel(installedName: string, selectedModel: string): boolean {
+  const installed = normalizeOllamaModelName(installedName);
+  const selected = normalizeOllamaModelName(selectedModel);
+  if (!installed || !selected) return false;
+  if (installed === selected) return true;
+  const installedBase = installed.split(':')[0];
+  const selectedBase = selected.split(':')[0];
+  return installedBase === selectedBase;
+}
+
+async function fetchOllamaStatusSnapshot(
+  requestedUrl?: string,
+  requestedModel?: string,
+  timeoutMs = OLLAMA_TAGS_TIMEOUT_MS
+): Promise<OllamaStatusSnapshot> {
+  const ollamaUrl = normalizeOllamaUrl(requestedUrl || llmSettings.ollamaUrl);
+  const selectedModel = (requestedModel || llmSettings.ollamaModel || 'llama3.2').trim() || 'llama3.2';
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${ollamaUrl}/api/tags`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return {
+        running: false,
+        ollamaUrl,
+        selectedModel,
+        selectedModelAvailable: false,
+        models: [],
+        error: `Ollama not responding (HTTP ${response.status})`,
+      };
+    }
+
+    const data = await response.json().catch(() => ({} as { models?: OllamaModelInfo[] })) as { models?: OllamaModelInfo[] };
+    const models = Array.isArray(data.models) ? data.models : [];
+    const selectedModelAvailable = models.some((m) => typeof m?.name === 'string' && matchesOllamaModel(m.name, selectedModel));
+
+    return {
+      running: true,
+      ollamaUrl,
+      selectedModel,
+      selectedModelAvailable,
+      models,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Ollama not available';
+    const isAbort = error instanceof Error && error.name === 'AbortError';
+    return {
+      running: false,
+      ollamaUrl,
+      selectedModel,
+      selectedModelAvailable: false,
+      models: [],
+      error: isAbort
+        ? `Ollama timeout after ${Math.round(timeoutMs / 1000)}s`
+        : message,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function createOllamaProvider(): Promise<LLMProvider | null> {
   try {
-    const ollamaUrl = llmSettings.ollamaUrl || 'http://localhost:11434';
-    const ollamaModel = llmSettings.ollamaModel || 'llama3.2';
-    const response = await fetch(`${ollamaUrl}/api/tags`, { method: 'GET' });
-    if (!response.ok) return null;
+    const snapshot = await fetchOllamaStatusSnapshot();
+    if (!snapshot.running || snapshot.models.length === 0 || !snapshot.selectedModelAvailable) {
+      return null;
+    }
+
+    const ollamaUrl = snapshot.ollamaUrl;
+    const ollamaModel = snapshot.selectedModel;
+
     return {
       name: `ollama (${ollamaModel})`,
       sendMessage: async (prompt: string) => {
-        const resp = await fetch(`${ollamaUrl}/api/generate`, {
-          method: 'POST',
-          body: JSON.stringify({
-            model: ollamaModel,
-            prompt,
-            stream: false
-          })
-        });
-        const data = await resp.json() as { response?: string };
-        return data.response || '';
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), OLLAMA_GENERATE_TIMEOUT_MS);
+
+        try {
+          const resp = await fetch(`${ollamaUrl}/api/generate`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            signal: controller.signal,
+            body: JSON.stringify({
+              model: ollamaModel,
+              prompt,
+              stream: false
+            })
+          });
+
+          const rawText = await resp.text();
+          let data: { response?: string; error?: string } = {};
+          try {
+            data = rawText ? JSON.parse(rawText) as { response?: string; error?: string } : {};
+          } catch {
+            data = {};
+          }
+
+          if (!resp.ok) {
+            const detail = data.error || rawText || `HTTP ${resp.status}`;
+            throw new Error(`Ollama generate failed (${resp.status}): ${String(detail).slice(0, 300)}`);
+          }
+
+          if (typeof data.error === 'string' && data.error.trim()) {
+            throw new Error(`Ollama generate error: ${data.error}`);
+          }
+
+          if (typeof data.response !== 'string') {
+            throw new Error('Ollama generate returned invalid response payload');
+          }
+
+          return data.response;
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') {
+            throw new Error(`Ollama generate timeout (${Math.round(OLLAMA_GENERATE_TIMEOUT_MS / 1000)}s).`);
+          }
+          throw error;
+        } finally {
+          clearTimeout(timeoutId);
+        }
       }
     };
   } catch {
@@ -5186,18 +5350,18 @@ async function getLLMProvider(): Promise<LLMProvider | null> {
       // Preferred not available, fall through to auto order
     }
 
-    // Auto priority order: Anthropic → OpenAI → Claude CLI → Ollama
+    // Auto priority order: Anthropic → OpenAI → Ollama → Claude CLI
     const anthropic = createAnthropicProvider();
     if (anthropic) return anthropic;
 
     const openai = createOpenAIProvider();
     if (openai) return openai;
 
-    const claudeCli = createClaudeCliProvider();
-    if (claudeCli) return claudeCli;
-
     const ollama = await createOllamaProvider();
     if (ollama) return ollama;
+
+    const claudeCli = createClaudeCliProvider();
+    if (claudeCli) return claudeCli;
 
     return null;
   } catch {
@@ -5701,7 +5865,7 @@ async function runClaudeCliMobileChat(
   platform: MobilePlatform | null,
   history: Array<{ role: string; content: string }>
 ): Promise<{ responseText: string; commands: MobileChatCommand[]; rawOutput: string; model: string }> {
-  const claudeCliModel = llmSettings.claudeCliModel || process.env.CLAUDE_CLI_MODEL || 'haiku';
+  const claudeCliModel = getConfiguredClaudeCliModel();
 
   const mobileChatSchema = {
     type: 'object',
@@ -6287,9 +6451,13 @@ app.get('/api/mobile-chat/providers', async (c) => {
 
   // Check Ollama
   try {
-    const ollamaUrl = llmSettings.ollamaUrl || 'http://localhost:11434';
-    const response = await fetch(`${ollamaUrl}/api/tags`, { method: 'GET' });
-    providers.push({ key: 'ollama', name: 'Ollama', available: response.ok, configured: response.ok });
+    const snapshot = await fetchOllamaStatusSnapshot();
+    providers.push({
+      key: 'ollama',
+      name: 'Ollama',
+      available: snapshot.running,
+      configured: snapshot.running && snapshot.selectedModelAvailable
+    });
   } catch {
     providers.push({ key: 'ollama', name: 'Ollama', available: false, configured: false });
   }
@@ -6506,45 +6674,42 @@ app.put('/api/settings/jira', async (c) => {
 
 // Get Ollama status and available models
 app.get('/api/ollama/status', async (c) => {
-  const ollamaUrl = llmSettings.ollamaUrl || 'http://localhost:11434';
+  const requestedUrl = c.req.query('url');
 
   try {
-    // Check if Ollama is running by fetching tags (list of models)
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
-
-    const response = await fetch(`${ollamaUrl}/api/tags`, {
-      method: 'GET',
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
+    const snapshot = await fetchOllamaStatusSnapshot(requestedUrl, llmSettings.ollamaModel, OLLAMA_TAGS_TIMEOUT_MS);
+    if (!snapshot.running) {
       return c.json({
         running: false,
         models: [],
-        error: 'Ollama not responding'
+        currentModel: snapshot.selectedModel,
+        selectedModelAvailable: false,
+        ollamaUrl: snapshot.ollamaUrl,
+        error: snapshot.error || 'Ollama not responding'
       });
     }
 
-    const data = await response.json() as { models?: Array<{ name: string; size: number; modified_at: string }> };
-    const models = (data.models || []).map(m => ({
+    const models = (snapshot.models || []).map(m => ({
       name: m.name,
-      size: m.size,
-      modified: m.modified_at
+      size: typeof m.size === 'number' ? m.size : 0,
+      modified: m.modified_at || ''
     }));
 
     return c.json({
       running: true,
       models,
-      currentModel: llmSettings.ollamaModel || 'llama3.2',
-      ollamaUrl
+      currentModel: snapshot.selectedModel,
+      selectedModelAvailable: snapshot.selectedModelAvailable,
+      ollamaUrl: snapshot.ollamaUrl
     });
   } catch (error) {
     // Ollama not running or not installed
     return c.json({
       running: false,
       models: [],
+      currentModel: llmSettings.ollamaModel || 'llama3.2',
+      selectedModelAvailable: false,
+      ollamaUrl: normalizeOllamaUrl(requestedUrl || llmSettings.ollamaUrl),
       error: error instanceof Error ? error.message : 'Ollama not available'
     });
   }
