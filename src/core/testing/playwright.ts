@@ -7,9 +7,11 @@ import { exec, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import { createRequire } from 'module';
 import { PROJECTS_DIR } from '../../db/index.js';
 
 const execAsync = promisify(exec);
+const requireFromHere = createRequire(import.meta.url);
 
 // ============================================================================
 // TYPES
@@ -79,22 +81,23 @@ export interface BrowserDevice {
 // ============================================================================
 // PLAYWRIGHT CLI HELPERS
 // ============================================================================
-export async function isPlaywrightInstalled(): Promise<boolean> {
+function resolveInstalledPlaywrightVersion(): string | null {
   try {
-    await execAsync('npx playwright --version');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function getPlaywrightVersion(): Promise<string | null> {
-  try {
-    const { stdout } = await execAsync('npx playwright --version');
-    return stdout.trim();
+    const pkgPath = requireFromHere.resolve('playwright/package.json');
+    const raw = fs.readFileSync(pkgPath, 'utf-8');
+    const pkg = JSON.parse(raw) as { version?: string };
+    return typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version.trim() : 'installed';
   } catch {
     return null;
   }
+}
+
+export async function isPlaywrightInstalled(): Promise<boolean> {
+  return !!resolveInstalledPlaywrightVersion();
+}
+
+export async function getPlaywrightVersion(): Promise<string | null> {
+  return resolveInstalledPlaywrightVersion();
 }
 
 export async function installPlaywrightBrowsers(): Promise<{ success: boolean; error?: string }> {

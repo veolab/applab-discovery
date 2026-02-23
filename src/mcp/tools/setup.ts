@@ -5,11 +5,13 @@
 
 import { z } from 'zod';
 import { execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { platform, homedir } from 'node:os';
 import type { MCPTool } from '../server.js';
 import { createTextResult, createJsonResult } from '../server.js';
 import { DATA_DIR, DB_PATH } from '../../db/index.js';
+const requireFromHere = createRequire(import.meta.url);
 
 // ============================================================================
 // DEPENDENCY DEFINITIONS
@@ -42,7 +44,7 @@ const dependencies: Dependency[] = [
   },
   {
     name: 'Playwright',
-    command: 'npx playwright --version',
+    command: '', // Special handling - avoid npx auto-install false positives
     versionPattern: /(\d+\.\d+\.\d+)/,
     required: false,
     description: 'Web app testing and browser automation',
@@ -74,6 +76,10 @@ function checkDependency(dep: Dependency): { installed: boolean; version: string
   if (dep.name === 'Maestro CLI') {
     return checkMaestro(dep);
   }
+  // Special handling for Playwright - check module resolvable by DiscoveryLab, not npx auto-download
+  if (dep.name === 'Playwright') {
+    return checkPlaywright(dep);
+  }
 
   try {
     const output = execSync(dep.command, { encoding: 'utf-8', timeout: 5000 }).trim();
@@ -87,6 +93,24 @@ function checkDependency(dep: Dependency): { installed: boolean; version: string
       installed: false,
       version: null,
       error: error instanceof Error ? error.message : 'Command failed',
+    };
+  }
+}
+
+function checkPlaywright(dep: Dependency): { installed: boolean; version: string | null; error?: string } {
+  try {
+    const pkgPath = requireFromHere.resolve('playwright/package.json');
+    const raw = readFileSync(pkgPath, 'utf-8');
+    const pkg = JSON.parse(raw) as { version?: string };
+    return {
+      installed: true,
+      version: typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version.trim() : 'installed',
+    };
+  } catch (error) {
+    return {
+      installed: false,
+      version: null,
+      error: error instanceof Error ? error.message : 'Playwright package not found',
     };
   }
 }

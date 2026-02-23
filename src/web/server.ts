@@ -2345,10 +2345,14 @@ async function analyzeProjectInBackground(projectId: string) {
         const provider = await getLLMProvider();
         if (provider) {
           console.log(`[BackgroundOCR] Generating web App Intelligence summary with ${provider.name}...`);
-          aiSummary = await generateAppIntelligenceSummary(provider, allOcrText, 'web');
+          const summaryResult = await generateAppIntelligenceSummary(provider, allOcrText, 'web');
+          aiSummary = summaryResult.summary;
+          if (!summaryResult.ok) {
+            console.warn(`[BackgroundOCR] Web summary generation failed via ${summaryResult.providerName}: ${summaryResult.error || 'unknown error'}`);
+          }
         }
       } catch (summaryError) {
-        console.warn('[BackgroundOCR] Web summary generation failed:', summaryError);
+        console.warn('[BackgroundOCR] Web summary generation failed (unexpected wrapper error):', summaryError);
       }
     }
 
@@ -3314,6 +3318,7 @@ app.get('/api/testing/status', async (c) => {
     const { execSync } = await import('node:child_process');
     const { existsSync } = await import('node:fs');
     const { homedir } = await import('node:os');
+    const { isPlaywrightInstalled } = await import('../core/testing/playwright.js');
 
     let maestroInstalled = false;
     let playwrightInstalled = false;
@@ -3332,10 +3337,7 @@ app.get('/api/testing/status', async (c) => {
     } catch {}
 
     // Check for Playwright
-    try {
-      execSync('npx playwright --version', { stdio: 'pipe', timeout: 5000 });
-      playwrightInstalled = true;
-    } catch {}
+    playwrightInstalled = await isPlaywrightInstalled().catch(() => false);
 
     // Check for xcrun (iOS Simulator support)
     try {
@@ -5055,7 +5057,7 @@ async function runClaudeCli(prompt: string): Promise<string> {
 function createAnthropicProvider(): LLMProvider | null {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!anthropicKey) return null;
-  const anthropicModel = llmSettings.anthropicModel || 'claude-sonnet-4-20250514';
+  const anthropicModel = llmSettings.anthropicModel || 'claude-sonnet-4-6';
   return {
     name: `anthropic-api (${anthropicModel})`,
     sendMessage: async (prompt: string) => {
@@ -5375,6 +5377,16 @@ async function getLLMProvider(): Promise<LLMProvider | null> {
 
 type AppIntelligenceContext = 'mobile' | 'web';
 
+function formatErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 function buildAppIntelligencePrompt(context: AppIntelligenceContext, ocrText: string): string {
   const truncatedText = ocrText.slice(0, 8000);
 
@@ -5449,15 +5461,37 @@ async function generateAppIntelligenceSummary(
   provider: LLMProvider,
   ocrText: string,
   context: AppIntelligenceContext
-): Promise<string> {
+): Promise<{ summary: string; ok: boolean; providerName: string; error?: string }> {
   const prompt = buildAppIntelligencePrompt(context, ocrText);
+  const providerName = provider?.name || 'unknown-provider';
 
   try {
     const response = await provider.sendMessage(prompt);
-    return response || 'Unable to generate summary';
+    const normalized = typeof response === 'string' ? response.trim() : '';
+    if (!normalized) {
+      const errorMessage = 'Provider returned empty response';
+      console.error(`[AppIntelligence] ${context} summary generation failed via ${providerName}: ${errorMessage}`);
+      return {
+        summary: `Summary generation failed (${providerName})`,
+        ok: false,
+        providerName,
+        error: errorMessage,
+      };
+    }
+    return {
+      summary: normalized,
+      ok: true,
+      providerName,
+    };
   } catch (error) {
-    console.error('[AppIntelligence] LLM summary generation failed:', error);
-    return 'Summary generation failed';
+    const errorMessage = formatErrorMessage(error);
+    console.error(`[AppIntelligence] ${context} summary generation failed via ${providerName}: ${errorMessage}`, error);
+    return {
+      summary: `Summary generation failed (${providerName})`,
+      ok: false,
+      providerName,
+      error: errorMessage,
+    };
   }
 }
 
@@ -5520,9 +5554,18 @@ async function runOCRInBackground(
       if (provider) {
         console.log(`[BackgroundOCR] Generating App Intelligence summary with ${provider.name}...`);
         broadcastProgress('summary', 'running', `Using ${provider.name}...`);
-        aiSummary = await generateAppIntelligenceSummary(provider, ocrText, 'mobile');
-        console.log(`[BackgroundOCR] Generated ${aiSummary.length} character summary`);
-        broadcastProgress('summary', 'done', `Generated ${aiSummary.length} character summary`);
+        const summaryResult = await generateAppIntelligenceSummary(provider, ocrText, 'mobile');
+        aiSummary = summaryResult.summary;
+        if (summaryResult.ok) {
+          console.log(`[BackgroundOCR] Generated ${aiSummary.length} character summary`);
+          broadcastProgress('summary', 'done', `Generated ${aiSummary.length} character summary`);
+        } else {
+          const detail = summaryResult.error
+            ? `${summaryResult.providerName}: ${summaryResult.error}`
+            : `Provider failed: ${summaryResult.providerName}`;
+          console.warn(`[BackgroundOCR] App Intelligence summary failed via ${summaryResult.providerName}: ${summaryResult.error || 'unknown error'}`);
+          broadcastProgress('summary', 'failed', 'Summary generation failed', detail);
+        }
       } else {
         const words = ocrText.split(/\s+/).filter(w => w.length > 2);
         const uniqueWords = [...new Set(words.map(w => w.toLowerCase()))];
@@ -6544,7 +6587,7 @@ app.get('/api/settings/llm', async (c) => {
   // Return masked API keys for display
   return c.json({
     anthropicApiKey: llmSettings.anthropicApiKey ? '••••••••' + llmSettings.anthropicApiKey.slice(-4) : '',
-    anthropicModel: llmSettings.anthropicModel || 'claude-sonnet-4-20250514',
+    anthropicModel: llmSettings.anthropicModel || 'claude-sonnet-4-6',
     openaiApiKey: llmSettings.openaiApiKey ? '••••••••' + llmSettings.openaiApiKey.slice(-4) : '',
     openaiModel: llmSettings.openaiModel || 'gpt-5.2',
     ollamaUrl: llmSettings.ollamaUrl || 'http://localhost:11434',
