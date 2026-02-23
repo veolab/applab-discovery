@@ -1936,14 +1936,15 @@
             opacity: 0.9;
             margin-bottom: 20px;
             display: flex;
+            flex-direction: column;
             align-items: center;
-            justify-content: center;
-            gap: 6px;
+            text-align: center;
+            gap: 4px;
         }
 
         .confirm-dialog-warning::before {
             content: '⚠';
-            font-size: 11px;
+            font-size: 14px;
         }
 
         .confirm-dialog-warning:empty {
@@ -6916,6 +6917,29 @@
                                     Uses Apple Vision OCR to extract text from screenshots (local, no API key needed)
                                 </div>
                             </div>
+                            <div class="setting-item">
+                                <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" id="preferIosNativeSimulatorInteraction" checked style="width: 16px; height: 16px; accent-color: var(--accent);">
+                                    <span class="setting-label" style="margin: 0;">Prefer Simulator interaction (iOS native)</span>
+                                </label>
+                                <div style="font-size: 11px; color: var(--text-muted); margin-left: 24px; margin-top: 4px;">
+                                    When Maestro native recording is active on iOS, prioritize touching the real Simulator for best performance and script fidelity.
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" id="allowMirroredTapsOnlyWithIdb" checked style="width: 16px; height: 16px; accent-color: var(--accent);">
+                                    <span class="setting-label" style="margin: 0;">Allow mirrored taps only when iDB is available</span>
+                                </label>
+                                <div id="mirroredTapIdbStatus" style="font-size: 11px; color: var(--text-muted); margin-left: 24px; margin-top: 4px;">
+                                    Checking iDB status...
+                                </div>
+                                <div style="margin-left: 24px; margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+                                    <button type="button" class="btn btn-secondary" id="openIdbInstallHelpBtn" onclick="openIdbInstallInstructions()" style="padding: 6px 10px; font-size: 11px;">
+                                        Install iDB / Docs
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -7723,6 +7747,9 @@
 
         navItems.forEach(nav => {
             nav.addEventListener('click', () => {
+                if (currentView === 'home') {
+                    maybeRequestNotificationPermissionOnboarding('home-nav');
+                }
                 const viewId = nav.dataset.view;
                 if (viewId) switchView(viewId);
             });
@@ -7731,6 +7758,9 @@
         // Quick actions
         document.querySelectorAll('.quick-action').forEach(action => {
             action.addEventListener('click', () => {
+                if (currentView === 'home') {
+                    maybeRequestNotificationPermissionOnboarding('home-quick-action');
+                }
                 const actionType = action.dataset.action;
                 if (actionType === 'testing') switchView('testing');
                 if (actionType === 'capture') switchView('capture');
@@ -7783,6 +7813,10 @@
                 return;
             }
 
+            if (currentView === 'home' && ['t', 'c', '1', '2', '3', '4', '5', 'u'].includes(key)) {
+                maybeRequestNotificationPermissionOnboarding('home-keyboard');
+            }
+
             // Navigation (only without modifier keys)
             if (key === 'h') switchView('home');
             if (key === 't') switchView('testing');
@@ -7805,6 +7839,9 @@
         // Shortcut items are clickable
         document.querySelectorAll('.shortcut-item').forEach(item => {
             item.addEventListener('click', () => {
+                if (currentView === 'home') {
+                    maybeRequestNotificationPermissionOnboarding('home-shortcut');
+                }
                 const action = item.dataset.action;
                 closeAllModals();
                 if (action === 'home') switchView('home');
@@ -7879,7 +7916,9 @@
             viewportResolution: '1080',
             exportLocation: 'default',
             customExportPath: '',
-            autoAnalyzeMobile: true
+            autoAnalyzeMobile: true,
+            preferIosNativeSimulatorInteraction: true,
+            allowMirroredTapsOnlyWithIdb: true
         };
 
         const CAPTURE_RESOLUTION_DIMENSIONS = {
@@ -7944,6 +7983,8 @@
             const exportLocationSelect = document.getElementById('exportLocation');
             const customPathInput = document.getElementById('customExportPath');
             const autoAnalyzeCheckbox = document.getElementById('autoAnalyzeMobile');
+            const preferIosNativeSimulatorInteraction = document.getElementById('preferIosNativeSimulatorInteraction');
+            const allowMirroredTapsOnlyWithIdb = document.getElementById('allowMirroredTapsOnlyWithIdb');
 
             const captureResolution = resolutionSelect?.value || '1080';
             const viewportMode = viewportModeSelect?.value === 'fixed' ? 'fixed' : 'auto';
@@ -7957,7 +7998,9 @@
                 viewportResolution,
                 exportLocation: exportLocationSelect?.value || 'default',
                 customExportPath: customPathInput?.value || '',
-                autoAnalyzeMobile: autoAnalyzeCheckbox?.checked !== false
+                autoAnalyzeMobile: autoAnalyzeCheckbox?.checked !== false,
+                preferIosNativeSimulatorInteraction: preferIosNativeSimulatorInteraction?.checked !== false,
+                allowMirroredTapsOnlyWithIdb: allowMirroredTapsOnlyWithIdb?.checked !== false
             };
         }
 
@@ -7979,6 +8022,8 @@
             const customPathInput = document.getElementById('customExportPath');
             const customPathContainer = document.getElementById('customExportPathContainer');
             const autoAnalyzeCheckbox = document.getElementById('autoAnalyzeMobile');
+            const preferIosNativeSimulatorInteraction = document.getElementById('preferIosNativeSimulatorInteraction');
+            const allowMirroredTapsOnlyWithIdb = document.getElementById('allowMirroredTapsOnlyWithIdb');
 
             if (resolutionSelect) resolutionSelect.value = settings.captureResolution;
             if (viewportModeSelect) viewportModeSelect.value = settings.viewportMode;
@@ -7986,6 +8031,9 @@
             if (exportLocationSelect) exportLocationSelect.value = settings.exportLocation;
             if (customPathInput) customPathInput.value = settings.customExportPath;
             if (autoAnalyzeCheckbox) autoAnalyzeCheckbox.checked = settings.autoAnalyzeMobile !== false;
+            if (preferIosNativeSimulatorInteraction) preferIosNativeSimulatorInteraction.checked = settings.preferIosNativeSimulatorInteraction !== false;
+            if (allowMirroredTapsOnlyWithIdb) allowMirroredTapsOnlyWithIdb.checked = settings.allowMirroredTapsOnlyWithIdb !== false;
+            updateMirroredTapIdbStatusUI();
 
             // Show/hide viewport resolution input
             if (viewportResolutionContainer) {
@@ -8259,6 +8307,12 @@
         document.getElementById('autoAnalyzeMobile')?.addEventListener('change', () => {
             persistCaptureSettingsFromForm({ silent: true });
         });
+        document.getElementById('preferIosNativeSimulatorInteraction')?.addEventListener('change', () => {
+            persistCaptureSettingsFromForm({ silent: true });
+        });
+        document.getElementById('allowMirroredTapsOnlyWithIdb')?.addEventListener('change', () => {
+            persistCaptureSettingsFromForm({ silent: true });
+        });
         document.getElementById('customExportPath')?.addEventListener('change', () => {
             persistCaptureSettingsFromForm({ silent: true });
         });
@@ -8296,6 +8350,150 @@
             toast.textContent = message;
             container.appendChild(toast);
             setTimeout(() => toast.remove(), duration);
+        }
+
+        const NOTIFICATION_ONBOARDING_PROMPT_KEY = 'discoverylab_notification_onboarding_prompted_v1';
+        let lastNotificationReminderAt = 0;
+        const notifiedProjectCompletionIds = new Set();
+        const mobileToolCapabilities = {
+            idbInstalled: null
+        };
+
+        function supportsBrowserNotifications() {
+            return typeof window !== 'undefined' && 'Notification' in window;
+        }
+
+        function getBrowserNotificationPermission() {
+            if (!supportsBrowserNotifications()) return 'unsupported';
+            return Notification.permission || 'default';
+        }
+
+        async function requestBrowserNotificationPermission(source = 'unknown') {
+            if (!supportsBrowserNotifications()) return 'unsupported';
+            if (Notification.permission !== 'default') return Notification.permission;
+
+            try {
+                const permission = await Notification.requestPermission();
+                try {
+                    localStorage.setItem(NOTIFICATION_ONBOARDING_PROMPT_KEY, '1');
+                } catch {}
+
+                if (permission === 'granted') {
+                    showToast('Notificações do navegador ativadas.', 'success', 5000);
+                } else if (permission === 'denied') {
+                    showToast('Notificações bloqueadas no navegador. Você pode habilitar depois nas configurações do browser.', 'warning', 7000);
+                } else {
+                    showToast('Permissão de notificações não concedida.', 'info', 4000);
+                }
+
+                console.log(`[Notifications] Permission (${source}): ${permission}`);
+                return permission;
+            } catch (error) {
+                console.warn('[Notifications] Permission request failed:', error);
+                return getBrowserNotificationPermission();
+            }
+        }
+
+        function maybeRequestNotificationPermissionOnboarding(source = 'onboarding') {
+            if (!supportsBrowserNotifications()) return;
+            if (currentView !== 'home') return;
+            if (Notification.permission !== 'default') return;
+
+            let prompted = false;
+            try {
+                prompted = localStorage.getItem(NOTIFICATION_ONBOARDING_PROMPT_KEY) === '1';
+            } catch {}
+            if (prompted) return;
+
+            try {
+                localStorage.setItem(NOTIFICATION_ONBOARDING_PROMPT_KEY, '1');
+            } catch {}
+            void requestBrowserNotificationPermission(source);
+        }
+
+        function checkNotificationPermissionForProjectCompletion(options = {}) {
+            const { remindIfMissing = false } = options;
+            const permission = getBrowserNotificationPermission();
+
+            if (!remindIfMissing) return permission;
+
+            if (permission !== 'granted') {
+                const now = Date.now();
+                if (now - lastNotificationReminderAt > 15000) {
+                    lastNotificationReminderAt = now;
+                    showToast('Ative notificações para ser avisado quando a análise do projeto terminar.', 'info', 7000);
+                }
+            }
+
+            return permission;
+        }
+
+        function notifyProjectAnalysisCompleteInBrowser(projectId, projectName) {
+            if (!projectId) return;
+            if (notifiedProjectCompletionIds.has(projectId)) return;
+            if (getBrowserNotificationPermission() !== 'granted') return;
+
+            notifiedProjectCompletionIds.add(projectId);
+
+            try {
+                const notification = new Notification('Projeto pronto no DiscoveryLab', {
+                    body: `${projectName || 'Seu projeto'} terminou o processamento/análise.`,
+                    tag: `project-complete-${projectId}`
+                });
+
+                notification.onclick = () => {
+                    try { window.focus(); } catch {}
+                    switchView('projects');
+                    notification.close?.();
+                };
+            } catch (error) {
+                console.warn('[Notifications] Failed to show browser notification:', error);
+            }
+        }
+
+        function updateMirroredTapIdbStatusUI() {
+            const statusEl = document.getElementById('mirroredTapIdbStatus');
+            const helpBtn = document.getElementById('openIdbInstallHelpBtn');
+            if (!statusEl) return;
+
+            if (mobileToolCapabilities.idbInstalled === true) {
+                statusEl.textContent = 'iDB status: installed (mirrored taps on iOS native can be used).';
+                statusEl.style.color = 'var(--text-muted)';
+                if (helpBtn) helpBtn.textContent = 'iDB Docs';
+            } else if (mobileToolCapabilities.idbInstalled === false) {
+                statusEl.textContent = 'iDB status: not installed (mirrored taps on iOS native will be blocked and you should use the real Simulator).';
+                statusEl.style.color = 'var(--warning)';
+                if (helpBtn) helpBtn.textContent = 'Install iDB / Docs';
+            } else {
+                statusEl.textContent = 'Checking iDB status...';
+                statusEl.style.color = 'var(--text-muted)';
+                if (helpBtn) helpBtn.textContent = 'iDB Setup';
+            }
+        }
+
+        function cacheSetupCapabilities(data) {
+            if (typeof data?.idbInstalled === 'boolean') {
+                mobileToolCapabilities.idbInstalled = data.idbInstalled;
+                updateMirroredTapIdbStatusUI();
+            }
+        }
+
+        function openIdbInstallInstructions() {
+            const docsUrl = 'https://fbidb.io/docs/installation';
+            try {
+                const opened = window.open(docsUrl, '_blank', 'noopener,noreferrer');
+                if (opened) {
+                    showToast('iDB installation docs opened in a new tab.', 'info', 5000);
+                    return;
+                }
+            } catch {}
+
+            // Fallback if popup blocked
+            navigator.clipboard?.writeText(docsUrl).then(() => {
+                showToast('Popup blocked. iDB docs URL copied to clipboard.', 'warning', 6000);
+            }).catch(() => {
+                showToast(`Open iDB docs: ${docsUrl}`, 'warning', 7000);
+            });
         }
 
         /**
@@ -8535,7 +8733,7 @@
             const placeholder = document.getElementById('inlineDevicePlaceholder');
 
             if (img && path) {
-                img.src = path.startsWith('/') ? path : `/screenshots/${path}`;
+                img.src = `/api/file?path=${encodeURIComponent(path)}`;
                 img.style.display = 'block';
                 if (placeholder) placeholder.style.display = 'none';
             }
@@ -8769,6 +8967,7 @@
                 if (mobileRecordingState.timerInterval) {
                     clearInterval(mobileRecordingState.timerInterval);
                 }
+                stopMobileRecordingStatusPolling();
 
                 // Reset recording state without stopping the live stream
                 mobileRecordingState = {
@@ -8780,6 +8979,7 @@
                     startTime: null,
                     timerInterval: null,
                     captureMode: 'manual',
+                    captureModeReason: null,
                     deviceWidth: mobileRecordingState.deviceWidth || 390,
                     deviceHeight: mobileRecordingState.deviceHeight || 844
                 };
@@ -8997,7 +9197,8 @@
                         deviceId: mobileChatState.deviceId || mobileRecordingState.deviceId,
                         deviceName,
                         startTime,
-                        captureMode: 'chat'
+                        captureMode: 'chat',
+                        captureModeReason: null
                     };
 
                     const startDiv = document.getElementById('mobileRecordingStart');
@@ -9007,11 +9208,7 @@
                     if (activeDiv) activeDiv.style.display = 'block';
                     if (completeDiv) completeDiv.style.display = 'none';
 
-                    const hintEl = document.getElementById('mobileRecordingHint');
-                    if (hintEl) {
-                        hintEl.textContent = 'Modo chat: Maestro gravando comandos gerados pelo agente.';
-                        hintEl.style.color = 'var(--text-muted)';
-                    }
+                    applyMobileRecordingCaptureModeUI('chat', null);
 
                     const timerEl = document.getElementById('mobileRecordingTimer');
                     if (timerEl) {
@@ -10150,6 +10347,7 @@
         // PROJECTS
         // =====================================================================
         let projectStatusPollingInterval = null;
+        let pendingProjectFocusId = null;
 
         function stopProjectStatusPolling() {
             if (projectStatusPollingInterval) {
@@ -10179,6 +10377,7 @@
 
                 await Promise.all(activeProjects.map(async (project) => {
                     try {
+                        const wasAnalyzing = isProjectAnalyzing(project.status);
                         const response = await fetch(`/api/projects/${project.id}/analysis-status`);
                         const data = await response.json();
 
@@ -10189,6 +10388,10 @@
 
                         if (data && !data.isAnalyzing) {
                             const refreshed = await fetchProjectById(project.id);
+                            const finalStatus = refreshed?.status || data.status || project.status;
+                            if (wasAnalyzing && !isProjectAnalyzing(finalStatus)) {
+                                notifyProjectAnalysisCompleteInBrowser(project.id, refreshed?.name || project.name);
+                            }
                             if (refreshed) {
                                 stateChanged = true;
                             }
@@ -10209,6 +10412,9 @@
                 const data = await apiCall('/projects');
                 ensureRecorderWebSocket();
                 projects = (data.projects || []).map(normalizeProjectData);
+                if (projects.some(p => isProjectAnalyzing(p.status))) {
+                    checkNotificationPermissionForProjectCompletion({ remindIfMissing: true });
+                }
                 renderProjects();
                 startProjectStatusPolling();
             } catch {
@@ -10338,6 +10544,16 @@
                 card.addEventListener('mouseup', () => clearTimeout(holdTimer));
                 card.addEventListener('mouseleave', () => clearTimeout(holdTimer));
             });
+
+            if (pendingProjectFocusId) {
+                const targetCard = container.querySelector(`.project-card[data-id="${pendingProjectFocusId}"]`);
+                if (targetCard) {
+                    targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    targetCard.classList.add('wiggle');
+                    setTimeout(() => targetCard.classList.remove('wiggle'), 700);
+                    pendingProjectFocusId = null;
+                }
+            }
         }
 
         function getProjectThumb(project) {
@@ -10555,7 +10771,9 @@
             const hasActions = currentProject.actions && currentProject.actions.length > 0;
             const hasVideo = currentProject.videoPath && ['mp4', 'mov', 'webm'].includes(currentProject.videoPath.toLowerCase().split('.').pop());
             const videoUrl = hasVideo ? `/api/file?path=${encodeURIComponent(currentProject.videoPath)}` : '';
-            const isAnalyzingStatus = isProjectAnalyzing(currentProject.status);
+            const projectStatusValue = (currentProject.status || '').toLowerCase();
+            const isAnalyzingStatus = isProjectAnalyzing(projectStatusValue);
+            const canRetryProjectAnalysis = projectStatusValue === 'timeout' || projectStatusValue === 'failed';
 
             container.innerHTML = `
                 <div class="analysis-grid">
@@ -10570,6 +10788,14 @@
                         </div>
                         ${!hasAnalysis && !hasFrames ? `
                             <button class="btn btn-primary" style="margin-top: 12px;" onclick="analyzeProject()">Run Analysis</button>
+                        ` : ''}
+                        ${canRetryProjectAnalysis ? `
+                            <div style="margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25);">
+                                <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">
+                                    ${projectStatusValue === 'timeout' ? 'App Intelligence timed out for this project.' : 'App Intelligence failed for this project.'}
+                                </div>
+                                <button class="btn btn-primary btn-small" onclick="retryProjectAnalysis()" id="retryProjectAnalysisBtn">Retry Analysis</button>
+                            </div>
                         ` : ''}
                         <div class="project-integration-row">
                             <div class="project-integration-label">Jira MCP</div>
@@ -12014,6 +12240,56 @@
             }
         }
 
+        let retryProjectAnalysisPending = false;
+
+        async function retryProjectAnalysis() {
+            if (!currentProject) return;
+            if (retryProjectAnalysisPending) return;
+
+            if (isProjectAnalyzing(currentProject.status)) {
+                showToast('Analysis is already running for this project', 'info');
+                return;
+            }
+
+            const button = document.getElementById('retryProjectAnalysisBtn');
+            if (button) {
+                button.disabled = true;
+                button.textContent = 'Retrying...';
+            }
+
+            retryProjectAnalysisPending = true;
+            setStatus('Restarting analysis...');
+
+            try {
+                const data = await apiCall(`/projects/${currentProject.id}/retry-analysis`, { method: 'POST' });
+
+                if (data?.error) {
+                    showToast(data.error, 'error');
+                    setStatus('Retry failed', 'error');
+                    return;
+                }
+
+                updateProjectStatusInState(currentProject.id, data?.status || 'analyzing');
+                if (currentView === 'projects') {
+                    renderProjects();
+                }
+
+                showToast(data?.message || 'App Intelligence analysis restarted', 'success');
+                await updateAnalysisTab();
+            } catch (error) {
+                console.error('Retry analysis error:', error);
+                showToast('Failed to restart analysis', 'error');
+                setStatus('Retry failed', 'error');
+            } finally {
+                retryProjectAnalysisPending = false;
+                const latestBtn = document.getElementById('retryProjectAnalysisBtn');
+                if (latestBtn) {
+                    latestBtn.disabled = false;
+                    latestBtn.textContent = 'Retry Analysis';
+                }
+            }
+        }
+
         // =====================================================================
         // TESTING
         // =====================================================================
@@ -12895,6 +13171,7 @@
 
             // Auto-check dependencies on first load — open Settings if critical deps missing
             fetch('/api/setup/status').then(r => r.json()).then(data => {
+                cacheSetupCapabilities(data);
                 if (data.summary && data.summary.requiredMissing && data.summary.requiredMissing.length > 0) {
                     openSettings();
                     showToast('Some required dependencies are missing. Check Settings.', 'warning');
@@ -12929,13 +13206,86 @@
             startTime: null,
             timerInterval: null,
             captureMode: 'manual',
+            captureModeReason: null,
             deviceWidth: 390,   // iPhone default
             deviceHeight: 844   // iPhone default
         };
+        let mobileRecordingStatusPoll = null;
+        let mobileRecordingFallbackNotifiedSessionId = null;
+
+        function applyMobileRecordingCaptureModeUI(mode, reason) {
+            const hintEl = document.getElementById('mobileRecordingHint');
+            if (hintEl) {
+                if (mode === 'manual') {
+                    hintEl.textContent = 'Modo manual: cliques diretos no emulador/Simulator nao entram no YAML. Use a tela espelhada para registrar taps.';
+                    hintEl.style.color = 'var(--warning)';
+                    hintEl.title = reason || '';
+                } else if (mode === 'chat') {
+                    hintEl.textContent = 'Modo chat: Maestro gravando comandos gerados pelo agente.';
+                    hintEl.style.color = 'var(--text-muted)';
+                    hintEl.title = '';
+                } else {
+                    hintEl.textContent = 'Modo automatico: Maestro capturando toques do dispositivo.';
+                    hintEl.style.color = 'var(--text-muted)';
+                    hintEl.title = '';
+                }
+            }
+
+            const liveBadgeText = document.getElementById('mobileLiveBadgeText');
+            if (liveBadgeText && liveStreamState?.active) {
+                liveBadgeText.textContent = mode === 'manual' ? 'MANUAL' : 'AO VIVO';
+            }
+        }
+
+        function stopMobileRecordingStatusPolling() {
+            if (mobileRecordingStatusPoll) {
+                clearInterval(mobileRecordingStatusPoll);
+                mobileRecordingStatusPoll = null;
+            }
+        }
+
+        async function syncMobileRecordingStatus() {
+            if (!mobileRecordingState?.active || !mobileRecordingState.sessionId) return;
+            if (mobileRecordingState.captureMode === 'chat') return;
+
+            try {
+                const response = await fetch('/api/testing/mobile/record/status');
+                const data = await response.json();
+
+                if (!response.ok || !data?.active) return;
+                if (data.sessionId !== mobileRecordingState.sessionId) return;
+
+                const nextMode = data.captureMode || mobileRecordingState.captureMode || 'manual';
+                const nextReason = data.captureModeReason || null;
+                const modeChanged = nextMode !== mobileRecordingState.captureMode;
+                const reasonChanged = nextReason !== (mobileRecordingState.captureModeReason || null);
+
+                if (!modeChanged && !reasonChanged) return;
+
+                mobileRecordingState.captureMode = nextMode;
+                mobileRecordingState.captureModeReason = nextReason;
+                applyMobileRecordingCaptureModeUI(nextMode, nextReason);
+
+                if (nextMode === 'manual' && mobileRecordingFallbackNotifiedSessionId !== mobileRecordingState.sessionId) {
+                    const reasonSuffix = nextReason ? ` Motivo: ${nextReason}` : '';
+                    showToast(`Portal mudou para modo manual: cliques no emulador/Simulator nao entram no YAML.${reasonSuffix}`, 'warning', 9000);
+                    mobileRecordingFallbackNotifiedSessionId = mobileRecordingState.sessionId;
+                }
+            } catch {
+                // Ignore transient polling errors
+            }
+        }
+
+        function startMobileRecordingStatusPolling() {
+            stopMobileRecordingStatusPolling();
+            mobileRecordingStatusPoll = setInterval(syncMobileRecordingStatus, 1500);
+            setTimeout(syncMobileRecordingStatus, 1200);
+        }
 
         async function startMobileRecording() {
             // Close any existing agent mode to reset state
             closeAgentMode();
+            maybeRequestNotificationPermissionOnboarding('start-mobile-recording');
 
             const btn = document.getElementById('startMobileRecordingBtn');
             btn.disabled = true;
@@ -12979,10 +13329,12 @@
                     startTime: Date.now(),
                     timerInterval: null,
                     captureMode: data.captureMode || 'manual',
+                    captureModeReason: data.captureModeReason || null,
                     // Device dimensions for click coordinate mapping
                     deviceWidth: data.platform === 'android' ? 1080 : 390,
                     deviceHeight: data.platform === 'android' ? 2400 : 844
                 };
+                mobileRecordingFallbackNotifiedSessionId = null;
 
                 // Show recording UI (hide start, show active, hide complete)
                 document.getElementById('mobileRecordingStart').style.display = 'none';
@@ -12992,24 +13344,15 @@
                 // Start live stream to show device on screen
                 await startLiveStream(data.platform, data.deviceId);
 
-                // Open agent mode automatically for tap interaction
-                openLiveAgentMode();
+                // Keep recording in the Testing tab (inline mirrored viewer is enough)
+                // Agent modal can still be opened manually if needed.
 
                 // Enable click capture on device viewer
                 const screens = document.querySelectorAll('.live-viewer-device-screen');
                 screens.forEach(screen => screen.classList.add('recording'));
 
                 // Show capture mode hint
-                const hintEl = document.getElementById('mobileRecordingHint');
-                if (hintEl) {
-                    if (mobileRecordingState.captureMode === 'manual') {
-                        hintEl.textContent = 'Modo manual: clique na tela espelhada ou abra o modo agente para registrar taps.';
-                        hintEl.style.color = 'var(--warning)';
-                    } else {
-                        hintEl.textContent = 'Modo automatico: Maestro capturando toques do dispositivo.';
-                        hintEl.style.color = 'var(--text-muted)';
-                    }
-                }
+                applyMobileRecordingCaptureModeUI(mobileRecordingState.captureMode, mobileRecordingState.captureModeReason);
 
                 // Start timer
                 const timerEl = document.getElementById('mobileRecordingTimer');
@@ -13021,6 +13364,21 @@
                 }, 1000);
 
                 showToast(`Recording ${data.platform} - Click on the mirrored screen to capture taps!`, 'success');
+                if (mobileRecordingState.captureMode === 'manual') {
+                    const reasonSuffix = data.captureModeReason ? ` Motivo: ${data.captureModeReason}` : '';
+                    showToast(`Modo manual ativo: cliques no emulador/Simulator nao entram no YAML.${reasonSuffix}`, 'warning', 8000);
+                    mobileRecordingFallbackNotifiedSessionId = mobileRecordingState.sessionId;
+                }
+                if (
+                    mobileRecordingState.captureMode === 'native' &&
+                    mobileRecordingState.platform === 'ios' &&
+                    getCaptureSettings().preferIosNativeSimulatorInteraction !== false &&
+                    getCaptureSettings().allowMirroredTapsOnlyWithIdb !== false &&
+                    mobileToolCapabilities.idbInstalled === false
+                ) {
+                    showToast('iOS native: prefira tocar no Simulator real. Espelhado so sera permitido se iDB estiver instalado.', 'info', 7000);
+                }
+                startMobileRecordingStatusPolling();
                 updateMobileChatStopButtonVisibility();
 
             } catch (error) {
@@ -13047,6 +13405,7 @@
             if (mobileRecordingState.timerInterval) {
                 clearInterval(mobileRecordingState.timerInterval);
             }
+            stopMobileRecordingStatusPolling();
 
             // Get auto-analyze setting
             const settings = getCaptureSettings();
@@ -13096,6 +13455,10 @@
                     recordingData = data;
                     lastMobileRecording = data;
 
+                    if (data.ocrInProgress) {
+                        checkNotificationPermissionForProjectCompletion({ remindIfMissing: true });
+                    }
+
                     // Show appropriate toast based on whether analysis is running in background
                     if (data.ocrInProgress) {
                         showToast('Recording saved! App Intelligence analyzing...', 'success');
@@ -13108,7 +13471,11 @@
                     }
 
                     if ((data.actionsCount || 0) === 0 && data.captureMode === 'manual') {
-                        showToast('No actions captured. Click the mirrored screen to record taps.', 'warning');
+                        if (autoAnalyze) {
+                            showToast('AI is analyzing screenshots to detect actions...', 'info');
+                        } else {
+                            showToast('No actions captured. Click the mirrored screen to record taps.', 'warning');
+                        }
                     }
                 } else {
                     showToast(data.error || 'Failed to save recording', 'error');
@@ -13133,12 +13500,19 @@
                     startTime: null,
                     timerInterval: null,
                     captureMode: 'manual',
+                    captureModeReason: null,
                     deviceWidth: 390,
                     deviceHeight: 844
                 };
 
                 // Show complete state inline (not redirect to another tab)
-                if (recordingData) {
+                if (recordingData?.projectId) {
+                    pendingProjectFocusId = recordingData.projectId;
+                    switchView('projects');
+                    if (recordingData.ocrInProgress) {
+                        showToast('Projeto enviado para Projects. Você pode acompanhar o loading lá.', 'info', 5000);
+                    }
+                } else if (recordingData) {
                     showMobileRecordingComplete(recordingData);
                 } else {
                     // If failed, reset to start state
@@ -13178,13 +13552,16 @@
             const captureHint = document.getElementById('mobileCaptureHint');
             if (captureHint) {
                 if ((data.actionsCount || 0) === 0 && data.captureMode === 'manual') {
-                    captureHint.textContent = 'Modo manual: clique na tela espelhada para registrar taps.';
+                    captureHint.textContent = 'Modo manual: cliques no emulador/Simulator nao entram no YAML. Use a tela espelhada para registrar taps.';
                     captureHint.style.color = 'var(--warning)';
+                    captureHint.title = data.captureModeReason || '';
                 } else if (data.captureMode === 'manual') {
-                    captureHint.textContent = 'Modo manual: taps registrados via tela espelhada.';
+                    captureHint.textContent = 'Modo manual: taps registrados via tela espelhada (nao pelo emulador direto).';
                     captureHint.style.color = 'var(--text-muted)';
+                    captureHint.title = data.captureModeReason || '';
                 } else {
                     captureHint.textContent = '';
+                    captureHint.title = '';
                 }
             }
 
@@ -14407,6 +14784,7 @@
 
                         if (previousAnalyzing && !isProjectAnalyzing(finalStatus)) {
                             showToast('App Intelligence analysis complete!', 'success');
+                            notifyProjectAnalysisCompleteInBrowser(projectId, refreshed?.name || currentProject?.name);
                         }
 
                         // Refresh the analysis view
@@ -15175,12 +15553,34 @@
             }
         }
 
+        function shouldBlockMirroredTapForIosNative() {
+            const settings = getCaptureSettings();
+            const isIosNativeRecording =
+                !!mobileRecordingState?.active &&
+                mobileRecordingState?.platform === 'ios' &&
+                mobileRecordingState?.captureMode === 'native';
+
+            if (!isIosNativeRecording) return false;
+            if (settings.preferIosNativeSimulatorInteraction === false) return false;
+            if (settings.allowMirroredTapsOnlyWithIdb === false) return false;
+
+            return mobileToolCapabilities.idbInstalled === false;
+        }
+
+        function showMirroredTapBlockedForIosNativeToast() {
+            showToast('iOS native: use o Simulator real para tocar. Taps no espelhado so sao permitidos com iDB.', 'warning', 7000);
+        }
+
         /**
-         * Handle clicks on the mirrored mobile device screen
-         * Sends tap to device and records it when a recording is active
+         * Handle clicks on the mirrored mobile device screen.
+         * /api/testing/mobile/device/tap already records the tap when a recording is active.
          */
         async function handleMobileScreenClick(event) {
             if (!liveStreamState.active || mobileReplayState.active) return;
+            if (shouldBlockMirroredTapForIosNative()) {
+                showMirroredTapBlockedForIosNativeToast();
+                return;
+            }
 
             const screen = event.currentTarget;
             const rect = screen.getBoundingClientRect();
@@ -15202,27 +15602,14 @@
             showTapRipple(screen, clickX, clickY);
 
             await sendDeviceTap(deviceX, deviceY);
-
-            // If recording, register the tap in the Maestro script
-            if (mobileRecordingState.active) {
-                try {
-                    await fetch('/api/testing/mobile/record/tap', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            x: deviceX,
-                            y: deviceY,
-                            description: `Tap at (${deviceX}, ${deviceY})`
-                        })
-                    });
-                } catch (e) {
-                    console.warn('[Tap Record] Failed:', e);
-                }
-            }
         }
 
         async function handleAgentMobileScreenClick(event) {
             if (!agentModeState.active || agentModeState.mode !== 'mobile' || !agentModeState.live) return;
+            if (shouldBlockMirroredTapForIosNative()) {
+                showMirroredTapBlockedForIosNativeToast();
+                return;
+            }
 
             const screen = event.currentTarget;
             const rect = screen.getBoundingClientRect();
@@ -15240,23 +15627,6 @@
 
             showTapRipple(screen, clickX, clickY);
             await sendDeviceTap(deviceX, deviceY);
-
-            // If recording, register the tap in the Maestro script
-            if (mobileRecordingState?.active) {
-                try {
-                    await fetch('/api/testing/mobile/record/tap', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            x: deviceX,
-                            y: deviceY,
-                            description: `Tap at (${deviceX}, ${deviceY})`
-                        })
-                    });
-                } catch (e) {
-                    console.warn('[Tap Record] Failed:', e);
-                }
-            }
         }
 
         /**
@@ -16304,6 +16674,7 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
 
             try {
                 const data = await apiCall('/setup/status');
+                cacheSetupCapabilities(data);
                 const deps = data.dependencies || [];
 
                 container.innerHTML = `<div class="deps-grid">${deps.map(dep => `
@@ -17138,7 +17509,7 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
     </script>
 
     <!-- FAB stop button for live stream -->
-    <button id="liveStreamFab" class="live-stream-fab" onclick="stopLiveStream('mobile')" title="Stop Live Stream">
+    <button id="liveStreamFab" class="live-stream-fab" onclick="stopMobileRecording()" title="Stop Recording">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
             <rect x="6" y="6" width="12" height="12" rx="2"/>
         </svg>

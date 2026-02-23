@@ -702,6 +702,7 @@ export interface MaestroRecordingSession {
   flowPath?: string;
   videoPath?: string;
   captureMode?: 'native' | 'manual';
+  captureModeReason?: string;
   status: 'recording' | 'paused' | 'stopped' | 'error';
 }
 
@@ -714,6 +715,7 @@ export class MaestroRecorder extends EventEmitter {
   private screenshotInterval: NodeJS.Timeout | null = null;
   private useNativeMaestroRecord = true; // Use native maestro record for better accuracy
   private legacyCaptureStarted = false;
+  private lastMaestroRecordErrorLine: string | null = null;
   private baseScreenshotIntervalMs = 2000;
   private maxScreenshotIntervalMs = 12000;
   private currentScreenshotIntervalMs = this.baseScreenshotIntervalMs;
@@ -765,6 +767,8 @@ export class MaestroRecorder extends EventEmitter {
     if (this.legacyCaptureStarted) return;
     console.log(`[MaestroRecorder] Native record stopped (${reason}). Falling back to manual capture.`);
     this.session.captureMode = 'manual';
+    const stderrSuffix = this.lastMaestroRecordErrorLine ? ` | ${this.lastMaestroRecordErrorLine}` : '';
+    this.session.captureModeReason = `maestro record falhou (${reason})${stderrSuffix}`;
     this.startLegacyCapture(this.session.deviceId, this.session.platform);
   }
 
@@ -900,9 +904,11 @@ export class MaestroRecorder extends EventEmitter {
       if (!maestroRunnable && this.useNativeMaestroRecord) {
         console.log('[MaestroRecorder] ⚠️ Maestro CLI not available or not runnable. Falling back to screenshot-based capture.');
         console.log('[MaestroRecorder] Ensure Java is installed or reinstall Maestro: curl -Ls "https://get.maestro.mobile.dev" | bash');
+        this.session.captureModeReason = 'Maestro CLI indisponível/não executável (verifique Java e reinstale o Maestro).';
       }
       if (!preferNativeRecord) {
         console.log('[MaestroRecorder] Native record disabled for this session (manual capture mode).');
+        this.session.captureModeReason = 'Native Maestro record desabilitado para esta sessão.';
       }
 
       let nativeRecordStarted = false;
@@ -911,11 +917,13 @@ export class MaestroRecorder extends EventEmitter {
       if (useNativeRecord) {
         // Use native maestro record for accurate event capture
         console.log('[MaestroRecorder] Starting native maestro record...');
+        this.lastMaestroRecordErrorLine = null;
 
         try {
           // Start maestro record process
           // Note: maestro record writes to the specified file when stopped
-          this.maestroRecordProcess = spawn(maestroPath, ['record', flowPath], {
+          const recordArgs = ['record', flowPath, '--device', deviceId];
+          this.maestroRecordProcess = spawn(maestroPath, recordArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
             env: { ...process.env }
           });
@@ -926,7 +934,12 @@ export class MaestroRecorder extends EventEmitter {
           });
 
           this.maestroRecordProcess.stderr?.on('data', (data: Buffer) => {
-            console.log('[MaestroRecord ERROR]', data.toString().trim());
+            const text = data.toString().trim();
+            console.log('[MaestroRecord ERROR]', text);
+            const lastLine = text.split('\n').map(line => line.trim()).filter(Boolean).pop();
+            if (lastLine) {
+              this.lastMaestroRecordErrorLine = lastLine;
+            }
           });
 
           this.maestroRecordProcess.on('error', (err) => {
@@ -944,10 +957,16 @@ export class MaestroRecorder extends EventEmitter {
           console.log('[MaestroRecorder] Failed to start native record, using legacy capture');
           this.maestroRecordProcess = null;
           nativeRecordStarted = false;
+          this.session.captureModeReason = err instanceof Error
+            ? `Falha ao iniciar maestro record: ${err.message}`
+            : 'Falha ao iniciar maestro record';
         }
       }
 
       this.session.captureMode = nativeRecordStarted ? 'native' : 'manual';
+      if (nativeRecordStarted) {
+        this.session.captureModeReason = undefined;
+      }
 
       if (!nativeRecordStarted && this.session.flowPath) {
         try {

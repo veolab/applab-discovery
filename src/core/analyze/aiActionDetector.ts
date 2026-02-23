@@ -24,64 +24,17 @@ interface AnalysisResult {
   skipped?: boolean;
 }
 
+export interface ActionDetectorProvider {
+  name: string;
+  sendMessageWithImages?: (prompt: string, imagePaths: string[]) => Promise<string>;
+  sendMessage?: (prompt: string) => Promise<string>;
+}
+
 /**
- * Analyze screenshots to detect user actions using Claude Vision
+ * Build the analysis prompt for a given number of screenshots
  */
-export async function analyzeScreenshotsForActions(
-  screenshotsDir: string,
-  maxScreenshots: number = 20
-): Promise<AnalysisResult> {
-  // Check for API key
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.warn('[AIActionDetector] ⚠️ ANTHROPIC_API_KEY not set - AI analysis unavailable');
-    console.warn('[AIActionDetector] Set your API key to enable automatic action detection from screenshots');
-    return {
-      actions: [],
-      summary: 'API key not configured',
-      skipped: true
-    };
-  }
-
-  // Get sorted screenshot files
-  const files = readdirSync(screenshotsDir)
-    .filter(f => f.endsWith('.png'))
-    .sort();
-
-  if (files.length < 2) {
-    return {
-      actions: [],
-      summary: 'Not enough screenshots for action detection'
-    };
-  }
-
-  // Sample screenshots if too many
-  const selectedFiles = files.length > maxScreenshots
-    ? sampleArray(files, maxScreenshots)
-    : files;
-
-  console.log(`[AIActionDetector] Analyzing ${selectedFiles.length} screenshots...`);
-
-  try {
-    const anthropic = new Anthropic({ apiKey });
-
-    // Prepare image content for Claude
-    const imageContents: Anthropic.ImageBlockParam[] = selectedFiles.map(file => {
-      const imagePath = join(screenshotsDir, file);
-      const imageData = readFileSync(imagePath);
-      const base64 = imageData.toString('base64');
-      return {
-        type: 'image' as const,
-        source: {
-          type: 'base64' as const,
-          media_type: 'image/png' as const,
-          data: base64
-        }
-      };
-    });
-
-    // Create the analysis prompt
-    const prompt = `You are analyzing a sequence of ${selectedFiles.length} mobile app screenshots taken during a user testing session. Your task is to detect what actions the user performed between each screenshot.
+function buildAnalysisPrompt(screenshotCount: number): string {
+  return `You are analyzing a sequence of ${screenshotCount} mobile app screenshots taken during a user testing session. Your task is to detect what actions the user performed between each screenshot.
 
 Analyze the visual changes between consecutive screenshots and identify:
 1. Taps on buttons, links, or UI elements
@@ -116,37 +69,121 @@ Respond in JSON format:
 
 Be conservative - only include actions you're confident about (confidence > 0.7).
 Focus on meaningful interactions, not every tiny change.`;
+}
 
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            ...imageContents,
-            { type: 'text', text: prompt }
-          ]
-        }
-      ]
-    });
+/**
+ * Parse JSON analysis result from raw LLM response text
+ */
+function parseAnalysisResponse(text: string): AnalysisResult {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error('Could not parse JSON from response');
+  }
+  return JSON.parse(jsonMatch[0]) as AnalysisResult;
+}
 
-    // Parse the response
-    const textContent = response.content.find(c => c.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
-      throw new Error('No text response from Claude');
+/**
+ * Analyze screenshots using Anthropic API with vision (base64 images)
+ */
+async function analyzeWithAnthropicVision(
+  apiKey: string,
+  screenshotPaths: string[],
+  prompt: string
+): Promise<AnalysisResult> {
+  const anthropic = new Anthropic({ apiKey });
+
+  const imageContents: Anthropic.ImageBlockParam[] = screenshotPaths.map(imagePath => {
+    const imageData = readFileSync(imagePath);
+    const base64 = imageData.toString('base64');
+    return {
+      type: 'image' as const,
+      source: {
+        type: 'base64' as const,
+        media_type: 'image/png' as const,
+        data: base64
+      }
+    };
+  });
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 4096,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          ...imageContents,
+          { type: 'text', text: prompt }
+        ]
+      }
+    ]
+  });
+
+  const textContent = response.content.find(c => c.type === 'text');
+  if (!textContent || textContent.type !== 'text') {
+    throw new Error('No text response from Claude');
+  }
+
+  return parseAnalysisResponse(textContent.text);
+}
+
+/**
+ * Analyze screenshots to detect user actions using Claude Vision
+ */
+export async function analyzeScreenshotsForActions(
+  screenshotsDir: string,
+  maxScreenshots: number = 20,
+  provider?: ActionDetectorProvider
+): Promise<AnalysisResult> {
+  // Get sorted screenshot files
+  const files = readdirSync(screenshotsDir)
+    .filter(f => f.endsWith('.png'))
+    .sort();
+
+  if (files.length < 2) {
+    return {
+      actions: [],
+      summary: 'Not enough screenshots for action detection'
+    };
+  }
+
+  // Sample screenshots if too many
+  const selectedFiles = files.length > maxScreenshots
+    ? sampleArray(files, maxScreenshots)
+    : files;
+
+  const screenshotPaths = selectedFiles.map(file => join(screenshotsDir, file));
+  const prompt = buildAnalysisPrompt(selectedFiles.length);
+
+  console.log(`[AIActionDetector] Analyzing ${selectedFiles.length} screenshots...`);
+
+  try {
+    // Strategy 1: Anthropic API vision (fastest — single call with base64 images)
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (apiKey) {
+      console.log('[AIActionDetector] Using Anthropic API vision (fast path)');
+      const result = await analyzeWithAnthropicVision(apiKey, screenshotPaths, prompt);
+      console.log(`[AIActionDetector] Detected ${result.actions.length} actions`);
+      return result;
     }
 
-    // Extract JSON from response
-    const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('Could not parse JSON from response');
+    // Strategy 2: Provider with image support (e.g. Claude CLI with Read tool)
+    if (provider?.sendMessageWithImages) {
+      console.log(`[AIActionDetector] Using provider: ${provider.name} (image support)`);
+      const response = await provider.sendMessageWithImages(prompt, screenshotPaths);
+      const result = parseAnalysisResponse(response);
+      console.log(`[AIActionDetector] Detected ${result.actions.length} actions`);
+      return result;
     }
 
-    const result = JSON.parse(jsonMatch[0]) as AnalysisResult;
-    console.log(`[AIActionDetector] Detected ${result.actions.length} actions`);
-
-    return result;
+    // No provider available
+    console.warn('[AIActionDetector] ⚠️ No vision-capable provider available');
+    console.warn('[AIActionDetector] Set ANTHROPIC_API_KEY or ensure Claude CLI is available');
+    return {
+      actions: [],
+      summary: 'No vision-capable AI provider available',
+      skipped: true
+    };
 
   } catch (error) {
     console.error('[AIActionDetector] Analysis failed:', error);

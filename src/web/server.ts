@@ -15,9 +15,113 @@ import { getDatabase, getSqlite, projects, projectExports, frames, DATA_DIR, PRO
 import { getMaestroRecorder, isMaestroInstalled, runMaestroTest, isIdbInstalled, tapViaIdb, killZombieMaestroProcesses } from '../core/testing/maestro.js';
 import type { MaestroRecordingSession } from '../core/testing/maestro.js';
 import { analyzeScreenshotsForActions, generateMaestroYaml } from '../core/analyze/aiActionDetector.js';
+import type { ActionDetectorProvider } from '../core/analyze/aiActionDetector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+const ANALYZING_PROJECT_STATUSES = new Set(['analyzing', 'processing', 'pending', 'in_progress']);
+const BACKGROUND_ANALYSIS_TIMEOUT_MS = 10 * 60 * 1000; // 10 min hard timeout for OCR/AI jobs
+const STALE_ANALYSIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 min stale protection on reads
+
+function isAnalyzingProjectStatus(status: unknown): boolean {
+  return typeof status === 'string' && ANALYZING_PROJECT_STATUSES.has(status);
+}
+
+function toEpochMs(value: unknown): number | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+async function markProjectAnalysisTimeout(
+  projectId: string,
+  reason: string,
+  options: { silentIfNotAnalyzing?: boolean } = {}
+): Promise<void> {
+  const db = getDatabase();
+  const existing = await db.select({
+    id: projects.id,
+    name: projects.name,
+    status: projects.status,
+  }).from(projects).where(eq(projects.id, projectId)).limit(1);
+
+  if (existing.length === 0) return;
+  const current = existing[0];
+  if (options.silentIfNotAnalyzing && !isAnalyzingProjectStatus(current.status)) {
+    return;
+  }
+
+  const timeoutMessage = `Analysis timed out: ${reason}`;
+  await db.update(projects).set({
+    status: 'timeout',
+    aiSummary: timeoutMessage,
+    updatedAt: new Date(),
+  }).where(eq(projects.id, projectId));
+
+  console.warn(`[AnalysisTimeout] Project ${projectId} marked as timeout: ${reason}`);
+  broadcastToClients({
+    type: 'projectAnalysisUpdated',
+    data: { projectId, status: 'timeout', reason }
+  });
+  broadcastToClients({
+    type: 'analysisProgress',
+    data: { projectId, step: 'error', status: 'failed', error: timeoutMessage }
+  });
+}
+
+async function expireStaleAnalyzingProjects(projectRows: Array<{ id: string; status: unknown; updatedAt?: unknown }>): Promise<void> {
+  const now = Date.now();
+  const stale: Array<{ id: string; ageMs: number }> = [];
+
+  for (const row of projectRows) {
+    if (!isAnalyzingProjectStatus(row.status)) continue;
+    const updatedAtMs = toEpochMs(row.updatedAt);
+    if (!updatedAtMs) continue;
+    const ageMs = now - updatedAtMs;
+    if (ageMs > STALE_ANALYSIS_TIMEOUT_MS) {
+      stale.push({ id: row.id, ageMs });
+    }
+  }
+
+  for (const item of stale) {
+    const minutes = Math.round(item.ageMs / 60000);
+    await markProjectAnalysisTimeout(item.id, `stale analysis status (${minutes} min without update)`, {
+      silentIfNotAnalyzing: true,
+    }).catch(err => {
+      console.warn('[AnalysisTimeout] Failed to expire stale project:', item.id, err);
+    });
+  }
+}
+
+function runOCRInBackgroundWithWatchdog(
+  projectId: string,
+  screenshotsDir: string,
+  screenshotFiles: string[],
+  sourceLabel: string
+): void {
+  let finished = false;
+  const watchdog = setTimeout(() => {
+    if (finished) return;
+    void markProjectAnalysisTimeout(projectId, `${sourceLabel} exceeded ${Math.round(BACKGROUND_ANALYSIS_TIMEOUT_MS / 60000)} min`, {
+      silentIfNotAnalyzing: true,
+    });
+  }, BACKGROUND_ANALYSIS_TIMEOUT_MS);
+
+  void runOCRInBackground(projectId, screenshotsDir, screenshotFiles)
+    .catch(err => {
+      console.error(`[${sourceLabel}] OCR failed for project ${projectId}:`, err);
+    })
+    .finally(() => {
+      finished = true;
+      clearTimeout(watchdog);
+    });
+}
 
 // ============================================================================
 // ANDROID SDK DETECTION (like VS Code does it)
@@ -682,6 +786,12 @@ app.get('/api/projects', async (c) => {
     const limit = parseInt(c.req.query('limit') || '20', 10);
 
     let results = await db.select().from(projects).orderBy(desc(projects.updatedAt)).limit(limit);
+    await expireStaleAnalyzingProjects(results.map((p) => ({
+      id: p.id,
+      status: p.status,
+      updatedAt: p.updatedAt,
+    })));
+    results = await db.select().from(projects).orderBy(desc(projects.updatedAt)).limit(limit);
 
     // Filter if needed
     if (status) {
@@ -3770,6 +3880,7 @@ app.post('/api/testing/mobile/record/start', async (c) => {
       deviceId,
       deviceName,
       captureMode: session.captureMode || 'manual',
+      captureModeReason: session.captureModeReason || null,
       message: `Recording ${deviceName} (capturing touch events)...`
     });
 
@@ -3795,10 +3906,8 @@ app.post('/api/testing/mobile/record/tap', async (c) => {
       return c.json({ error: 'x and y coordinates are required' }, 400);
     }
 
-    // Add the tap action to the recording
-    void recorder
-      .addManualAction('tap', description || `Tap at (${x}, ${y})`, { x, y })
-      .catch(error => console.warn('[MobileRecord] Failed to record tap:', error));
+    // Persist the action before returning to avoid losing taps on immediate stop.
+    await recorder.addManualAction('tap', description || `Tap at (${x}, ${y})`, { x, y });
 
     return c.json({
       success: true,
@@ -3907,6 +4016,10 @@ app.post('/api/testing/mobile/device/tap', async (c) => {
     } else {
       // iOS: Try idb first (optional optimization), then Maestro
       let tapSuccess = false;
+      const isNativeIOSRecording =
+        session?.status === 'recording' &&
+        session?.platform === 'ios' &&
+        session?.captureMode === 'native';
 
       // Method 1: Try idb if available (optional - faster taps)
       const idbAvailable = await isIdbInstalled();
@@ -3919,6 +4032,20 @@ app.post('/api/testing/mobile/device/tap', async (c) => {
 
       // Method 2: Maestro (primary method)
       if (!tapSuccess) {
+        if (isNativeIOSRecording) {
+          const reason = 'Portal tap no iOS durante gravacao nativa requer idb. Sem idb, usar maestro test conflita com maestro record.';
+          console.warn('[iOS TAP BLOCKED]', {
+            reason,
+            device: tapDeviceId,
+            x: tapX,
+            y: tapY,
+            captureMode: session?.captureMode,
+          });
+          return c.json({
+            error: 'Portal tap no iOS durante gravacao nativa precisa de idb. Toque direto no Simulator ou instale idb.',
+          }, 409);
+        }
+
         const maestroAvailable = await isMaestroInstalled();
         if (!maestroAvailable) {
           return c.json({
@@ -3984,12 +4111,10 @@ app.post('/api/testing/mobile/device/tap', async (c) => {
 
     let recorded = false;
     if (recorder.isRecording()) {
-      void recorder
-        .addManualAction('tap', `Tap at (${Math.round(tapX)}, ${Math.round(tapY)})`, {
-          x: Math.round(tapX),
-          y: Math.round(tapY),
-        })
-        .catch(error => console.warn('[MobileTap] Failed to record tap:', error));
+      await recorder.addManualAction('tap', `Tap at (${Math.round(tapX)}, ${Math.round(tapY)})`, {
+        x: Math.round(tapX),
+        y: Math.round(tapY),
+      });
       recorded = true;
     }
 
@@ -4034,15 +4159,13 @@ app.post('/api/testing/mobile/record/swipe', async (c) => {
       return c.json({ error: 'startX, startY, endX, endY coordinates are required' }, 400);
     }
 
-    // Add the swipe action to the recording
-    void recorder
-      .addManualAction('swipe', description || `Swipe from (${startX}, ${startY}) to (${endX}, ${endY})`, {
-        x: startX,
-        y: startY,
-        endX,
-        endY
-      })
-      .catch(error => console.warn('[MobileRecord] Failed to record swipe:', error));
+    // Persist the action before returning to avoid losing gestures on immediate stop.
+    await recorder.addManualAction('swipe', description || `Swipe from (${startX}, ${startY}) to (${endX}, ${endY})`, {
+      x: startX,
+      y: startY,
+      endX,
+      endY
+    });
 
     return c.json({
       success: true,
@@ -4183,9 +4306,7 @@ appId: com.example.app # TODO: Set your app ID
     if (willAnalyze) {
       console.log(`[MobileRecording] Starting background OCR analysis for ${screenshotCount} screenshots...`);
       // Don't await - let it run in background
-      runOCRInBackground(projectId, session.screenshotsDir, screenshotFiles).catch(err => {
-        console.error('[MobileRecording] Background OCR error:', err);
-      });
+      runOCRInBackgroundWithWatchdog(projectId, session.screenshotsDir, screenshotFiles, 'MobileRecording');
     }
 
     return c.json({
@@ -4204,6 +4325,7 @@ appId: com.example.app # TODO: Set your app ID
       platform: session.platform,
       deviceName: session.deviceName,
       captureMode: session.captureMode || 'manual',
+      captureModeReason: session.captureModeReason || null,
       duration: session.endedAt ? Math.floor((session.endedAt - session.startedAt) / 1000) : 0
     });
 
@@ -4228,6 +4350,7 @@ app.get('/api/testing/mobile/record/status', async (c) => {
     platform: session.platform,
     deviceName: session.deviceName,
     captureMode: session.captureMode || 'manual',
+    captureModeReason: session.captureModeReason || null,
     actionsCount: session.actions.length,
     duration: Math.floor((Date.now() - session.startedAt) / 1000)
   });
@@ -4238,23 +4361,44 @@ app.get('/api/projects/:id/analysis-status', async (c) => {
   try {
     const projectId = c.req.param('id');
     const db = getDatabase();
-    const result = await db.select({
+    let result = await db.select({
+      id: projects.id,
       status: projects.status,
       ocrText: projects.ocrText,
       aiSummary: projects.aiSummary,
       ocrEngine: projects.ocrEngine,
-      ocrConfidence: projects.ocrConfidence
+      ocrConfidence: projects.ocrConfidence,
+      updatedAt: projects.updatedAt,
     }).from(projects).where(eq(projects.id, projectId)).limit(1);
 
     if (result.length === 0) {
       return c.json({ error: 'Project not found' }, 404);
     }
 
-    const project = result[0];
-    const analyzingStatuses = new Set(['analyzing', 'processing', 'pending', 'in_progress']);
+    let project = result[0];
+    if (isAnalyzingProjectStatus(project.status)) {
+      await expireStaleAnalyzingProjects([{
+        id: project.id,
+        status: project.status,
+        updatedAt: project.updatedAt,
+      }]);
+      result = await db.select({
+        id: projects.id,
+        status: projects.status,
+        ocrText: projects.ocrText,
+        aiSummary: projects.aiSummary,
+        ocrEngine: projects.ocrEngine,
+        ocrConfidence: projects.ocrConfidence,
+        updatedAt: projects.updatedAt,
+      }).from(projects).where(eq(projects.id, projectId)).limit(1);
+      if (result.length > 0) {
+        project = result[0];
+      }
+    }
+
     const statusValue = typeof project.status === 'string' ? project.status : '';
     return c.json({
-      isAnalyzing: analyzingStatuses.has(statusValue),
+      isAnalyzing: isAnalyzingProjectStatus(statusValue),
       status: statusValue,
       hasOCR: !!project.ocrText,
       hasSummary: !!project.aiSummary,
@@ -4263,6 +4407,117 @@ app.get('/api/projects/:id/analysis-status', async (c) => {
       ocrTextLength: project.ocrText?.length || 0,
       aiSummaryLength: project.aiSummary?.length || 0
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Retry background analysis for a project (useful after timeout)
+app.post('/api/projects/:id/retry-analysis', async (c) => {
+  try {
+    const projectId = c.req.param('id');
+    const db = getDatabase();
+
+    const result = await db.select({
+      id: projects.id,
+      name: projects.name,
+      status: projects.status,
+      videoPath: projects.videoPath,
+    }).from(projects).where(eq(projects.id, projectId)).limit(1);
+
+    if (result.length === 0) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const project = result[0];
+    if (isAnalyzingProjectStatus(project.status)) {
+      return c.json({ error: 'Project analysis is already running' }, 409);
+    }
+
+    const projectPath = typeof project.videoPath === 'string' ? project.videoPath : '';
+    const candidateScreenshotDirs: string[] = [];
+
+    if (projectPath && existsSync(projectPath)) {
+      try {
+        const projectStats = statSync(projectPath);
+        if (projectStats.isDirectory()) {
+          candidateScreenshotDirs.push(join(projectPath, 'screenshots'));
+          candidateScreenshotDirs.push(projectPath);
+        }
+      } catch (err) {
+        console.warn('[RetryAnalysis] Failed to stat project path:', projectPath, err);
+      }
+    }
+
+    let screenshotsDir: string | null = null;
+    let screenshotFiles: string[] = [];
+    for (const candidateDir of candidateScreenshotDirs) {
+      if (!existsSync(candidateDir)) continue;
+      try {
+        const pngs = readdirSync(candidateDir)
+          .filter((file) => file.toLowerCase().endsWith('.png'))
+          .sort();
+        if (pngs.length > 0) {
+          screenshotsDir = candidateDir;
+          screenshotFiles = pngs;
+          break;
+        }
+      } catch (err) {
+        console.warn('[RetryAnalysis] Failed to read screenshot dir:', candidateDir, err);
+      }
+    }
+
+    await db.update(projects).set({
+      status: 'analyzing',
+      updatedAt: new Date(),
+    }).where(eq(projects.id, projectId));
+
+    broadcastToClients({
+      type: 'projectAnalysisUpdated',
+      data: { projectId, status: 'analyzing' }
+    });
+
+    if (screenshotsDir && screenshotFiles.length > 0) {
+      console.log(`[RetryAnalysis] Restarting screenshot analysis for ${projectId} with ${screenshotFiles.length} screenshots`);
+      runOCRInBackgroundWithWatchdog(projectId, screenshotsDir, screenshotFiles, 'RetryAnalysis');
+      return c.json({
+        success: true,
+        projectId,
+        status: 'analyzing',
+        mode: 'screenshots',
+        screenshotCount: screenshotFiles.length,
+        message: 'App Intelligence analysis restarted'
+      });
+    }
+
+    if (projectPath && existsSync(projectPath)) {
+      try {
+        const projectStats = statSync(projectPath);
+        if (projectStats.isDirectory()) {
+          console.log(`[RetryAnalysis] Restarting directory analysis for ${projectId}`);
+          void analyzeProjectInBackground(projectId).catch(err => {
+            console.error('[RetryAnalysis] Directory analysis failed:', err);
+          });
+          return c.json({
+            success: true,
+            projectId,
+            status: 'analyzing',
+            mode: 'directory',
+            message: 'Project analysis restarted'
+          });
+        }
+      } catch {}
+    }
+
+    await db.update(projects).set({
+      status: project.status || 'timeout',
+      updatedAt: new Date(),
+    }).where(eq(projects.id, projectId));
+
+    return c.json({
+      error: 'Retry analysis is not supported for this project type yet (missing recording screenshots).'
+    }, 400);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -4293,8 +4548,9 @@ app.post('/api/testing/mobile/recordings/:id/analyze', async (c) => {
 
     console.log(`[MobileRecording] Re-analyzing recording ${recordingId} with ${screenshotFiles.length} screenshots...`);
 
-    // Run AI analysis
-    const analysisResult = await analyzeScreenshotsForActions(screenshotsDir);
+    // Run AI analysis — pass a vision-capable provider as fallback when no API key
+    const visionProvider = createClaudeCliVisionProvider();
+    const analysisResult = await analyzeScreenshotsForActions(screenshotsDir, 20, visionProvider ?? undefined);
 
     if (analysisResult.actions.length === 0) {
       return c.json({
@@ -4831,6 +5087,61 @@ function createClaudeCliProvider(): LLMProvider | null {
   };
 }
 
+const CLAUDE_CLI_VISION_TIMEOUT_MS = 120_000;
+
+/**
+ * Run Claude CLI with Read tool enabled so it can view image files.
+ * Uses --allowedTools to permit only the Read tool.
+ */
+async function runClaudeCliVision(prompt: string, imagePaths: string[]): Promise<string> {
+  // Build a prompt that instructs Claude to read and analyze the screenshot files
+  const fileList = imagePaths.map(p => `  - ${p}`).join('\n');
+  const fullPrompt = `Read and analyze these screenshot image files in order, then follow the instructions below.
+
+Screenshot files (read each one):
+${fileList}
+
+Instructions:
+${prompt}`;
+
+  const args = [
+    '-p',
+    '--allowedTools', 'Read',
+    '--permission-mode', 'dontAsk',
+    '--no-session-persistence',
+  ];
+
+  const result = await runClaudeCliWithArgs(fullPrompt, args, CLAUDE_CLI_VISION_TIMEOUT_MS);
+
+  if (result.timedOut) {
+    throw new Error(`Claude CLI vision timeout (${Math.round(CLAUDE_CLI_VISION_TIMEOUT_MS / 1000)}s).`);
+  }
+
+  if (result.stderr) {
+    const truncated = result.stderr.length > 400 ? `${result.stderr.slice(0, 400)}...` : result.stderr;
+    console.log('[Claude CLI Vision stderr]', truncated);
+  }
+
+  if (result.exitCode !== 0 && !result.stdout) {
+    const detail = result.stderr || `exit code ${result.exitCode ?? 'unknown'}`;
+    const truncated = detail.length > 400 ? `${detail.slice(0, 400)}...` : detail;
+    throw new Error(`Claude CLI vision error: ${truncated}`);
+  }
+
+  return result.stdout || result.stderr;
+}
+
+/**
+ * Create a vision-capable provider for AI action detection using Claude CLI.
+ */
+function createClaudeCliVisionProvider(): ActionDetectorProvider | null {
+  if (!isClaudeCliAvailable()) return null;
+  return {
+    name: 'claude-cli (vision)',
+    sendMessageWithImages: runClaudeCliVision,
+  };
+}
+
 async function createOllamaProvider(): Promise<LLMProvider | null> {
   try {
     const ollamaUrl = llmSettings.ollamaUrl || 'http://localhost:11434';
@@ -5062,7 +5373,43 @@ async function runOCRInBackground(
       broadcastProgress('summary', 'skipped', 'Skipped — no text to analyze');
     }
 
-    // Step 3: Save
+    // Step 3: AI Action Detection
+    let detectedActionsCount = 0;
+    if (screenshotFiles.length >= 2) {
+      try {
+        broadcastProgress('actions', 'running', 'Detecting user actions from screenshots...');
+        const visionProvider = createClaudeCliVisionProvider();
+        const analysisResult = await analyzeScreenshotsForActions(screenshotsDir, 20, visionProvider ?? undefined);
+
+        if (analysisResult.actions.length > 0) {
+          const maestroYaml = generateMaestroYaml(
+            analysisResult.actions,
+            undefined,
+            analysisResult.appName
+          );
+
+          // Write YAML to test.yaml in the recording directory (parent of screenshots)
+          const { writeFileSync } = await import('node:fs');
+          const recordingDir = join(screenshotsDir, '..');
+          const flowPath = join(recordingDir, 'test.yaml');
+          writeFileSync(flowPath, maestroYaml, 'utf-8');
+
+          detectedActionsCount = analysisResult.actions.length;
+          console.log(`[BackgroundOCR] AI detected ${detectedActionsCount} actions, YAML saved to ${flowPath}`);
+          broadcastProgress('actions', 'done', `Detected ${detectedActionsCount} actions`);
+        } else {
+          console.log('[BackgroundOCR] AI action detection returned 0 actions, keeping fallback YAML');
+          broadcastProgress('actions', 'done', 'No actions detected — kept fallback YAML');
+        }
+      } catch (actionError) {
+        console.warn('[BackgroundOCR] AI action detection failed, keeping fallback YAML:', actionError);
+        broadcastProgress('actions', 'skipped', 'Action detection failed — kept fallback YAML');
+      }
+    } else {
+      broadcastProgress('actions', 'skipped', 'Not enough screenshots for action detection');
+    }
+
+    // Step 4: Save
     broadcastProgress('save', 'running', 'Saving results to database...');
 
     const db = getDatabase();
@@ -5072,6 +5419,7 @@ async function runOCRInBackground(
       ocrEngine,
       ocrConfidence,
       aiSummary,
+      frameCount: detectedActionsCount > 0 ? detectedActionsCount : undefined,
       updatedAt: new Date()
     }).where(eq(projects.id, projectId));
 
@@ -5957,7 +6305,8 @@ app.get('/api/setup/status', async (c) => {
     const { setupStatusTool } = await import('../mcp/tools/setup.js');
     const result = await setupStatusTool.handler({});
     const data = JSON.parse(result.content[0].text!);
-    return c.json(data);
+    const idbInstalled = await isIdbInstalled().catch(() => false);
+    return c.json({ ...data, idbInstalled });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -6368,9 +6717,7 @@ app.post('/api/recorder/stop', async (c) => {
             sqlite.prepare(`UPDATE projects SET status = ?, updated_at = ? WHERE id = ?`).run('analyzing', Date.now(), projectId);
             ocrInProgress = true;
             // Fire-and-forget OCR
-            runOCRInBackground(projectId, screenshotsDir, screenshotFiles).catch(err => {
-              console.error(`[RecorderStop] OCR failed for project ${projectId}:`, err);
-            });
+            runOCRInBackgroundWithWatchdog(projectId, screenshotsDir, screenshotFiles, 'RecorderStop');
           } else {
             sqlite.prepare(`UPDATE projects SET status = ?, updated_at = ? WHERE id = ?`).run('completed', Date.now(), projectId);
           }
@@ -6775,9 +7122,7 @@ app.post('/api/recorder/recordings/:id/create-project', async (c) => {
       if (screenshotFiles.length > 0) {
         sqlite.prepare(`UPDATE projects SET status = ?, updated_at = ? WHERE id = ?`).run('analyzing', Date.now(), projectId);
         ocrInProgress = true;
-        runOCRInBackground(projectId, screenshotsDir, screenshotFiles).catch(err => {
-          console.error(`[CreateProject] OCR failed for project ${projectId}:`, err);
-        });
+        runOCRInBackgroundWithWatchdog(projectId, screenshotsDir, screenshotFiles, 'CreateProject');
       }
     }
 
