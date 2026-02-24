@@ -7047,12 +7047,23 @@
                                     </button>
                                 </div>
                                 <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
-                                    <a href="https://ollama.ai" target="_blank" style="color: var(--accent);">Install Ollama</a> - Only used when provider is set to <strong>Ollama</strong>. Install any model (example: <code style="background: var(--bg-tertiary); padding: 1px 4px; border-radius: 3px;">ollama pull llama3.2</code>).
+                                    <a href="https://ollama.ai" target="_blank" style="color: var(--accent);">Install Ollama</a> - Used for local text/coding and optional visual fallback. Recommended starting points:
+                                    <a href="https://ollama.com/library/qwen2.5-coder" target="_blank" style="color: var(--accent);">qwen2.5-coder</a> (scripts/text) and
+                                    <a href="https://ollama.com/library/qwen2.5vl" target="_blank" style="color: var(--accent);">qwen2.5vl</a> (screenshots/vision). You must download and test on your machine.
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label class="setting-label" style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                                    <span>Prefer Ollama Vision for screenshot action detection</span>
+                                    <input type="checkbox" id="preferOllamaVisionForActionDetection" style="cursor: pointer;">
+                                </label>
+                                <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
+                                    When enabled, visual action detection (screenshots → Maestro YAML) tries your Ollama vision model before Claude CLI Vision.
                                 </div>
                             </div>
                             <div class="setting-item" id="ollamaModelContainer">
                                 <label class="setting-label" style="display: flex; align-items: center; justify-content: space-between;">
-                                    <span>Ollama Model</span>
+                                    <span>Ollama Models (Text + Vision)</span>
                                     <span id="ollamaStatusBadge" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--bg-tertiary); color: var(--text-muted);">Checking...</span>
                                 </label>
                                 <div id="ollamaModelSelector">
@@ -8074,7 +8085,8 @@
         }
 
         // LLM Settings
-        let currentOllamaModel = 'llama3.2';
+        let currentOllamaTextModel = 'qwen2.5-coder:7b';
+        let currentOllamaVisionModel = 'qwen2.5vl:7b';
         const LLM_AUTO_PROVIDER_PRIORITY = ['anthropic', 'openai', 'ollama', 'claude-cli'];
 
         function normalizeOllamaModelName(value) {
@@ -8087,6 +8099,12 @@
             if (!installed || !selected) return false;
             if (installed === selected) return true;
             return installed.split(':')[0] === selected.split(':')[0];
+        }
+
+        function isLikelyVisionCapableOllamaModelName(modelName) {
+            const normalized = normalizeOllamaModelName(modelName);
+            if (!normalized) return false;
+            return /(vision|vl\b|llava|bakllava|moondream|gemma3|minicpm-v|qwen2\.5vl|qwen2-vl)/.test(normalized);
         }
 
         function resolveLLMProviderStatus(data) {
@@ -8125,7 +8143,12 @@
                 document.getElementById('openaiModel').value = data.openaiModel || 'gpt-5.2';
                 document.getElementById('ollamaUrl').value = data.ollamaUrl || 'http://localhost:11434';
                 document.getElementById('claudeCliModel').value = data.claudeCliModel || 'haiku';
-                currentOllamaModel = data.ollamaModel || 'llama3.2';
+                currentOllamaTextModel = data.ollamaModel || 'qwen2.5-coder:7b';
+                currentOllamaVisionModel = data.ollamaVisionModel || 'qwen2.5vl:7b';
+                const preferOllamaVisionCheckbox = document.getElementById('preferOllamaVisionForActionDetection');
+                if (preferOllamaVisionCheckbox) {
+                    preferOllamaVisionCheckbox.checked = data.preferOllamaVisionForActionDetection === true;
+                }
 
                 // Update preferred provider dropdown
                 await updatePreferredProviderDropdown(data.preferredProvider || 'auto');
@@ -8171,6 +8194,11 @@
             const refreshIcon = document.getElementById('ollamaRefreshIcon');
             const ollamaUrlInput = document.getElementById('ollamaUrl');
             const typedOllamaUrl = (ollamaUrlInput?.value || '').trim();
+            const ollamaTextModelInput = document.getElementById('ollamaTextModel');
+            const ollamaVisionModelInput = document.getElementById('ollamaVisionModel');
+            const preferOllamaVisionForActionDetection = document.getElementById('preferOllamaVisionForActionDetection')?.checked === true;
+            const typedOllamaTextModel = (ollamaTextModelInput?.value || currentOllamaTextModel || 'qwen2.5-coder:7b').trim();
+            const typedOllamaVisionModel = (ollamaVisionModelInput?.value || currentOllamaVisionModel || 'qwen2.5vl:7b').trim();
 
             // Show loading state
             if (refreshIcon) {
@@ -8194,7 +8222,11 @@
             }
 
             try {
-                const query = typedOllamaUrl ? `?url=${encodeURIComponent(typedOllamaUrl)}` : '';
+                const params = new URLSearchParams();
+                if (typedOllamaUrl) params.set('url', typedOllamaUrl);
+                if (typedOllamaTextModel) params.set('textModel', typedOllamaTextModel);
+                if (typedOllamaVisionModel) params.set('visionModel', typedOllamaVisionModel);
+                const query = params.toString() ? `?${params.toString()}` : '';
                 const response = await fetch(`/api/ollama/status${query}`);
                 const data = await response.json();
 
@@ -8203,39 +8235,117 @@
                 }
 
                 if (data.running && data.models && data.models.length > 0) {
-                    const selectedModelAvailable = data.selectedModelAvailable !== false;
-                    const selectedModel = data.currentModel || currentOllamaModel || 'llama3.2';
+                    const selectedTextModelAvailable = data.selectedTextModelAvailable !== false;
+                    const selectedVisionModelAvailable = data.selectedVisionModelAvailable !== false;
+                    const selectedTextModel = data.currentTextModel || currentOllamaTextModel || 'qwen2.5-coder:7b';
+                    const selectedVisionModel = data.currentVisionModel || currentOllamaVisionModel || 'qwen2.5vl:7b';
+                    const visionModelLooksCapable = data.selectedVisionModelLooksCapable !== false;
 
                     // Ollama is running and has models
                     if (badge) {
-                        if (selectedModelAvailable) {
+                        if (selectedTextModelAvailable && selectedVisionModelAvailable) {
                             badge.textContent = `${data.models.length} model${data.models.length > 1 ? 's' : ''}`;
                             badge.style.background = 'rgba(34, 197, 94, 0.15)';
                             badge.style.color = 'var(--success)';
                         } else {
-                            badge.textContent = 'Model missing';
+                            const missing = [
+                                selectedTextModelAvailable ? null : 'Text missing',
+                                selectedVisionModelAvailable ? null : 'Vision missing'
+                            ].filter(Boolean).join(' • ') || 'Model missing';
+                            badge.textContent = missing;
                             badge.style.background = 'rgba(245, 158, 11, 0.15)';
                             badge.style.color = 'var(--warning)';
                         }
                     }
                     if (container) {
-                        const modelOptions = data.models.map(m => {
-                            const sizeMB = Math.round(m.size / 1024 / 1024);
-                            const sizeStr = sizeMB > 1024 ? `${(sizeMB / 1024).toFixed(1)}GB` : `${sizeMB}MB`;
-                            const selected = ollamaModelNamesMatch(m.name, selectedModel) ? 'selected' : '';
-                            return `<option value="${m.name}" ${selected}>${m.name} (${sizeStr})</option>`;
-                        }).join('');
+                        const allModels = Array.isArray(data.models) ? data.models : [];
+                        const visionCapableModels = allModels.filter(m => isLikelyVisionCapableOllamaModelName(m.name));
+                        const nonVisionModels = allModels.filter(m => !isLikelyVisionCapableOllamaModelName(m.name));
+                        const visionOptionsModels = preferOllamaVisionForActionDetection
+                            ? [...visionCapableModels, ...nonVisionModels]
+                            : allModels;
+
+                        const renderModelOptions = (selectedModelName, modelsList, options = {}) => {
+                            const {
+                                preserveMissing = true,
+                                emptyLabel = 'No compatible models installed',
+                                markNonVision = false
+                            } = options;
+                            const safeModels = Array.isArray(modelsList) ? modelsList : [];
+                            if (safeModels.length === 0) {
+                                const missingOption = (preserveMissing && selectedModelName)
+                                    ? `<option value="${selectedModelName}" selected>${selectedModelName} (saved, not installed)</option>`
+                                    : '';
+                                return `${missingOption}<option value="" disabled>${emptyLabel}</option>`;
+                            }
+                            const optionsHtml = safeModels.map(m => {
+                                const sizeMB = Math.round(m.size / 1024 / 1024);
+                                const sizeStr = sizeMB > 1024 ? `${(sizeMB / 1024).toFixed(1)}GB` : `${sizeMB}MB`;
+                                const selected = ollamaModelNamesMatch(m.name, selectedModelName) ? 'selected' : '';
+                                const nonVisionSuffix = markNonVision && !isLikelyVisionCapableOllamaModelName(m.name) ? ' • non-vision' : '';
+                                return `<option value="${m.name}" ${selected}>${m.name} (${sizeStr})${nonVisionSuffix}</option>`;
+                            }).join('');
+                            const hasSelected = safeModels.some(m => ollamaModelNamesMatch(m.name, selectedModelName));
+                            if (!hasSelected && selectedModelName && preserveMissing) {
+                                return `<option value="${selectedModelName}" selected>${selectedModelName} (saved, not installed)</option>${optionsHtml}`;
+                            }
+                            return optionsHtml;
+                        };
 
                         container.innerHTML = `
                             <div style="display: grid; gap: 8px;">
-                                <select class="setting-input" id="ollamaModel" style="cursor: pointer;">
-                                    ${modelOptions}
-                                </select>
-                                ${selectedModelAvailable ? '' : `
+                                <div style="display: grid; gap: 4px;">
+                                    <label style="font-size: 11px; color: var(--text-secondary);">Text / Coding Model (chat, summary, scripts)</label>
+                                    <select class="setting-input" id="ollamaTextModel" style="cursor: pointer;">
+                                        ${renderModelOptions(selectedTextModel, allModels, { emptyLabel: 'No models installed' })}
+                                    </select>
+                                </div>
+                                <div style="display: grid; gap: 4px;">
+                                    <label style="font-size: 11px; color: var(--text-secondary);">Vision Model (screenshots → actions/YAML)</label>
+                                    <select class="setting-input" id="ollamaVisionModel" style="cursor: pointer;">
+                                        ${renderModelOptions(selectedVisionModel, visionOptionsModels, {
+                                            emptyLabel: preferOllamaVisionForActionDetection
+                                                ? 'No vision-capable models installed'
+                                                : 'No models installed',
+                                            markNonVision: preferOllamaVisionForActionDetection
+                                        })}
+                                    </select>
+                                </div>
+                                <div style="display: grid; gap: 4px;">
+                                    <label style="font-size: 11px; color: var(--text-secondary);">Available Vision Models (detected)</label>
+                                    <select class="setting-input" id="ollamaAvailableVisionModelQuickPick" style="cursor: pointer;">
+                                        ${visionCapableModels.length > 0
+                                            ? renderModelOptions(selectedVisionModel, visionCapableModels, {
+                                                preserveMissing: false,
+                                                emptyLabel: 'No vision-capable models installed'
+                                            })
+                                            : '<option value=\"\" disabled selected>No vision-capable models installed</option>'}
+                                    </select>
+                                </div>
+                                <div style="font-size: 10px; color: var(--text-muted); line-height: 1.4;">
+                                    Recommended: <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5-coder:7b</code> for scripts/text and
+                                    <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> for screenshots/vision.
+                                </div>
+                                ${selectedTextModelAvailable ? '' : `
                                     <div style="padding: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 6px; color: var(--warning); font-size: 11px;">
-                                        Selected model "${selectedModel}" is not installed. Choose an available model and save.
+                                        Text model "${selectedTextModel}" is not installed. Choose an available model and save.
                                     </div>
                                 `}
+                                ${selectedVisionModelAvailable ? '' : `
+                                    <div style="padding: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 6px; color: var(--warning); font-size: 11px;">
+                                        Vision model "${selectedVisionModel}" is not installed. Choose an available model and save.
+                                    </div>
+                                `}
+                                ${selectedVisionModelAvailable && !visionModelLooksCapable ? `
+                                    <div style="padding: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 6px; color: var(--warning); font-size: 11px;">
+                                        Vision model "${selectedVisionModel}" may not support images well. A multimodal model like <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> is recommended.
+                                    </div>
+                                ` : ''}
+                                ${preferOllamaVisionForActionDetection && visionCapableModels.length === 0 ? `
+                                    <div style="padding: 8px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.18); border-radius: 6px; color: var(--error); font-size: 11px;">
+                                        "Prefer Ollama Vision" is enabled, but no installed Ollama models look multimodal/vision-capable. Install <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> (or another vision model).
+                                    </div>
+                                ` : ''}
                             </div>
                         `;
                     }
@@ -8251,7 +8361,9 @@
                             <div style="padding: 10px; background: var(--bg-tertiary); border-radius: 6px; font-size: 12px;">
                                 <div style="color: var(--warning); margin-bottom: 6px;">No models installed</div>
                                 <div style="color: var(--text-muted);">
-                                    Install any model (example): <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">ollama pull llama3.2</code>
+                                    Install and test models (examples):
+                                    <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">ollama pull qwen2.5-coder:7b</code> and
+                                    <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">ollama pull qwen2.5vl:7b</code>
                                 </div>
                             </div>
                         `;
@@ -8297,9 +8409,12 @@
         async function saveLLMSettings(options = {}) {
             const { silent = false } = options;
             try {
-                // Get Ollama model from select or use current value
-                const ollamaModelSelect = document.getElementById('ollamaModel');
-                const ollamaModel = ollamaModelSelect?.value || currentOllamaModel;
+                // Get Ollama models from selects or use current values
+                const ollamaTextModelSelect = document.getElementById('ollamaTextModel');
+                const ollamaVisionModelSelect = document.getElementById('ollamaVisionModel');
+                const ollamaModel = ollamaTextModelSelect?.value || currentOllamaTextModel;
+                const ollamaVisionModel = ollamaVisionModelSelect?.value || currentOllamaVisionModel;
+                const preferOllamaVisionForActionDetection = document.getElementById('preferOllamaVisionForActionDetection')?.checked === true;
 
                 const settings = {
                     anthropicApiKey: document.getElementById('anthropicApiKey')?.value || '',
@@ -8309,6 +8424,8 @@
                     claudeCliModel: document.getElementById('claudeCliModel')?.value || 'haiku',
                     ollamaUrl: document.getElementById('ollamaUrl')?.value || 'http://localhost:11434',
                     ollamaModel: ollamaModel,
+                    ollamaVisionModel: ollamaVisionModel,
+                    preferOllamaVisionForActionDetection,
                     preferredProvider: document.getElementById('preferredProvider')?.value || 'auto'
                 };
 
@@ -8327,7 +8444,8 @@
                 }
 
                 // Update current model
-                currentOllamaModel = ollamaModel;
+                currentOllamaTextModel = ollamaModel;
+                currentOllamaVisionModel = ollamaVisionModel;
 
                 await checkOllamaStatus();
                 await updatePreferredProviderDropdown(settings.preferredProvider || 'auto');
@@ -8421,13 +8539,22 @@
         document.getElementById('closeSettings').addEventListener('click', closeAllModals);
         document.getElementById('refreshSetup').addEventListener('click', loadSetupStatus);
         document.getElementById('saveSettings')?.addEventListener('click', saveSettingsFromForm);
-        ['preferredProvider', 'anthropicModel', 'openaiModel', 'claudeCliModel', 'ollamaUrl', 'anthropicApiKey', 'openaiApiKey'].forEach((id) => {
+        ['preferredProvider', 'anthropicModel', 'openaiModel', 'claudeCliModel', 'ollamaUrl', 'anthropicApiKey', 'openaiApiKey', 'preferOllamaVisionForActionDetection'].forEach((id) => {
             document.getElementById(id)?.addEventListener('change', () => {
                 void saveLLMSettings({ silent: true });
             });
         });
         document.getElementById('ollamaModelSelector')?.addEventListener('change', (event) => {
-            if (event.target && event.target.id === 'ollamaModel') {
+            if (event.target && event.target.id === 'ollamaAvailableVisionModelQuickPick') {
+                const quickPickValue = event.target.value;
+                const visionSelect = document.getElementById('ollamaVisionModel');
+                if (visionSelect && quickPickValue) {
+                    visionSelect.value = quickPickValue;
+                }
+                void saveLLMSettings({ silent: true });
+                return;
+            }
+            if (event.target && (event.target.id === 'ollamaTextModel' || event.target.id === 'ollamaVisionModel')) {
                 void saveLLMSettings({ silent: true });
             }
         });

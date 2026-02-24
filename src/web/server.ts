@@ -4566,9 +4566,13 @@ app.post('/api/testing/mobile/recordings/:id/analyze', async (c) => {
 
     console.log(`[MobileRecording] Re-analyzing recording ${recordingId} with ${screenshotFiles.length} screenshots...`);
 
-    // Run AI analysis — pass a vision-capable provider as fallback when no API key
-    const visionProvider = createClaudeCliVisionProvider();
-    const analysisResult = await analyzeScreenshotsForActions(screenshotsDir, 20, visionProvider ?? undefined);
+    // Run AI analysis — try Claude CLI vision first, then Ollama vision fallback (if configured)
+    const visionProviders = await getActionDetectionVisionProviders();
+    const analysisResult = await analyzeScreenshotsForActions(
+      screenshotsDir,
+      20,
+      visionProviders.length > 0 ? visionProviders : undefined
+    );
 
     if (analysisResult.actions.length === 0) {
       return c.json({
@@ -5173,6 +5177,9 @@ function createClaudeCliVisionProvider(): ActionDetectorProvider | null {
 
 const OLLAMA_TAGS_TIMEOUT_MS = 3_000;
 const OLLAMA_GENERATE_TIMEOUT_MS = 120_000;
+const OLLAMA_VISION_GENERATE_TIMEOUT_MS = 180_000;
+const DEFAULT_OLLAMA_TEXT_MODEL = 'qwen2.5-coder:7b';
+const DEFAULT_OLLAMA_VISION_MODEL = 'qwen2.5vl:7b';
 
 type OllamaModelInfo = {
   name: string;
@@ -5200,6 +5207,16 @@ function normalizeOllamaModelName(input: string | undefined | null): string {
   return raw;
 }
 
+function getConfiguredOllamaTextModel(): string {
+  const model = (llmSettings.ollamaModel || DEFAULT_OLLAMA_TEXT_MODEL).trim();
+  return model || DEFAULT_OLLAMA_TEXT_MODEL;
+}
+
+function getConfiguredOllamaVisionModel(): string {
+  const model = (llmSettings.ollamaVisionModel || DEFAULT_OLLAMA_VISION_MODEL).trim();
+  return model || DEFAULT_OLLAMA_VISION_MODEL;
+}
+
 function matchesOllamaModel(installedName: string, selectedModel: string): boolean {
   const installed = normalizeOllamaModelName(installedName);
   const selected = normalizeOllamaModelName(selectedModel);
@@ -5216,7 +5233,7 @@ async function fetchOllamaStatusSnapshot(
   timeoutMs = OLLAMA_TAGS_TIMEOUT_MS
 ): Promise<OllamaStatusSnapshot> {
   const ollamaUrl = normalizeOllamaUrl(requestedUrl || llmSettings.ollamaUrl);
-  const selectedModel = (requestedModel || llmSettings.ollamaModel || 'llama3.2').trim() || 'llama3.2';
+  const selectedModel = (requestedModel || getConfiguredOllamaTextModel()).trim() || DEFAULT_OLLAMA_TEXT_MODEL;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -5269,7 +5286,7 @@ async function fetchOllamaStatusSnapshot(
 
 async function createOllamaProvider(): Promise<LLMProvider | null> {
   try {
-    const snapshot = await fetchOllamaStatusSnapshot();
+    const snapshot = await fetchOllamaStatusSnapshot(undefined, getConfiguredOllamaTextModel());
     if (!snapshot.running || snapshot.models.length === 0 || !snapshot.selectedModelAvailable) {
       return null;
     }
@@ -5332,6 +5349,105 @@ async function createOllamaProvider(): Promise<LLMProvider | null> {
   } catch {
     return null;
   }
+}
+
+function isLikelyVisionCapableOllamaModel(modelName: string): boolean {
+  const normalized = normalizeOllamaModelName(modelName);
+  if (!normalized) return false;
+  return /(vision|vl\b|llava|bakllava|moondream|gemma3|minicpm-v|qwen2\.5vl|qwen2-vl)/.test(normalized);
+}
+
+async function createOllamaVisionProvider(): Promise<ActionDetectorProvider | null> {
+  try {
+    const visionModel = getConfiguredOllamaVisionModel();
+    const snapshot = await fetchOllamaStatusSnapshot(undefined, visionModel);
+    if (!snapshot.running || snapshot.models.length === 0 || !snapshot.selectedModelAvailable) {
+      return null;
+    }
+
+    const ollamaUrl = snapshot.ollamaUrl;
+    const ollamaModel = snapshot.selectedModel;
+
+    if (!isLikelyVisionCapableOllamaModel(ollamaModel)) {
+      console.warn(`[Ollama Vision] Selected model "${ollamaModel}" may not support vision; continuing because it is user-configured.`);
+    }
+
+    return {
+      name: `ollama-vision (${ollamaModel})`,
+      sendMessageWithImages: async (prompt: string, imagePaths: string[]) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), OLLAMA_VISION_GENERATE_TIMEOUT_MS);
+
+        try {
+          const images = imagePaths.map((imagePath) => readFileSync(imagePath).toString('base64'));
+          const resp = await fetch(`${ollamaUrl}/api/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              model: ollamaModel,
+              prompt,
+              images,
+              format: 'json',
+              stream: false,
+              options: {
+                temperature: 0
+              }
+            })
+          });
+
+          const rawText = await resp.text();
+          let data: { response?: string; error?: string } = {};
+          try {
+            data = rawText ? JSON.parse(rawText) as { response?: string; error?: string } : {};
+          } catch {}
+
+          if (!resp.ok) {
+            const detail = data.error || rawText || `HTTP ${resp.status}`;
+            throw new Error(`Ollama vision generate failed (${resp.status}): ${String(detail).slice(0, 400)}`);
+          }
+          if (typeof data.error === 'string' && data.error.trim()) {
+            throw new Error(`Ollama vision generate error: ${data.error}`);
+          }
+          if (typeof data.response !== 'string' || !data.response.trim()) {
+            throw new Error('Ollama vision generate returned empty response');
+          }
+
+          return data.response;
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') {
+            throw new Error(`Ollama vision timeout (${Math.round(OLLAMA_VISION_GENERATE_TIMEOUT_MS / 1000)}s).`);
+          }
+          throw error;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getActionDetectionVisionProviders(): Promise<ActionDetectorProvider[]> {
+  const providers: ActionDetectorProvider[] = [];
+  const preferOllamaVision = llmSettings.preferOllamaVisionForActionDetection === true;
+  const ollamaVision = await createOllamaVisionProvider();
+  const claudeCliVision = createClaudeCliVisionProvider();
+
+  if (preferOllamaVision) {
+    if (ollamaVision) providers.push(ollamaVision);
+    if (claudeCliVision) providers.push(claudeCliVision);
+  } else {
+    if (claudeCliVision) providers.push(claudeCliVision);
+    if (ollamaVision) providers.push(ollamaVision);
+  }
+
+  if (providers.length > 0) {
+    console.log(`[AIActionDetector] Vision provider fallback order: ${providers.map(p => p.name).join(' -> ')}`);
+  }
+
+  return providers;
 }
 
 // Get configured LLM provider (prioritize preferred provider, then fallback to priority order)
@@ -5585,8 +5701,12 @@ async function runOCRInBackground(
     if (screenshotFiles.length >= 2) {
       try {
         broadcastProgress('actions', 'running', 'Detecting user actions from screenshots...');
-        const visionProvider = createClaudeCliVisionProvider();
-        const analysisResult = await analyzeScreenshotsForActions(screenshotsDir, 20, visionProvider ?? undefined);
+        const visionProviders = await getActionDetectionVisionProviders();
+        const analysisResult = await analyzeScreenshotsForActions(
+          screenshotsDir,
+          20,
+          visionProviders.length > 0 ? visionProviders : undefined
+        );
 
         if (analysisResult.actions.length > 0) {
           const maestroYaml = generateMaestroYaml(
@@ -5605,8 +5725,14 @@ async function runOCRInBackground(
           console.log(`[BackgroundOCR] AI detected ${detectedActionsCount} actions, YAML saved to ${flowPath}`);
           broadcastProgress('actions', 'done', `Detected ${detectedActionsCount} actions`);
         } else {
+          const actionDetectionFailed = typeof analysisResult.summary === 'string'
+            && analysisResult.summary.startsWith('AI analysis failed:');
           console.log('[BackgroundOCR] AI action detection returned 0 actions, keeping fallback YAML');
-          broadcastProgress('actions', 'done', 'No actions detected — kept fallback YAML');
+          if (actionDetectionFailed) {
+            broadcastProgress('actions', 'failed', 'Action detection failed — kept fallback YAML', analysisResult.summary);
+          } else {
+            broadcastProgress('actions', 'done', 'No actions detected — kept fallback YAML');
+          }
         }
       } catch (actionError) {
         console.warn('[BackgroundOCR] AI action detection failed, keeping fallback YAML:', actionError);
@@ -6560,6 +6686,8 @@ let llmSettings: {
   openaiModel?: string;
   ollamaUrl?: string;
   ollamaModel?: string;
+  ollamaVisionModel?: string;
+  preferOllamaVisionForActionDetection?: boolean;
   claudeCliModel?: string;
   preferredProvider?: 'anthropic' | 'openai' | 'claude-cli' | 'ollama' | 'auto';
 } = {};
@@ -6591,7 +6719,9 @@ app.get('/api/settings/llm', async (c) => {
     openaiApiKey: llmSettings.openaiApiKey ? '••••••••' + llmSettings.openaiApiKey.slice(-4) : '',
     openaiModel: llmSettings.openaiModel || 'gpt-5.2',
     ollamaUrl: llmSettings.ollamaUrl || 'http://localhost:11434',
-    ollamaModel: llmSettings.ollamaModel || 'llama3.2',
+    ollamaModel: getConfiguredOllamaTextModel(),
+    ollamaVisionModel: getConfiguredOllamaVisionModel(),
+    preferOllamaVisionForActionDetection: llmSettings.preferOllamaVisionForActionDetection === true,
     claudeCliModel: llmSettings.claudeCliModel || process.env.CLAUDE_CLI_MODEL || 'haiku',
     preferredProvider: llmSettings.preferredProvider || 'auto'
   });
@@ -6624,6 +6754,12 @@ app.put('/api/settings/llm', async (c) => {
     }
     if (body.ollamaModel) {
       llmSettings.ollamaModel = body.ollamaModel;
+    }
+    if (body.ollamaVisionModel) {
+      llmSettings.ollamaVisionModel = body.ollamaVisionModel;
+    }
+    if (body.preferOllamaVisionForActionDetection !== undefined) {
+      llmSettings.preferOllamaVisionForActionDetection = !!body.preferOllamaVisionForActionDetection;
     }
     if (body.claudeCliModel) {
       llmSettings.claudeCliModel = body.claudeCliModel;
@@ -6718,15 +6854,28 @@ app.put('/api/settings/jira', async (c) => {
 // Get Ollama status and available models
 app.get('/api/ollama/status', async (c) => {
   const requestedUrl = c.req.query('url');
+  const requestedTextModel = c.req.query('textModel') || c.req.query('model');
+  const requestedVisionModel = c.req.query('visionModel');
+  const selectedTextModel = (requestedTextModel || getConfiguredOllamaTextModel()).trim() || DEFAULT_OLLAMA_TEXT_MODEL;
+  const selectedVisionModel = (requestedVisionModel || getConfiguredOllamaVisionModel()).trim() || DEFAULT_OLLAMA_VISION_MODEL;
 
   try {
-    const snapshot = await fetchOllamaStatusSnapshot(requestedUrl, llmSettings.ollamaModel, OLLAMA_TAGS_TIMEOUT_MS);
+    const snapshot = await fetchOllamaStatusSnapshot(requestedUrl, selectedTextModel, OLLAMA_TAGS_TIMEOUT_MS);
+    const visionModelAvailable = (snapshot.models || []).some((m) => typeof m?.name === 'string' && matchesOllamaModel(m.name, selectedVisionModel));
+    const visionModelLooksCapable = isLikelyVisionCapableOllamaModel(selectedVisionModel);
     if (!snapshot.running) {
       return c.json({
         running: false,
         models: [],
         currentModel: snapshot.selectedModel,
         selectedModelAvailable: false,
+        currentTextModel: selectedTextModel,
+        selectedTextModelAvailable: false,
+        currentVisionModel: selectedVisionModel,
+        selectedVisionModelAvailable: false,
+        selectedVisionModelLooksCapable: visionModelLooksCapable,
+        recommendedTextModel: DEFAULT_OLLAMA_TEXT_MODEL,
+        recommendedVisionModel: DEFAULT_OLLAMA_VISION_MODEL,
         ollamaUrl: snapshot.ollamaUrl,
         error: snapshot.error || 'Ollama not responding'
       });
@@ -6743,6 +6892,13 @@ app.get('/api/ollama/status', async (c) => {
       models,
       currentModel: snapshot.selectedModel,
       selectedModelAvailable: snapshot.selectedModelAvailable,
+      currentTextModel: selectedTextModel,
+      selectedTextModelAvailable: snapshot.selectedModelAvailable,
+      currentVisionModel: selectedVisionModel,
+      selectedVisionModelAvailable: visionModelAvailable,
+      selectedVisionModelLooksCapable: visionModelLooksCapable,
+      recommendedTextModel: DEFAULT_OLLAMA_TEXT_MODEL,
+      recommendedVisionModel: DEFAULT_OLLAMA_VISION_MODEL,
       ollamaUrl: snapshot.ollamaUrl
     });
   } catch (error) {
@@ -6750,8 +6906,15 @@ app.get('/api/ollama/status', async (c) => {
     return c.json({
       running: false,
       models: [],
-      currentModel: llmSettings.ollamaModel || 'llama3.2',
+      currentModel: selectedTextModel,
       selectedModelAvailable: false,
+      currentTextModel: selectedTextModel,
+      selectedTextModelAvailable: false,
+      currentVisionModel: selectedVisionModel,
+      selectedVisionModelAvailable: false,
+      selectedVisionModelLooksCapable: isLikelyVisionCapableOllamaModel(selectedVisionModel),
+      recommendedTextModel: DEFAULT_OLLAMA_TEXT_MODEL,
+      recommendedVisionModel: DEFAULT_OLLAMA_VISION_MODEL,
       ollamaUrl: normalizeOllamaUrl(requestedUrl || llmSettings.ollamaUrl),
       error: error instanceof Error ? error.message : 'Ollama not available'
     });

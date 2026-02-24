@@ -67,19 +67,109 @@ Respond in JSON format:
   "summary": "brief summary of the user flow"
 }
 
-Be conservative - only include actions you're confident about (confidence > 0.7).
-Focus on meaningful interactions, not every tiny change.`;
+  Be conservative - only include actions you're confident about (confidence > 0.7).
+  Focus on meaningful interactions, not every tiny change.
+  Return ONLY valid JSON (no Markdown, no code fences, no extra commentary).`;
 }
 
 /**
  * Parse JSON analysis result from raw LLM response text
  */
-function parseAnalysisResponse(text: string): AnalysisResult {
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error('Could not parse JSON from response');
+function sanitizePreview(text: string, maxLength = 400): string {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '(empty response)';
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function extractCodeFenceCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null = null;
+  while ((match = fenceRegex.exec(text)) !== null) {
+    if (match[1]?.trim()) candidates.push(match[1].trim());
   }
-  return JSON.parse(jsonMatch[0]) as AnalysisResult;
+  return candidates;
+}
+
+function extractBraceObjectCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+    if (ch === '}') {
+      if (depth > 0) depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const candidate = text.slice(start, i + 1).trim();
+        if (candidate) candidates.push(candidate);
+        start = -1;
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function coerceAnalysisResult(parsed: unknown): AnalysisResult {
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Parsed response is not an object');
+  }
+
+  const obj = parsed as Partial<AnalysisResult>;
+  return {
+    actions: Array.isArray(obj.actions) ? obj.actions : [],
+    appName: typeof obj.appName === 'string' ? obj.appName : undefined,
+    summary: typeof obj.summary === 'string' ? obj.summary : '',
+    skipped: typeof obj.skipped === 'boolean' ? obj.skipped : undefined,
+  };
+}
+
+function parseAnalysisResponse(text: string): AnalysisResult {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    throw new Error('Could not parse JSON from response (empty response)');
+  }
+
+  const candidates: string[] = [raw, ...extractCodeFenceCandidates(raw), ...extractBraceObjectCandidates(raw)];
+  const seen = new Set<string>();
+  let lastError: unknown = null;
+
+  for (const candidate of candidates) {
+    const normalized = candidate.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    try {
+      return coerceAnalysisResult(JSON.parse(normalized));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const detail = lastError instanceof Error ? lastError.message : 'unknown parse error';
+  throw new Error(`Could not parse JSON from response (${detail}). Preview: ${sanitizePreview(raw)}`);
 }
 
 /**
@@ -133,7 +223,7 @@ async function analyzeWithAnthropicVision(
 export async function analyzeScreenshotsForActions(
   screenshotsDir: string,
   maxScreenshots: number = 20,
-  provider?: ActionDetectorProvider
+  provider?: ActionDetectorProvider | ActionDetectorProvider[]
 ): Promise<AnalysisResult> {
   // Get sorted screenshot files
   const files = readdirSync(screenshotsDir)
@@ -154,44 +244,60 @@ export async function analyzeScreenshotsForActions(
 
   const screenshotPaths = selectedFiles.map(file => join(screenshotsDir, file));
   const prompt = buildAnalysisPrompt(selectedFiles.length);
+  const providerCandidates = (Array.isArray(provider) ? provider : [provider]).filter(
+    (p): p is ActionDetectorProvider => !!p
+  );
 
   console.log(`[AIActionDetector] Analyzing ${selectedFiles.length} screenshots...`);
+  const strategyErrors: string[] = [];
 
-  try {
-    // Strategy 1: Anthropic API vision (fastest — single call with base64 images)
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (apiKey) {
+  // Strategy 1: Anthropic API vision (fastest — single call with base64 images)
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (apiKey) {
+    try {
       console.log('[AIActionDetector] Using Anthropic API vision (fast path)');
       const result = await analyzeWithAnthropicVision(apiKey, screenshotPaths, prompt);
       console.log(`[AIActionDetector] Detected ${result.actions.length} actions`);
       return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      strategyErrors.push(`anthropic-api vision: ${message}`);
+      console.warn(`[AIActionDetector] Anthropic vision failed: ${message}`);
     }
+  }
 
-    // Strategy 2: Provider with image support (e.g. Claude CLI with Read tool)
-    if (provider?.sendMessageWithImages) {
-      console.log(`[AIActionDetector] Using provider: ${provider.name} (image support)`);
-      const response = await provider.sendMessageWithImages(prompt, screenshotPaths);
+  // Strategy 2+: Provider with image support (e.g. Claude CLI, Ollama vision)
+  for (const candidate of providerCandidates) {
+    if (!candidate.sendMessageWithImages) continue;
+    try {
+      console.log(`[AIActionDetector] Using provider: ${candidate.name} (image support)`);
+      const response = await candidate.sendMessageWithImages(prompt, screenshotPaths);
       const result = parseAnalysisResponse(response);
       console.log(`[AIActionDetector] Detected ${result.actions.length} actions`);
       return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      strategyErrors.push(`${candidate.name}: ${message}`);
+      console.warn(`[AIActionDetector] Provider failed (${candidate.name}): ${message}`);
     }
+  }
 
-    // No provider available
-    console.warn('[AIActionDetector] ⚠️ No vision-capable provider available');
-    console.warn('[AIActionDetector] Set ANTHROPIC_API_KEY or ensure Claude CLI is available');
+  if (strategyErrors.length > 0) {
+    const combined = strategyErrors.slice(0, 3).join(' | ');
+    console.error('[AIActionDetector] Analysis failed across all vision strategies:', combined);
     return {
       actions: [],
-      summary: 'No vision-capable AI provider available',
-      skipped: true
-    };
-
-  } catch (error) {
-    console.error('[AIActionDetector] Analysis failed:', error);
-    return {
-      actions: [],
-      summary: `AI analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      summary: `AI analysis failed: ${combined}`
     };
   }
+
+  console.warn('[AIActionDetector] ⚠️ No vision-capable provider available');
+  console.warn('[AIActionDetector] Set ANTHROPIC_API_KEY, ensure Claude CLI is available, or configure a vision-capable Ollama model');
+  return {
+    actions: [],
+    summary: 'No vision-capable AI provider available',
+    skipped: true
+  };
 }
 
 /**
