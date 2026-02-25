@@ -1824,10 +1824,20 @@
             justify-content: center;
             padding-top: 15vh;
             z-index: 1000;
+            overscroll-behavior: contain;
         }
 
         .modal-overlay.active {
             display: flex;
+        }
+
+        .modal-overlay.code-modal-overlay {
+            align-items: center;
+            justify-content: center;
+            padding: clamp(10px, 3vh, 24px);
+            padding-top: clamp(10px, 3vh, 24px);
+            background: rgba(4, 6, 10, 0.78);
+            backdrop-filter: blur(2px);
         }
 
         .modal {
@@ -2014,10 +2024,12 @@
             max-width: 900px;
             width: min(92vw, 900px);
             max-height: 82vh;
+            height: min(86vh, 860px);
             display: flex;
             flex-direction: column;
             background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.02)), var(--bg-surface);
             box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+            overscroll-behavior: contain;
         }
 
         .code-modal .modal-header {
@@ -2053,12 +2065,21 @@
         }
 
         .code-modal-body {
-            padding: 14px 18px 0;
+            padding: 12px 16px 0;
             flex: 1;
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 10px;
+            min-height: 0;
+        }
+
+        .code-modal-panel {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+            min-width: 0;
         }
 
         .code-editor {
@@ -2081,17 +2102,20 @@
         .code-editor-container {
             display: flex;
             flex: 1;
-            background: var(--bg-primary);
+            background: #070b11;
             border: 1px solid var(--border);
             border-radius: 10px;
             overflow: hidden;
             min-height: 320px;
+            height: 100%;
+            min-width: 0;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
         }
 
         .code-line-numbers {
-            background: var(--bg-tertiary);
+            background: #0b1017;
             color: var(--text-muted);
-            padding: 14px 12px 14px 14px;
+            padding: 14px 12px calc(14px + 4.8em) 14px;
             font-family: 'SF Mono', Monaco, Consolas, monospace;
             font-size: 12px;
             line-height: 1.6;
@@ -2099,16 +2123,16 @@
             user-select: none;
             border-right: 1px solid var(--border);
             min-width: 45px;
-            overflow: hidden;
+            overflow-y: hidden;
             white-space: pre;
         }
 
         .code-editor-textarea {
             flex: 1;
-            background: transparent;
+            background: #070b11;
             color: var(--text-primary);
             border: none;
-            padding: 14px 16px;
+            padding: 14px 16px calc(14px + 4.8em) 16px;
             font-family: 'SF Mono', Monaco, Consolas, monospace;
             font-size: 12px;
             line-height: 1.6;
@@ -2116,10 +2140,20 @@
             tab-size: 2;
             outline: none;
             overflow-y: auto;
+            height: 100%;
+            min-height: 0;
+            box-sizing: border-box;
+            scroll-padding-bottom: 4.8em;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
         }
 
         .code-editor-textarea:focus {
             outline: none;
+        }
+
+        .code-editor-textarea::selection {
+            background: rgba(96, 165, 250, 0.28);
         }
 
         /* YAML Syntax Highlighting (via overlay) */
@@ -2140,6 +2174,16 @@
             max-height: 180px;
             overflow-y: auto;
             color: #8b949e;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .code-vars-table-wrap {
+            overflow: auto;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
         }
 
         .code-modal-output .output-success { color: #4ade80; }
@@ -2179,6 +2223,7 @@
         @media (max-width: 720px) {
             .code-modal {
                 max-height: 88vh;
+                height: min(92vh, 920px);
             }
 
             .code-modal-footer {
@@ -7049,7 +7094,8 @@
                                 <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
                                     <a href="https://ollama.ai" target="_blank" style="color: var(--accent);">Install Ollama</a> - Used for local text/coding and optional visual fallback. Recommended starting points:
                                     <a href="https://ollama.com/library/qwen2.5-coder" target="_blank" style="color: var(--accent);">qwen2.5-coder</a> (scripts/text) and
-                                    <a href="https://ollama.com/library/qwen2.5vl" target="_blank" style="color: var(--accent);">qwen2.5vl</a> (screenshots/vision). You must download and test on your machine.
+                                    <a href="https://ollama.com/library/qwen2.5vl" target="_blank" style="color: var(--accent);">qwen2.5vl</a> or
+                                    <a href="https://ollama.com/library/gemma3" target="_blank" style="color: var(--accent);">gemma3</a> (for example <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">gemma3:4b</code>) for screenshots/vision. You must download and test on your machine.
                                 </div>
                             </div>
                             <div class="setting-item">
@@ -8324,7 +8370,7 @@
                                 </div>
                                 <div style="font-size: 10px; color: var(--text-muted); line-height: 1.4;">
                                     Recommended: <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5-coder:7b</code> for scripts/text and
-                                    <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> for screenshots/vision.
+                                    <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> or <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">gemma3:4b</code> for screenshots/vision.
                                 </div>
                                 ${selectedTextModelAvailable ? '' : `
                                     <div style="padding: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 6px; color: var(--warning); font-size: 11px;">
@@ -8338,12 +8384,12 @@
                                 `}
                                 ${selectedVisionModelAvailable && !visionModelLooksCapable ? `
                                     <div style="padding: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 6px; color: var(--warning); font-size: 11px;">
-                                        Vision model "${selectedVisionModel}" may not support images well. A multimodal model like <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> is recommended.
+                                        Vision model "${selectedVisionModel}" may not support images well. A multimodal model like <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> or <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">gemma3:4b</code> is recommended.
                                     </div>
                                 ` : ''}
                                 ${preferOllamaVisionForActionDetection && visionCapableModels.length === 0 ? `
                                     <div style="padding: 8px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.18); border-radius: 6px; color: var(--error); font-size: 11px;">
-                                        "Prefer Ollama Vision" is enabled, but no installed Ollama models look multimodal/vision-capable. Install <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> (or another vision model).
+                                        "Prefer Ollama Vision" is enabled, but no installed Ollama models look multimodal/vision-capable. Install <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">qwen2.5vl:7b</code> or <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">gemma3:4b</code> (or another vision model).
                                     </div>
                                 ` : ''}
                             </div>
@@ -8363,7 +8409,7 @@
                                 <div style="color: var(--text-muted);">
                                     Install and test models (examples):
                                     <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">ollama pull qwen2.5-coder:7b</code> and
-                                    <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">ollama pull qwen2.5vl:7b</code>
+                                    <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">ollama pull qwen2.5vl:7b</code> (or <code style="background: var(--bg-elevated); padding: 1px 4px; border-radius: 3px;">ollama pull gemma3:4b</code>)
                                 </div>
                             </div>
                         `;
@@ -14860,7 +14906,7 @@
 
             // If we have the session locally, generate code directly
             if (recorderSession.actions && recorderSession.actions.length > 0) {
-                showCodeModal(generateSpecCode(recorderSession));
+                showCodeModal(generateSpecCode(recorderSession), 'typescript', recorderSession.id, 'web');
                 return;
             }
 
@@ -14879,7 +14925,7 @@
                 }
 
                 // Show code in a modal
-                showCodeModal(data.specCode || generateSpecCode(data.recording));
+                showCodeModal(data.specCode || generateSpecCode(data.recording), 'typescript', recorderSession.id, 'web');
 
             } catch (error) {
                 showToast('Failed to load spec code', 'error');
@@ -16421,20 +16467,557 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
             }
         }
 
+        let codeModalState = null;
+        let codeModalScrollLock = null;
+        const CODE_MODAL_MOBILE_DEVICE_STORAGE_KEY = 'discoverylab.codeModal.mobileRunDeviceId';
+
+        function lockPageScrollForCodeModal() {
+            if (codeModalScrollLock) return;
+            const body = document.body;
+            const docEl = document.documentElement;
+            const scrollX = window.scrollX || docEl.scrollLeft || 0;
+            const scrollY = window.scrollY || docEl.scrollTop || 0;
+
+            codeModalScrollLock = {
+                scrollX,
+                scrollY,
+                body: {
+                    position: body.style.position,
+                    top: body.style.top,
+                    left: body.style.left,
+                    right: body.style.right,
+                    width: body.style.width,
+                    overflow: body.style.overflow
+                },
+                htmlOverflow: docEl.style.overflow
+            };
+
+            docEl.style.overflow = 'hidden';
+            body.style.overflow = 'hidden';
+            body.style.position = 'fixed';
+            body.style.top = `-${scrollY}px`;
+            body.style.left = `-${scrollX}px`;
+            body.style.right = '0';
+            body.style.width = '100%';
+        }
+
+        function unlockPageScrollForCodeModal() {
+            if (!codeModalScrollLock) return;
+            const body = document.body;
+            const docEl = document.documentElement;
+            const lock = codeModalScrollLock;
+
+            docEl.style.overflow = lock.htmlOverflow || '';
+            body.style.position = lock.body.position || '';
+            body.style.top = lock.body.top || '';
+            body.style.left = lock.body.left || '';
+            body.style.right = lock.body.right || '';
+            body.style.width = lock.body.width || '';
+            body.style.overflow = lock.body.overflow || '';
+
+            window.scrollTo(lock.scrollX || 0, lock.scrollY || 0);
+            codeModalScrollLock = null;
+        }
+
+        function getPreferredCodeModalMobileDeviceId() {
+            if (codeModalState?.mobileRunSelectedDeviceId) return codeModalState.mobileRunSelectedDeviceId;
+            try {
+                const fromStorage = localStorage.getItem(CODE_MODAL_MOBILE_DEVICE_STORAGE_KEY);
+                if (fromStorage) return fromStorage;
+            } catch {}
+            const deviceDropdown = document.getElementById('deviceDropdown');
+            if (deviceDropdown && deviceDropdown.value) return deviceDropdown.value;
+            return '';
+        }
+
+        function formatCodeModalMobileDeviceOptionLabel(device) {
+            const platform = String(device?.platform || '').toUpperCase() || 'MOBILE';
+            const name = String(device?.name || device?.id || 'Unknown device');
+            const status = String(device?.status || '').toLowerCase();
+            return status ? `${platform} · ${name} (${status})` : `${platform} · ${name}`;
+        }
+
+        function renderCodeModalMobileDevicePicker() {
+            const selectEl = document.getElementById('codeModalMobileDeviceSelect');
+            const statusEl = document.getElementById('codeModalMobileDeviceStatus');
+            if (!selectEl || !statusEl || !codeModalState) return;
+
+            const devices = Array.isArray(codeModalState.mobileRunDevices) ? codeModalState.mobileRunDevices : [];
+            const loading = codeModalState.mobileRunDevicesLoading === true;
+            const selectedId = codeModalState.mobileRunSelectedDeviceId || '';
+
+            const options = ['<option value="">Auto-detect device (Maestro default)</option>'];
+            for (const device of devices) {
+                const id = String(device?.id || '').trim();
+                if (!id) continue;
+                const selectedAttr = selectedId === id ? ' selected' : '';
+                options.push(`<option value="${escapeAttr(id)}"${selectedAttr}>${escapeHtml(formatCodeModalMobileDeviceOptionLabel(device))}</option>`);
+            }
+            selectEl.innerHTML = options.join('');
+
+            if (loading) {
+                statusEl.textContent = 'Loading devices...';
+                statusEl.style.color = 'var(--text-muted)';
+            } else if (devices.length === 0) {
+                statusEl.textContent = 'No connected/booted devices found';
+                statusEl.style.color = 'var(--warning)';
+            } else if (selectedId) {
+                const selected = devices.find(d => String(d.id || '') === selectedId);
+                statusEl.textContent = selected ? `Selected: ${selected.name}` : 'Selected device unavailable (using auto)';
+                statusEl.style.color = selected ? 'var(--success)' : 'var(--warning)';
+            } else {
+                statusEl.textContent = 'Using auto-detect unless a device is selected';
+                statusEl.style.color = 'var(--text-muted)';
+            }
+        }
+
+        async function loadCodeModalMobileRunDevices(forceRefresh = false) {
+            if (!codeModalState || codeModalState.type !== 'mobile') return;
+            codeModalState.mobileRunDevicesLoading = true;
+            renderCodeModalMobileDevicePicker();
+            try {
+                const url = forceRefresh
+                    ? '/api/testing/mobile/maestro-devices?refresh=1'
+                    : '/api/testing/mobile/maestro-devices';
+                const response = await fetch(url);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to load devices');
+                const devices = Array.isArray(data.devices) ? data.devices : [];
+                codeModalState.mobileRunDevices = devices;
+
+                const preferred = codeModalState.mobileRunSelectedDeviceId || getPreferredCodeModalMobileDeviceId();
+                if (preferred && devices.some(d => String(d.id || '') === preferred)) {
+                    codeModalState.mobileRunSelectedDeviceId = preferred;
+                } else {
+                    codeModalState.mobileRunSelectedDeviceId = '';
+                }
+                renderCodeModalMobileDevicePicker();
+            } catch (error) {
+                console.error('Failed to load Maestro devices for code modal:', error);
+                codeModalState.mobileRunDevices = [];
+                codeModalState.mobileRunSelectedDeviceId = '';
+                renderCodeModalMobileDevicePicker();
+                const statusEl = document.getElementById('codeModalMobileDeviceStatus');
+                if (statusEl) {
+                    statusEl.textContent = `Failed to load devices: ${error.message || 'Unknown error'}`;
+                    statusEl.style.color = 'var(--error)';
+                }
+            } finally {
+                if (codeModalState) codeModalState.mobileRunDevicesLoading = false;
+                renderCodeModalMobileDevicePicker();
+            }
+        }
+
+        function onCodeModalMobileDeviceChanged(value) {
+            if (!codeModalState) return;
+            const normalized = String(value || '').trim();
+            codeModalState.mobileRunSelectedDeviceId = normalized;
+            try {
+                if (normalized) localStorage.setItem(CODE_MODAL_MOBILE_DEVICE_STORAGE_KEY, normalized);
+                else localStorage.removeItem(CODE_MODAL_MOBILE_DEVICE_STORAGE_KEY);
+            } catch {}
+            renderCodeModalMobileDevicePicker();
+        }
+
+        function findScrollableAncestorInModal(target, modalRoot) {
+            let el = target instanceof Element ? target : null;
+            while (el && el !== modalRoot) {
+                const style = window.getComputedStyle(el);
+                const overflowY = style.overflowY || style.overflow;
+                const overflowX = style.overflowX || style.overflow;
+                const canScrollY = /(auto|scroll)/.test(overflowY) && el.scrollHeight > (el.clientHeight + 1);
+                const canScrollX = /(auto|scroll)/.test(overflowX) && el.scrollWidth > (el.clientWidth + 1);
+                if (canScrollY || canScrollX) return el;
+                el = el.parentElement;
+            }
+            return null;
+        }
+
+        function attachCodeModalScrollTrap(modalEl) {
+            if (!modalEl) return;
+            const wheelHandler = (e) => {
+                if (!modalEl.contains(e.target)) return;
+                const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+                const firstElementInPath = path.find((node) => node instanceof Element);
+                const targetEl = (e.target instanceof Element ? e.target : null) || (firstElementInPath instanceof Element ? firstElementInPath : null);
+
+                // Only intercept wheel when cursor is on the line-number gutter.
+                // Everything else should use native scrolling in Chrome (textarea/vars/output).
+                if (targetEl?.closest('#codeLineNumbers')) {
+                    const textarea = modalEl.querySelector('#codeEditorTextarea');
+                    if (textarea) {
+                        textarea.scrollBy({
+                            top: e.deltaY || 0,
+                            left: e.deltaX || 0,
+                            behavior: 'auto'
+                        });
+                    }
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return;
+                }
+            };
+
+            modalEl.addEventListener('wheel', wheelHandler, { passive: false, capture: true });
+            modalEl._wheelTrapHandler = wheelHandler;
+        }
+
+        function getCodeModalOwnerType(type) {
+            return type === 'mobile' ? 'mobile-recording' : 'web-recording';
+        }
+
+        function extractCodeModalPlaceholders(code) {
+            const matches = new Set();
+            const regex = /\$\{([A-Z][A-Z0-9_]*)\}/g;
+            let match;
+            const text = String(code || '');
+            while ((match = regex.exec(text)) !== null) {
+                if (match[1]) matches.add(match[1]);
+            }
+            return Array.from(matches).sort();
+        }
+
+        function escapeAttr(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
+        function parseEnvTestTextClient(rawText) {
+            const rows = [];
+            const lines = String(rawText || '').split(/\r?\n/);
+            let pendingNotes = [];
+            let pendingPlatform = 'both';
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) {
+                    pendingNotes = [];
+                    pendingPlatform = 'both';
+                    continue;
+                }
+                if (trimmed.startsWith('#')) {
+                    const comment = trimmed.slice(1).trim();
+                    const m = comment.match(/^platform:\s*(mobile|web|both)$/i);
+                    if (m) {
+                        pendingPlatform = m[1].toLowerCase();
+                    } else if (comment) {
+                        pendingNotes.push(comment);
+                    }
+                    continue;
+                }
+                const eqIndex = line.indexOf('=');
+                if (eqIndex <= 0) continue;
+                const key = line.slice(0, eqIndex).trim().toUpperCase();
+                if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(key)) continue;
+                rows.push({
+                    id: 'var_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+                    key,
+                    value: line.slice(eqIndex + 1).replace(/\\n/g, '\n'),
+                    isSecret: /PASSWORD|SECRET|TOKEN|KEY|OTP|PIN/.test(key),
+                    platform: ['mobile', 'web', 'both'].includes(pendingPlatform) ? pendingPlatform : 'both',
+                    notes: pendingNotes.join(' ') || ''
+                });
+                pendingNotes = [];
+                pendingPlatform = 'both';
+            }
+            return rows;
+        }
+
+        function renderEnvTestTextClient(rows) {
+            const lines = [];
+            for (const row of (rows || [])) {
+                const key = String(row.key || '').trim().toUpperCase();
+                if (!key) continue;
+                if (row.notes) lines.push(`# ${String(row.notes).trim()}`);
+                if (row.platform && row.platform !== 'both') lines.push(`# platform: ${row.platform}`);
+                lines.push(`${key}=${String(row.value || '').replace(/\n/g, '\\n')}`);
+                lines.push('');
+            }
+            return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+        }
+
+        function collectCodeModalVariablesFromTable() {
+            const rows = Array.from(document.querySelectorAll('#codeModalVarsTableBody tr[data-var-row]'));
+            return rows.map((tr) => ({
+                id: tr.dataset.id || '',
+                key: (tr.querySelector('[data-field="key"]')?.value || '').trim().toUpperCase(),
+                value: tr.querySelector('[data-field="value"]')?.value || '',
+                isSecret: tr.querySelector('[data-field="isSecret"]')?.checked === true,
+                platform: tr.querySelector('[data-field="platform"]')?.value || 'both',
+                notes: (tr.querySelector('[data-field="notes"]')?.value || '').trim(),
+            })).filter((row) => row.key);
+        }
+
+        function getCodeModalVariablesSignature(rows) {
+            return JSON.stringify((rows || []).map((row) => ({
+                key: String(row.key || '').trim().toUpperCase(),
+                value: String(row.value || ''),
+                isSecret: row.isSecret === true,
+                platform: ['mobile', 'web', 'both'].includes(row.platform) ? row.platform : 'both',
+                notes: String(row.notes || '').trim(),
+            })));
+        }
+
+        function syncCodeModalEnvFromTable() {
+            const envTextarea = document.getElementById('codeModalEnvTextarea');
+            if (!envTextarea) return;
+            const rows = collectCodeModalVariablesFromTable();
+            envTextarea.value = renderEnvTestTextClient(rows);
+            if (codeModalState) codeModalState.variables = rows;
+            updateCodeModalVariablesStatus();
+        }
+
+        function updateCodeModalVariablesStatus() {
+            if (!codeModalState) return;
+            const codeText = document.getElementById('codeEditorTextarea')?.value || codeModalState.code || '';
+            const placeholders = extractCodeModalPlaceholders(codeText);
+            codeModalState.placeholders = placeholders;
+            const rows = collectCodeModalVariablesFromTable();
+            const activePlatform = codeModalState.type === 'mobile' ? 'mobile' : 'web';
+            const scoped = rows.filter((row) => (row.platform || 'both') === 'both' || row.platform === activePlatform);
+            const rowKeys = new Set(scoped.map((row) => String(row.key || '').trim().toUpperCase()).filter(Boolean));
+            const missing = placeholders.filter((key) => !rowKeys.has(key));
+            const unused = scoped.map((row) => row.key).filter((key) => key && !placeholders.includes(key));
+            codeModalState.missingPlaceholders = missing;
+
+            const summaryEl = document.getElementById('codeModalVarSummary');
+            if (summaryEl) {
+                summaryEl.innerHTML = `
+                    <span>${placeholders.length} placeholder${placeholders.length === 1 ? '' : 's'} in script</span>
+                    <span style="color:${missing.length ? 'var(--warning)' : 'var(--success)'};">${missing.length} missing</span>
+                    <span>${unused.length} unused</span>
+                `;
+            }
+
+            const badgeEl = document.getElementById('codeModalVarsTabBadge');
+            if (badgeEl) {
+                badgeEl.textContent = missing.length > 0 ? `${missing.length} missing` : 'Ready';
+                badgeEl.style.color = missing.length > 0 ? 'var(--warning)' : 'var(--success)';
+            }
+
+            const missingEl = document.getElementById('codeModalMissingList');
+            if (missingEl) {
+                missingEl.textContent = missing.length > 0 ? `Missing: ${missing.join(', ')}` : 'All placeholders have values for this platform.';
+                missingEl.style.color = missing.length > 0 ? 'var(--warning)' : 'var(--text-muted)';
+            }
+        }
+
+        function renderCodeModalVariablesTable() {
+            if (!codeModalState) return;
+            const body = document.getElementById('codeModalVarsTableBody');
+            if (!body) return;
+            const rows = Array.isArray(codeModalState.variables) ? codeModalState.variables : [];
+            body.innerHTML = rows.length > 0 ? rows.map((row, index) => `
+                <tr data-var-row data-id="${escapeAttr(row.id || '')}">
+                    <td><input data-field="key" class="setting-input" style="min-width: 120px;" value="${escapeAttr(row.key || '')}" placeholder="PASSWORD"></td>
+                    <td><input data-field="value" type="${row.isSecret ? 'password' : 'text'}" class="setting-input" style="min-width: 180px;" value="${escapeAttr(row.value || '')}" placeholder="value"></td>
+                    <td>
+                        <select data-field="platform" class="setting-input" style="min-width: 90px;">
+                            <option value="both" ${row.platform === 'both' ? 'selected' : ''}>both</option>
+                            <option value="mobile" ${row.platform === 'mobile' ? 'selected' : ''}>mobile</option>
+                            <option value="web" ${row.platform === 'web' ? 'selected' : ''}>web</option>
+                        </select>
+                    </td>
+                    <td style="text-align: center;">
+                        <input data-field="isSecret" type="checkbox" ${row.isSecret ? 'checked' : ''} onchange="toggleCodeModalVarSecret(${index}, this.checked)">
+                    </td>
+                    <td><input data-field="notes" class="setting-input" style="min-width: 160px;" value="${escapeAttr(row.notes || '')}" placeholder="optional note"></td>
+                    <td style="text-align: right;">
+                        <button class="btn btn-secondary" style="padding: 6px 8px;" onclick="removeCodeModalVariableRow(${index})">Remove</button>
+                    </td>
+                </tr>
+            `).join('') : `<tr><td colspan="6" style="color: var(--text-muted); padding: 12px; text-align: center;">No variables saved yet</td></tr>`;
+
+            body.querySelectorAll('input, select').forEach((el) => {
+                el.addEventListener('input', () => syncCodeModalEnvFromTable());
+                el.addEventListener('change', () => syncCodeModalEnvFromTable());
+            });
+            updateCodeModalVariablesStatus();
+        }
+
+        function addCodeModalVariableRow(defaults = {}) {
+            if (!codeModalState) return;
+            codeModalState.variables = Array.isArray(codeModalState.variables) ? codeModalState.variables : [];
+            codeModalState.variables.push({
+                id: defaults.id || ('var_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7)),
+                key: (defaults.key || '').toUpperCase(),
+                value: defaults.value || '',
+                isSecret: defaults.isSecret !== false,
+                platform: defaults.platform || 'both',
+                notes: defaults.notes || ''
+            });
+            renderCodeModalVariablesTable();
+            syncCodeModalEnvFromTable();
+        }
+
+        function removeCodeModalVariableRow(index) {
+            if (!codeModalState || !Array.isArray(codeModalState.variables)) return;
+            codeModalState.variables.splice(index, 1);
+            renderCodeModalVariablesTable();
+            syncCodeModalEnvFromTable();
+        }
+
+        function toggleCodeModalVarSecret(index, checked) {
+            if (!codeModalState || !Array.isArray(codeModalState.variables) || !codeModalState.variables[index]) return;
+            codeModalState.variables[index].isSecret = !!checked;
+            renderCodeModalVariablesTable();
+        }
+
+        function addMissingCodeModalVariablesFromScript() {
+            if (!codeModalState) return;
+            const codeText = document.getElementById('codeEditorTextarea')?.value || '';
+            const placeholders = extractCodeModalPlaceholders(codeText);
+            const existing = new Set((codeModalState.variables || []).map((row) => String(row.key || '').toUpperCase()));
+            let added = 0;
+            placeholders.forEach((key) => {
+                if (existing.has(key)) return;
+                addCodeModalVariableRow({
+                    key,
+                    value: '',
+                    isSecret: /PASSWORD|SECRET|TOKEN|KEY|OTP|PIN/.test(key),
+                    platform: 'both',
+                    notes: ''
+                });
+                existing.add(key);
+                added += 1;
+            });
+            if (added === 0) {
+                showToast('No new placeholders to add', 'info');
+            } else {
+                showToast(`${added} variable${added === 1 ? '' : 's'} added from script`, 'success');
+            }
+        }
+
+        function applyEnvTestToCodeModalTable() {
+            const envTextarea = document.getElementById('codeModalEnvTextarea');
+            if (!envTextarea || !codeModalState) return;
+            const parsed = parseEnvTestTextClient(envTextarea.value);
+            const previousByKey = new Map((codeModalState.variables || []).map((row) => [String(row.key || '').toUpperCase(), row]));
+            codeModalState.variables = parsed.map((row) => ({
+                ...row,
+                isSecret: previousByKey.get(row.key)?.isSecret ?? row.isSecret,
+            }));
+            renderCodeModalVariablesTable();
+            syncCodeModalEnvFromTable();
+            showToast('Applied .env.test to variables table', 'success');
+        }
+
+        async function loadCodeModalVariables() {
+            if (!codeModalState?.recordingId || !codeModalState?.ownerType) return;
+            try {
+                const response = await fetch(`/api/test-variables/${codeModalState.ownerType}/${codeModalState.recordingId}`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to load variables');
+                codeModalState.variables = Array.isArray(data.variables) ? data.variables : [];
+                codeModalState.variablesLoaded = true;
+                codeModalState.lastSavedVariablesSignature = getCodeModalVariablesSignature(codeModalState.variables);
+                renderCodeModalVariablesTable();
+                const envTextarea = document.getElementById('codeModalEnvTextarea');
+                if (envTextarea) {
+                    envTextarea.value = typeof data.envTest === 'string' ? data.envTest : renderEnvTestTextClient(codeModalState.variables);
+                }
+                updateCodeModalVariablesStatus();
+                return true;
+            } catch (error) {
+                console.error('Failed to load code modal variables:', error);
+                const missingEl = document.getElementById('codeModalMissingList');
+                if (missingEl) {
+                    missingEl.textContent = `Failed to load variables: ${error.message || 'Unknown error'}`;
+                    missingEl.style.color = 'var(--error)';
+                }
+                return false;
+            }
+        }
+
+        async function saveCodeModalVariables(options = {}) {
+            if (!codeModalState?.recordingId || !codeModalState?.ownerType) return false;
+            const { silent = false } = options;
+            try {
+                if (!codeModalState.variablesLoaded) {
+                    const loaded = await loadCodeModalVariables();
+                    if (!loaded) {
+                        throw new Error('Unable to load existing variables');
+                    }
+                }
+                const rows = collectCodeModalVariablesFromTable().map((row) => ({
+                    ...row,
+                    key: String(row.key || '').trim().toUpperCase(),
+                    platform: ['mobile', 'web', 'both'].includes(row.platform) ? row.platform : 'both'
+                })).filter((row) => row.key);
+                const response = await fetch(`/api/test-variables/${codeModalState.ownerType}/${codeModalState.recordingId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ variables: rows })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to save variables');
+                codeModalState.variables = Array.isArray(data.variables) ? data.variables : rows;
+                codeModalState.lastSavedVariablesSignature = getCodeModalVariablesSignature(codeModalState.variables);
+                renderCodeModalVariablesTable();
+                const envTextarea = document.getElementById('codeModalEnvTextarea');
+                if (envTextarea) envTextarea.value = typeof data.envTest === 'string' ? data.envTest : renderEnvTestTextClient(codeModalState.variables);
+                if (!silent) showToast('Test variables saved', 'success');
+                return true;
+            } catch (error) {
+                if (!silent) showToast(`Failed to save variables: ${error.message || 'Unknown error'}`, 'error');
+                return false;
+            }
+        }
+
+        function switchCodeModalTab(tab) {
+            const codePanel = document.getElementById('codeModalCodePanel');
+            const varsPanel = document.getElementById('codeModalVarsPanel');
+            const codeBtn = document.getElementById('codeModalTabCode');
+            const varsBtn = document.getElementById('codeModalTabVars');
+            if (codePanel) codePanel.style.display = tab === 'code' ? 'flex' : 'none';
+            if (varsPanel) varsPanel.style.display = tab === 'vars' ? 'flex' : 'none';
+            if (codeBtn) codeBtn.style.opacity = tab === 'code' ? '1' : '0.7';
+            if (varsBtn) varsBtn.style.opacity = tab === 'vars' ? '1' : '0.7';
+            if (codeModalState) codeModalState.activeTab = tab;
+            if (tab === 'vars') {
+                updateCodeModalVariablesStatus();
+            }
+        }
+
         // Generic code modal for both Web (TypeScript) and Mobile (YAML)
         function showCodeModal(code, language, recordingId, type) {
-            const isYaml = language === 'yaml';
+            const resolvedLanguage = language || 'typescript';
+            const resolvedType = type || (resolvedLanguage === 'yaml' ? 'mobile' : 'web');
+            const resolvedRecordingId = recordingId || (resolvedType === 'web' ? recorderSession?.id : currentProject?.id || lastMobileRecording?.projectId);
+            const isYaml = resolvedLanguage === 'yaml';
             const title = isYaml ? 'Maestro Flow (YAML)' : 'Playwright Test (TypeScript)';
             const lineCount = (code || '').split('\n').length;
             const lineNumbers = Array.from({length: Math.max(lineCount, 20)}, (_, i) => i + 1).join('\n');
+            const hasVarsTab = !!resolvedRecordingId && (resolvedType === 'mobile' || resolvedType === 'web');
+
+            codeModalState = {
+                code: code || '',
+                language: resolvedLanguage,
+                type: resolvedType,
+                recordingId: resolvedRecordingId || null,
+                ownerType: hasVarsTab ? getCodeModalOwnerType(resolvedType) : null,
+                variables: [],
+                variablesLoaded: false,
+                lastSavedVariablesSignature: '',
+                placeholders: extractCodeModalPlaceholders(code || ''),
+                missingPlaceholders: [],
+                activeTab: 'code',
+                mobileRunDevices: [],
+                mobileRunDevicesLoading: resolvedType === 'mobile',
+                mobileRunSelectedDeviceId: resolvedType === 'mobile' ? getPreferredCodeModalMobileDeviceId() : '',
+                lastSavedCode: code || ''
+            };
 
             const existing = document.getElementById('codeModal');
             if (existing) {
-                existing.remove();
+                closeCodeModal();
             }
 
             const modal = document.createElement('div');
             modal.className = 'modal-overlay';
+            modal.classList.add('code-modal-overlay');
             modal.id = 'codeModal';
             modal.innerHTML = `
                 <div class="modal code-modal">
@@ -16442,21 +17025,95 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                         <h3>${title}</h3>
                         <button class="modal-close" onclick="closeCodeModal()">&times;</button>
                     </div>
-                    <div class="code-modal-body">
-                        <div class="code-editor-container">
-                            <div id="codeLineNumbers" class="code-line-numbers">${lineNumbers}</div>
-                            <textarea id="codeEditorTextarea" class="code-editor-textarea" spellcheck="false">${escapeHtml(code)}</textarea>
+                    <div style="display:flex; gap:8px; padding: 10px 16px 0 16px; border-bottom: 1px solid var(--border);">
+                        <button id="codeModalTabCode" class="btn btn-secondary" style="padding: 6px 10px; min-width: auto;" onclick="switchCodeModalTab('code')">Script</button>
+                        ${hasVarsTab ? `
+                            <button id="codeModalTabVars" class="btn btn-secondary" style="padding: 6px 10px; min-width: auto; opacity: .7;" onclick="switchCodeModalTab('vars')">
+                                Test Variables
+                                <span id="codeModalVarsTabBadge" style="margin-left:6px; font-size: 10px; color: var(--text-muted);">...</span>
+                            </button>
+                        ` : ''}
+                    </div>
+                    ${resolvedType === 'mobile' ? `
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; background: rgba(255,255,255,0.01);">
+                            <div style="display:flex; align-items:center; gap:8px; flex-wrap: wrap; min-width: 0;">
+                                <label for="codeModalMobileDeviceSelect" style="font-size: 12px; color: var(--text-secondary);">Run on device</label>
+                                <select id="codeModalMobileDeviceSelect" class="setting-input" style="min-width: 280px; max-width: 100%; padding: 6px 10px; height: auto;" onchange="onCodeModalMobileDeviceChanged(this.value)">
+                                    <option value="">Auto-detect device (Maestro default)</option>
+                                </select>
+                                <button class="btn btn-secondary" style="padding:6px 10px; min-width:auto;" onclick="loadCodeModalMobileRunDevices(true)">Refresh</button>
+                            </div>
+                            <div id="codeModalMobileDeviceStatus" style="font-size: 11px; color: var(--text-muted);">Loading devices...</div>
                         </div>
-                        <div id="codeModalOutput" class="code-modal-output" style="display: none;"></div>
+                    ` : ''}
+                    <div class="code-modal-body">
+                        <div id="codeModalCodePanel" class="code-modal-panel">
+                            <div class="code-editor-container">
+                                <div id="codeLineNumbers" class="code-line-numbers">${lineNumbers}</div>
+                                <textarea id="codeEditorTextarea" class="code-editor-textarea" spellcheck="false">${escapeHtml(code)}</textarea>
+                            </div>
+                            <div id="codeModalOutput" class="code-modal-output" style="display: none;"></div>
+                        </div>
+                        ${hasVarsTab ? `
+                            <div id="codeModalVarsPanel" class="code-modal-panel" style="display:none; padding: 12px 0 0 0; overflow:auto;">
+                                <div style="display:grid; gap:10px;">
+                                    <div style="display:flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap;">
+                                        <div id="codeModalVarSummary" style="font-size: 12px; color: var(--text-secondary); display:flex; gap:10px; flex-wrap:wrap;">
+                                            <span>Loading variables...</span>
+                                        </div>
+                                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                                            <button class="btn btn-secondary" style="padding:6px 10px; min-width:auto;" onclick="addMissingCodeModalVariablesFromScript()">Add Missing From Script</button>
+                                            <button class="btn btn-secondary" style="padding:6px 10px; min-width:auto;" onclick="addCodeModalVariableRow()">Add Variable</button>
+                                            <button class="btn btn-secondary" style="padding:6px 10px; min-width:auto;" onclick="loadCodeModalVariables()">Reload</button>
+                                            <button class="btn btn-primary" style="padding:6px 10px; min-width:auto;" onclick="saveCodeModalVariables()">Save Variables</button>
+                                        </div>
+                                    </div>
+                                    <div id="codeModalMissingList" style="font-size:11px; color: var(--text-muted);">Checking placeholders...</div>
+                                    <div class="code-vars-table-wrap">
+                                        <table style="width:100%; border-collapse: collapse; min-width: 860px; background: var(--bg-secondary);">
+                                            <thead>
+                                                <tr style="text-align:left; font-size: 11px; color: var(--text-secondary); background: var(--bg-tertiary);">
+                                                    <th style="padding:8px;">Key</th>
+                                                    <th style="padding:8px;">Value</th>
+                                                    <th style="padding:8px;">Platform</th>
+                                                    <th style="padding:8px;">Secret</th>
+                                                    <th style="padding:8px;">Notes</th>
+                                                    <th style="padding:8px;"></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="codeModalVarsTableBody"></tbody>
+                                        </table>
+                                    </div>
+                                    <div style="display:grid; gap:6px;">
+                                        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                                            <label style="font-size: 12px; color: var(--text-secondary);">.env.test (saved in DB as structured variables)</label>
+                                            <div style="display:flex; gap:8px;">
+                                                <button class="btn btn-secondary" style="padding:6px 10px; min-width:auto;" onclick="syncCodeModalEnvFromTable()">Regenerate</button>
+                                                <button class="btn btn-secondary" style="padding:6px 10px; min-width:auto;" onclick="applyEnvTestToCodeModalTable()">Apply .env</button>
+                                            </div>
+                                        </div>
+                                        <textarea id="codeModalEnvTextarea" class="code-editor-textarea" spellcheck="false" style="min-height: 140px; height: 140px;"></textarea>
+                                    </div>
+                                </div>
+                            </div>
+                        ` : ''}
                     </div>
                     <div class="code-modal-footer">
-                        ${isYaml && recordingId ? `
-                            <button id="runCodeBtn" class="btn btn-run" onclick="runMaestroFromEditor('${recordingId}')">
+                        ${resolvedRecordingId ? `
+                            <button id="runCodeBtn" class="btn btn-run" onclick="${isYaml ? `runMaestroFromEditor('${resolvedRecordingId}')` : `runPlaywrightFromEditor('${resolvedRecordingId}')`}">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;">
                                     <polygon points="5 3 19 12 5 21 5 3"/>
                                 </svg>
-                                Run Test
+                                ${isYaml ? 'Run on Device' : 'Run Test'}
                             </button>
+                            ${isYaml ? `
+                                <button id="stopCodeBtn" class="btn btn-secondary" onclick="stopMaestroRunFromEditor()" style="display:none; min-width: 120px; border-color: rgba(239,68,68,0.25); color: #fca5a5;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;">
+                                        <rect x="6" y="6" width="12" height="12" rx="1"/>
+                                    </svg>
+                                    Stop Run
+                                </button>
+                            ` : ''}
                         ` : ''}
                         <button class="btn btn-secondary" onclick="copyCodeToClipboard()">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;">
@@ -16465,8 +17122,8 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                             </svg>
                             Copy
                         </button>
-                        ${recordingId ? `
-                            <button class="btn btn-primary" onclick="saveCodeChanges('${recordingId}', '${type}')">
+                        ${resolvedRecordingId ? `
+                            <button class="btn btn-primary" onclick="saveCodeChanges('${resolvedRecordingId}', '${resolvedType}')">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;">
                                     <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
                                     <polyline points="17 21 17 13 7 13 7 21"/>
@@ -16479,6 +17136,8 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                 </div>
             `;
             document.body.appendChild(modal);
+            lockPageScrollForCodeModal();
+            attachCodeModalScrollTrap(modal);
             requestAnimationFrame(() => modal.classList.add('active'));
 
             // Sync line numbers with textarea scroll and content
@@ -16491,9 +17150,17 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     lineNumbersEl.scrollTop = textarea.scrollTop;
                 });
 
+                // If the pointer is over line numbers, scroll the editor instead of the page behind
+                lineNumbersEl.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    textarea.scrollTop += e.deltaY;
+                    textarea.scrollLeft += e.deltaX;
+                }, { passive: false });
+
                 // Update line numbers when content changes
                 textarea.addEventListener('input', () => {
                     updateLineNumbers();
+                    updateCodeModalVariablesStatus();
                 });
             }
 
@@ -16507,6 +17174,14 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
             };
             document.addEventListener('keydown', escHandler);
             modal._escHandler = escHandler;
+
+            if (hasVarsTab) {
+                loadCodeModalVariables();
+            }
+            if (resolvedType === 'mobile') {
+                loadCodeModalMobileRunDevices();
+            }
+            switchCodeModalTab('code');
         }
 
         function updateLineNumbers() {
@@ -16519,15 +17194,277 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
             lineNumbersEl.textContent = Array.from({length: maxLines}, (_, i) => i + 1).join('\n');
         }
 
+        function setCodeModalRunButtonBusy(runBtn, label) {
+            if (!runBtn) return;
+            runBtn.disabled = true;
+            runBtn.innerHTML = `
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px; animation: spin 1s linear infinite;">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v6l4 2"/>
+                </svg>
+                ${escapeHtml(label || 'Running...')}
+            `;
+        }
+
+        function setCodeModalStopButtonState(stopBtn, options = {}) {
+            if (!stopBtn) return;
+            const {
+                visible = false,
+                disabled = false,
+                label = 'Stop Run'
+            } = options;
+            stopBtn.style.display = visible ? '' : 'none';
+            stopBtn.disabled = !!disabled;
+            stopBtn.innerHTML = `
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;">
+                    <rect x="6" y="6" width="12" height="12" rx="1"/>
+                </svg>
+                ${escapeHtml(label)}
+            `;
+        }
+
+        function resetCodeModalRunButton(runBtn, type = 'mobile') {
+            if (!runBtn) return;
+            runBtn.disabled = false;
+            runBtn.innerHTML = `
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;">
+                    <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                ${type === 'mobile' ? 'Run on Device' : 'Run Test'}
+            `;
+        }
+
+        function appendCodeModalOutputLine(outputEl, htmlLine) {
+            if (!outputEl) return;
+            outputEl.innerHTML += '\n' + htmlLine;
+            outputEl.scrollTop = outputEl.scrollHeight;
+        }
+
+        async function pollMaestroRunStatus(runId, options = {}) {
+            const {
+                outputEl = null,
+                runBtn = null,
+                pollMs = 1200,
+                timeoutMs = 360000
+            } = options;
+            const startedAt = Date.now();
+            let runningAnnounced = false;
+
+            while ((Date.now() - startedAt) < timeoutMs) {
+                const response = await fetch(`/api/testing/mobile/replays/${encodeURIComponent(runId)}`);
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to read Maestro run status');
+                }
+
+                const elapsedSec = Math.max(0, Math.round((Number(data.elapsedMs || 0) / 1000)));
+                if (data.status === 'running') {
+                    if (!runningAnnounced && outputEl) {
+                        appendCodeModalOutputLine(outputEl, '<span class="output-running">⏳ Maestro is running on device...</span>');
+                        runningAnnounced = true;
+                    }
+                    if (runBtn) {
+                        setCodeModalRunButtonBusy(runBtn, elapsedSec > 0 ? `Running... ${elapsedSec}s` : 'Running...');
+                    }
+                    await new Promise(resolve => setTimeout(resolve, pollMs));
+                    continue;
+                }
+
+                return data;
+            }
+
+            throw new Error('Timed out waiting for Maestro run to finish');
+        }
+
         // Run Maestro test from editor
         let codeModalRunning = false;
+        async function stopMaestroRunFromEditor() {
+            const stopBtn = document.getElementById('stopCodeBtn');
+            const outputEl = document.getElementById('codeModalOutput');
+            const runId = String(codeModalState?.activeMaestroRunId || '').trim();
+            if (!runId) return;
+
+            try {
+                setCodeModalStopButtonState(stopBtn, { visible: true, disabled: true, label: 'Stopping...' });
+                appendCodeModalOutputLine(outputEl, '<span class="output-running">⏹ Requesting stop...</span>');
+                const response = await fetch(`/api/testing/mobile/replays/${encodeURIComponent(runId)}/stop`, {
+                    method: 'POST'
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok && response.status !== 409) {
+                    throw new Error(data.error || 'Failed to stop run');
+                }
+                appendCodeModalOutputLine(outputEl, '<span class="output-step">⏳ Stop requested. Waiting for runner status...</span>');
+                showToast('Stop requested', 'info');
+            } catch (error) {
+                appendCodeModalOutputLine(outputEl, '<span class="output-error">✗ Stop failed: ' + escapeHtml(error.message || 'Unknown error') + '</span>');
+                setCodeModalStopButtonState(stopBtn, { visible: true, disabled: false, label: 'Stop Run' });
+                showToast('Failed to stop run', 'error');
+            }
+        }
+
         async function runMaestroFromEditor(recordingId) {
             if (codeModalRunning) return;
 
             const textarea = document.getElementById('codeEditorTextarea');
             const outputEl = document.getElementById('codeModalOutput');
             const runBtn = document.getElementById('runCodeBtn');
+            const stopBtn = document.getElementById('stopCodeBtn');
 
+            if (!textarea || !outputEl) return;
+
+            codeModalRunning = true;
+            if (codeModalState) codeModalState.activeMaestroRunId = null;
+            if (runBtn) {
+                setCodeModalRunButtonBusy(runBtn, 'Loading...');
+            }
+            setCodeModalStopButtonState(stopBtn, { visible: false });
+
+            // Show output area
+            outputEl.style.display = 'block';
+            outputEl.innerHTML = '<span class="output-running">▶ Saving and running Maestro test on device...</span>';
+
+            const selectedDeviceId = String(codeModalState?.mobileRunSelectedDeviceId || '').trim();
+            const selectedDevice = Array.isArray(codeModalState?.mobileRunDevices)
+                ? codeModalState.mobileRunDevices.find((d) => String(d?.id || '').trim() === selectedDeviceId)
+                : null;
+
+            try {
+                const currentVars = collectCodeModalVariablesFromTable().map((row) => ({
+                    ...row,
+                    key: String(row.key || '').trim().toUpperCase(),
+                    platform: ['mobile', 'web', 'both'].includes(row.platform) ? row.platform : 'both'
+                })).filter((row) => row.key);
+                const currentVarsSignature = getCodeModalVariablesSignature(currentVars);
+                const shouldSaveVars = !codeModalState?.variablesLoaded
+                    || currentVarsSignature !== String(codeModalState?.lastSavedVariablesSignature || '');
+                if (shouldSaveVars) {
+                    const varsSaved = await saveCodeModalVariables({ silent: true });
+                    if (!varsSaved) throw new Error('Failed to save test variables');
+                    appendCodeModalOutputLine(outputEl, '<span class="output-success">✓ Test variables saved</span>');
+                } else {
+                    appendCodeModalOutputLine(outputEl, '<span class="output-step">↺ Test variables unchanged (skipped save)</span>');
+                }
+
+                // First, save the code
+                const currentCode = textarea.value;
+                const shouldSaveCode = currentCode !== String(codeModalState?.lastSavedCode ?? codeModalState?.code ?? '');
+                if (shouldSaveCode) {
+                    const saveResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}/flow`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ flowCode: currentCode })
+                    });
+
+                    if (!saveResponse.ok) {
+                        throw new Error('Failed to save flow code');
+                    }
+                    if (codeModalState) {
+                        codeModalState.code = currentCode;
+                        codeModalState.lastSavedCode = currentCode;
+                    }
+                    outputEl.innerHTML += '\n<span class="output-success">✓ Flow saved</span>';
+                } else {
+                    outputEl.innerHTML += '\n<span class="output-step">↺ Flow unchanged (skipped save)</span>';
+                }
+                outputEl.innerHTML += '\n<span class="output-running">▶ Starting Maestro test on device...</span>';
+
+                // Now run the test
+                const runRequestBody = {};
+                if (selectedDeviceId) {
+                    runRequestBody.deviceId = selectedDeviceId;
+                    if (selectedDevice?.platform === 'ios' || selectedDevice?.platform === 'android') {
+                        runRequestBody.devicePlatform = selectedDevice.platform;
+                        runRequestBody.deviceName = String(selectedDevice?.name || selectedDeviceId);
+                        runRequestBody.skipDeviceValidation = true;
+                    }
+                }
+                const runResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}/replay`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(runRequestBody)
+                });
+
+                const runData = await runResponse.json();
+
+                if (!runResponse.ok) {
+                    if (Array.isArray(runData?.missingKeys) && runData.missingKeys.length > 0) {
+                        outputEl.innerHTML += '\n<span class="output-error">✗ Missing variables: ' + runData.missingKeys.join(', ') + '</span>';
+                        switchCodeModalTab('vars');
+                    }
+                    throw new Error(runData.error || 'Failed to start test');
+                }
+
+                appendCodeModalOutputLine(outputEl, '<span class="output-success">✓ Maestro test started!</span>');
+                appendCodeModalOutputLine(outputEl, '<span class="output-step">📍 Flow: ' + escapeHtml(runData.flowPath || recordingId) + '</span>');
+                if (runData?.deviceName || runData?.deviceId) {
+                    const deviceLabel = runData.deviceName || runData.deviceId;
+                    const platformLabel = runData.devicePlatform ? ` (${String(runData.devicePlatform).toUpperCase()})` : '';
+                    appendCodeModalOutputLine(outputEl, '<span class="output-step">📱 Device: ' + escapeHtml(deviceLabel + platformLabel) + '</span>');
+                    if (runData?.deviceSelectionSource === 'trusted-client') {
+                        appendCodeModalOutputLine(outputEl, '<span class="output-step">⚡ Fast start: reused selected device from modal</span>');
+                    }
+                } else {
+                    appendCodeModalOutputLine(outputEl, '<span class="output-step">📱 Device: Auto-detect (Maestro default)</span>');
+                }
+                if (Array.isArray(runData.usedKeys) && runData.usedKeys.length > 0) {
+                    appendCodeModalOutputLine(outputEl, '<span class="output-step">🔐 Vars: ' + escapeHtml(runData.usedKeys.join(', ')) + '</span>');
+                }
+                appendCodeModalOutputLine(outputEl, '<span style="color: #fbbf24;">💡 Watch the selected device for test execution.</span>');
+
+                const runId = typeof runData?.runId === 'string' ? runData.runId : '';
+                if (runId) {
+                    if (codeModalState) codeModalState.activeMaestroRunId = runId;
+                    setCodeModalRunButtonBusy(runBtn, 'Running...');
+                    setCodeModalStopButtonState(stopBtn, { visible: true, disabled: false, label: 'Stop Run' });
+                    const finalStatus = await pollMaestroRunStatus(runId, { outputEl, runBtn });
+                    const durationMs = Number(finalStatus?.durationMs);
+                    const durationLabel = Number.isFinite(durationMs) && durationMs > 0
+                        ? ` (${Math.round(durationMs / 1000)}s)`
+                        : '';
+
+                    if (finalStatus.status === 'completed') {
+                        appendCodeModalOutputLine(outputEl, '<span class="output-success">✓ Maestro test completed' + escapeHtml(durationLabel) + '</span>');
+                        if (finalStatus.output) {
+                            const preview = String(finalStatus.output).slice(-2500);
+                            appendCodeModalOutputLine(outputEl, '<pre style="white-space: pre-wrap; margin: 8px 0 0 0; color: var(--text-secondary);">' + escapeHtml(preview) + '</pre>');
+                        }
+                        showToast('Maestro test completed', 'success');
+                    } else if (finalStatus.status === 'failed') {
+                        appendCodeModalOutputLine(outputEl, '<span class="output-error">✗ Maestro test failed' + escapeHtml(durationLabel) + '</span>');
+                        if (finalStatus.error) {
+                            appendCodeModalOutputLine(outputEl, '<span class="output-error">' + escapeHtml(String(finalStatus.error)) + '</span>');
+                        }
+                        if (finalStatus.output) {
+                            const preview = String(finalStatus.output).slice(-2500);
+                            appendCodeModalOutputLine(outputEl, '<pre style="white-space: pre-wrap; margin: 8px 0 0 0; color: var(--text-secondary);">' + escapeHtml(preview) + '</pre>');
+                        }
+                        showToast('Maestro test failed', 'error');
+                    } else if (finalStatus.status === 'canceled') {
+                        appendCodeModalOutputLine(outputEl, '<span class="output-step">⏹ Maestro run canceled' + escapeHtml(durationLabel) + '</span>');
+                        showToast('Maestro run canceled', 'info');
+                    }
+                } else {
+                    showToast('Maestro test started on device', 'success');
+                }
+
+            } catch (error) {
+                outputEl.innerHTML += '\n<span class="output-error">✗ Error: ' + (error.message || 'Unknown error') + '</span>';
+                showToast('Failed to run test', 'error');
+            } finally {
+                codeModalRunning = false;
+                if (codeModalState) codeModalState.activeMaestroRunId = null;
+                setCodeModalStopButtonState(stopBtn, { visible: false });
+                resetCodeModalRunButton(runBtn, 'mobile');
+            }
+        }
+
+        async function runPlaywrightFromEditor(recordingId) {
+            if (codeModalRunning) return;
+
+            const textarea = document.getElementById('codeEditorTextarea');
+            const outputEl = document.getElementById('codeModalOutput');
+            const runBtn = document.getElementById('runCodeBtn');
             if (!textarea || !outputEl) return;
 
             codeModalRunning = true;
@@ -16542,84 +17479,66 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                 `;
             }
 
-            // Show output area
             outputEl.style.display = 'block';
-            outputEl.innerHTML = '<span class="output-running">▶ Saving and running Maestro test...</span>';
-
-            // Detect platform from YAML appId
-            const yamlContent = textarea.value;
-            const appIdMatch = yamlContent.match(/appId:\s*([^\s\n]+)/);
-            const appId = appIdMatch ? appIdMatch[1] : '';
-            const platform = appId.includes('com.apple') || appId.startsWith('com.') && !appId.includes('android') ? 'ios' : 'android';
+            outputEl.innerHTML = '<span class="output-running">▶ Saving Playwright script and running test...</span>';
 
             try {
-                // First, save the code
-                const saveResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}/flow`, {
+                const varsSaved = await saveCodeModalVariables({ silent: true });
+                if (varsSaved === false) {
+                    throw new Error('Failed to save test variables');
+                }
+
+                const saveResponse = await fetch(`/api/recorder/recordings/${recordingId}/spec`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ flowCode: textarea.value })
+                    body: JSON.stringify({ specCode: textarea.value })
                 });
-
+                const saveData = await saveResponse.json().catch(() => ({}));
                 if (!saveResponse.ok) {
-                    throw new Error('Failed to save flow code');
+                    throw new Error(saveData.error || 'Failed to save spec');
                 }
 
-                outputEl.innerHTML += '\n<span class="output-success">✓ Flow saved</span>';
-                outputEl.innerHTML += '\n<span class="output-running">▶ Starting auto-capture and Maestro test...</span>';
+                outputEl.innerHTML += '\n<span class="output-success">✓ Spec saved</span>';
 
-                // Start auto-capture before running the test
-                try {
-                    await fetch('/api/testing/mobile/auto-capture/start', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ recordingId, platform })
-                    });
-                    outputEl.innerHTML += '\n<span class="output-success">✓ Auto-capture started</span>';
-                } catch (captureErr) {
-                    console.log('Auto-capture not available:', captureErr);
-                }
-
-                // Now run the test
-                const runResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}/replay`, {
+                const runResponse = await fetch(`/api/recorder/recordings/${recordingId}/run`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        headless: false,
+                        browser: 'chromium',
+                        video: 'retain-on-failure',
+                        screenshot: 'only-on-failure',
+                        trace: 'retain-on-failure'
+                    })
                 });
-
                 const runData = await runResponse.json();
 
                 if (!runResponse.ok) {
-                    throw new Error(runData.error || 'Failed to start test');
+                    if (Array.isArray(runData?.missingKeys) && runData.missingKeys.length > 0) {
+                        outputEl.innerHTML += '\n<span class="output-error">✗ Missing variables: ' + runData.missingKeys.join(', ') + '</span>';
+                        switchCodeModalTab('vars');
+                    }
+                    throw new Error(runData.error || runData.result?.error || 'Failed to run Playwright test');
                 }
 
-                outputEl.innerHTML += '\n<span class="output-success">✓ Maestro test started!</span>';
-                outputEl.innerHTML += '\n<span class="output-step">📍 Flow: ' + (runData.flowPath || recordingId) + '</span>';
-                outputEl.innerHTML += '\n\n<span style="color: #4ade80;">📸 Screenshots are being captured automatically.</span>';
-                outputEl.innerHTML += '\n<span style="color: #fbbf24;">💡 Watch the device screen for test execution.</span>';
+                const result = runData.result || {};
+                outputEl.innerHTML += '\n<span class="output-success">✓ Playwright run completed</span>';
+                outputEl.innerHTML += '\n<span class="output-step">✅ Passed: ' + (result.passed ?? 0) + ' | ❌ Failed: ' + (result.failed ?? 0) + ' | ⏭️ Skipped: ' + (result.skipped ?? 0) + '</span>';
+                if (Array.isArray(runData.usedKeys) && runData.usedKeys.length > 0) {
+                    outputEl.innerHTML += '\n<span class="output-step">🔐 Vars: ' + runData.usedKeys.join(', ') + '</span>';
+                }
+                if (result.reportPath) {
+                    outputEl.innerHTML += '\n<span class="output-step">📄 Report: ' + result.reportPath + '</span>';
+                }
+                if (result.output) {
+                    const preview = String(result.output).slice(0, 2500);
+                    outputEl.innerHTML += '\n\n<pre style="white-space: pre-wrap; margin: 8px 0 0 0; color: var(--text-secondary);">' + escapeHtml(preview) + '</pre>';
+                }
 
-                showToast('Maestro test started with auto-capture!', 'success');
-
-                // Schedule auto-capture stop after estimated test duration (30s default)
-                setTimeout(async () => {
-                    try {
-                        await fetch('/api/testing/mobile/auto-capture/stop', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ recordingId })
-                        });
-                    } catch {}
-                }, 30000);
-
+                showToast(result.success === false ? 'Playwright test failed' : 'Playwright test finished', result.success === false ? 'warning' : 'success');
             } catch (error) {
                 outputEl.innerHTML += '\n<span class="output-error">✗ Error: ' + (error.message || 'Unknown error') + '</span>';
-                showToast('Failed to run test', 'error');
-                // Stop auto-capture on error
-                try {
-                    await fetch('/api/testing/mobile/auto-capture/stop', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ recordingId })
-                    });
-                } catch {}
+                showToast('Failed to run Playwright test', 'error');
             } finally {
                 codeModalRunning = false;
                 if (runBtn) {
@@ -16640,8 +17559,13 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                 if (modal._escHandler) {
                     document.removeEventListener('keydown', modal._escHandler);
                 }
+                if (modal._wheelTrapHandler) {
+                    modal.removeEventListener('wheel', modal._wheelTrapHandler, { capture: true });
+                }
                 modal.remove();
             }
+            unlockPageScrollForCodeModal();
+            codeModalState = null;
         }
 
         function copyCodeToClipboard() {
@@ -16659,6 +17583,11 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
             const code = textarea.value;
 
             try {
+                const varsSaved = await saveCodeModalVariables({ silent: true });
+                if (varsSaved === false) {
+                    throw new Error('Failed to save test variables');
+                }
+
                 if (type === 'mobile') {
                     const response = await fetch(`/api/testing/mobile/recordings/${recordingId}/flow`, {
                         method: 'PUT',
@@ -16676,6 +17605,12 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     if (!response.ok) throw new Error('Failed to save');
                 }
 
+                if (codeModalState) {
+                    codeModalState.code = code;
+                    codeModalState.lastSavedCode = code;
+                    codeModalState.placeholders = extractCodeModalPlaceholders(code);
+                }
+                updateCodeModalVariablesStatus();
                 showToast('Code saved!', 'success');
             } catch (error) {
                 showToast('Failed to save code', 'error');

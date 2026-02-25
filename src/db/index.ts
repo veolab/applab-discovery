@@ -149,6 +149,23 @@ function createTables(sqlite: Database.Database): void {
     )
   `);
 
+  // Test variables table (encrypted values for script execution placeholders)
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS test_variables (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      owner_type TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value_encrypted TEXT NOT NULL,
+      is_secret INTEGER DEFAULT 1,
+      platform TEXT DEFAULT 'both',
+      notes TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(owner_id, owner_type, key)
+    )
+  `);
+
   // Export destinations table
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS export_destinations (
@@ -186,6 +203,7 @@ function createTables(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_project_exports_destination ON project_exports(destination);
     CREATE INDEX IF NOT EXISTS idx_frames_project_id ON frames(project_id);
     CREATE INDEX IF NOT EXISTS idx_frames_is_key_frame ON frames(is_key_frame);
+    CREATE INDEX IF NOT EXISTS idx_test_variables_owner ON test_variables(owner_id, owner_type);
   `);
 }
 

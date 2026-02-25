@@ -102,6 +102,22 @@ export const settings = sqliteTable('settings', {
 });
 
 // ============================================================================
+// TEST VARIABLES TABLE (script/project execution variables)
+// ============================================================================
+export const testVariables = sqliteTable('test_variables', {
+  id: text('id').primaryKey(),
+  ownerId: text('owner_id').notNull(), // recording ID, project ID, etc.
+  ownerType: text('owner_type').notNull(), // 'mobile-recording' | 'web-recording' | 'project'
+  key: text('key').notNull(),
+  valueEncrypted: text('value_encrypted').notNull(),
+  isSecret: integer('is_secret', { mode: 'boolean' }).default(true),
+  platform: text('platform').default('both'), // 'mobile' | 'web' | 'both'
+  notes: text('notes'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+// ============================================================================
 // EXPORT DESTINATIONS TABLE (configured destinations)
 // ============================================================================
 export const exportDestinations = sqliteTable('export_destinations', {
@@ -161,6 +177,9 @@ export type NewFrame = typeof frames.$inferInsert;
 
 export type Setting = typeof settings.$inferSelect;
 export type NewSetting = typeof settings.$inferInsert;
+
+export type TestVariable = typeof testVariables.$inferSelect;
+export type NewTestVariable = typeof testVariables.$inferInsert;
 
 export type ExportDestination = typeof exportDestinations.$inferSelect;
 export type NewExportDestination = typeof exportDestinations.$inferInsert;

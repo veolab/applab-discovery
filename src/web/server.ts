@@ -10,12 +10,15 @@ import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { exec, execSync, spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { eq, desc } from 'drizzle-orm';
-import { getDatabase, getSqlite, projects, projectExports, frames, DATA_DIR, PROJECTS_DIR } from '../db/index.js';
-import { getMaestroRecorder, isMaestroInstalled, runMaestroTest, isIdbInstalled, tapViaIdb, killZombieMaestroProcesses } from '../core/testing/maestro.js';
+import { eq, desc, and, inArray } from 'drizzle-orm';
+import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR } from '../db/index.js';
+import { getMaestroRecorder, isMaestroInstalled, runMaestroTest, isIdbInstalled, tapViaIdb, killZombieMaestroProcesses, listMaestroDevices } from '../core/testing/maestro.js';
 import type { MaestroRecordingSession } from '../core/testing/maestro.js';
+import { runPlaywrightTest } from '../core/testing/playwright.js';
 import { analyzeScreenshotsForActions, generateMaestroYaml } from '../core/analyze/aiActionDetector.js';
 import type { ActionDetectorProvider } from '../core/analyze/aiActionDetector.js';
+import { redactSensitiveTestInput, redactQuotedStringsInText } from '../core/security/sensitiveInput.js';
+import { encryptLocalSecret, decryptLocalSecret } from '../core/security/localSecretStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -37,6 +40,376 @@ function toEpochMs(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+type TestVariableOwnerType = 'mobile-recording' | 'web-recording' | 'project';
+type TestVariablePlatform = 'mobile' | 'web' | 'both';
+
+type TestVariableApiRecord = {
+  id: string;
+  key: string;
+  value: string;
+  isSecret: boolean;
+  platform: TestVariablePlatform;
+  notes: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
+};
+
+type MobileReplayRunStatus = 'running' | 'completed' | 'failed' | 'canceled';
+type MobileReplayRunRecord = {
+  runId: string;
+  recordingId: string;
+  status: MobileReplayRunStatus;
+  flowPath: string;
+  usedKeys: string[];
+  deviceId: string | null;
+  deviceName: string | null;
+  devicePlatform: 'ios' | 'android' | null;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  durationMs: number | null;
+  error: string | null;
+  output: string | null;
+};
+
+const ALLOWED_TEST_VAR_OWNER_TYPES = new Set<TestVariableOwnerType>(['mobile-recording', 'web-recording', 'project']);
+const ALLOWED_TEST_VAR_PLATFORMS = new Set<TestVariablePlatform>(['mobile', 'web', 'both']);
+const TEST_VAR_KEY_REGEX = /^[A-Z][A-Z0-9_]{0,63}$/;
+const SCRIPT_PLACEHOLDER_REGEX = /\$\{([A-Z][A-Z0-9_]*)\}/g;
+const mobileReplayRuns = new Map<string, MobileReplayRunRecord>();
+
+function pruneMobileReplayRuns(maxEntries = 80): void {
+  const now = Date.now();
+  const entries = Array.from(mobileReplayRuns.entries())
+    .sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+
+  for (const [runId, run] of entries) {
+    const isTerminal = run.status === 'completed' || run.status === 'failed' || run.status === 'canceled';
+    const staleMs = isTerminal ? 30 * 60 * 1000 : 6 * 60 * 60 * 1000;
+    if (now - run.updatedAt > staleMs) {
+      mobileReplayRuns.delete(runId);
+    }
+  }
+
+  if (mobileReplayRuns.size <= maxEntries) return;
+  const overflow = Array.from(mobileReplayRuns.entries())
+    .sort((a, b) => a[1].updatedAt - b[1].updatedAt)
+    .slice(0, mobileReplayRuns.size - maxEntries);
+  for (const [runId] of overflow) {
+    mobileReplayRuns.delete(runId);
+  }
+}
+
+function normalizeTestVariableOwnerType(value: unknown): TestVariableOwnerType | null {
+  if (typeof value !== 'string') return null;
+  return ALLOWED_TEST_VAR_OWNER_TYPES.has(value as TestVariableOwnerType) ? (value as TestVariableOwnerType) : null;
+}
+
+function normalizeTestVariablePlatform(value: unknown): TestVariablePlatform {
+  if (typeof value !== 'string') return 'both';
+  return ALLOWED_TEST_VAR_PLATFORMS.has(value as TestVariablePlatform) ? (value as TestVariablePlatform) : 'both';
+}
+
+function normalizeTestVariableKey(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const key = value.trim().toUpperCase();
+  if (!TEST_VAR_KEY_REGEX.test(key)) return null;
+  return key;
+}
+
+function parseScriptPlaceholders(code: string): string[] {
+  if (typeof code !== 'string' || !code) return [];
+  const found = new Set<string>();
+  let match: RegExpExecArray | null = null;
+  const regex = new RegExp(SCRIPT_PLACEHOLDER_REGEX);
+  while ((match = regex.exec(code)) !== null) {
+    const key = match[1]?.trim();
+    if (key) found.add(key);
+  }
+  return Array.from(found).sort();
+}
+
+function renderDotEnvTest(variables: TestVariableApiRecord[]): string {
+  const lines: string[] = [];
+  for (const variable of variables) {
+    if (!variable?.key) continue;
+    if (variable.notes && variable.notes.trim()) {
+      lines.push(`# ${variable.notes.trim()}`);
+    }
+    if (variable.platform && variable.platform !== 'both') {
+      lines.push(`# platform: ${variable.platform}`);
+    }
+    const escaped = String(variable.value ?? '').replace(/\n/g, '\\n');
+    lines.push(`${variable.key}=${escaped}`);
+    lines.push('');
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function parseDotEnvTest(rawText: string): Array<{
+  key: string;
+  value: string;
+  notes?: string | null;
+  platform?: TestVariablePlatform;
+}> {
+  const result: Array<{ key: string; value: string; notes?: string | null; platform?: TestVariablePlatform }> = [];
+  if (typeof rawText !== 'string' || !rawText.trim()) return result;
+
+  let pendingNotes: string[] = [];
+  let pendingPlatform: TestVariablePlatform | undefined;
+  const lines = rawText.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      pendingNotes = [];
+      pendingPlatform = undefined;
+      continue;
+    }
+    if (trimmed.startsWith('#')) {
+      const comment = trimmed.slice(1).trim();
+      const platformMatch = comment.match(/^platform:\s*(mobile|web|both)$/i);
+      if (platformMatch) {
+        pendingPlatform = normalizeTestVariablePlatform(platformMatch[1].toLowerCase());
+      } else if (comment) {
+        pendingNotes.push(comment);
+      }
+      continue;
+    }
+
+    const equalIndex = line.indexOf('=');
+    if (equalIndex <= 0) continue;
+    const key = normalizeTestVariableKey(line.slice(0, equalIndex));
+    if (!key) continue;
+    const value = line.slice(equalIndex + 1).replace(/\\n/g, '\n');
+    result.push({
+      key,
+      value,
+      notes: pendingNotes.length > 0 ? pendingNotes.join(' ') : null,
+      platform: pendingPlatform || 'both',
+    });
+    pendingNotes = [];
+    pendingPlatform = undefined;
+  }
+  return result;
+}
+
+function testVariableAppliesToPlatform(variablePlatform: TestVariablePlatform, targetPlatform: 'mobile' | 'web'): boolean {
+  return variablePlatform === 'both' || variablePlatform === targetPlatform;
+}
+
+function applyScriptPlaceholderValues(
+  code: string,
+  replacements: Record<string, string>
+): { code: string; placeholders: string[]; usedKeys: string[]; missingKeys: string[] } {
+  const placeholders = parseScriptPlaceholders(code);
+  const usedKeys: string[] = [];
+  const missingKeys: string[] = [];
+  const usedSet = new Set<string>();
+  const missingSet = new Set<string>();
+
+  const substituted = String(code || '').replace(SCRIPT_PLACEHOLDER_REGEX, (full, key) => {
+    const normalizedKey = String(key || '').trim().toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(replacements, normalizedKey)) {
+      if (!usedSet.has(normalizedKey)) {
+        usedSet.add(normalizedKey);
+        usedKeys.push(normalizedKey);
+      }
+      return replacements[normalizedKey];
+    }
+    if (!missingSet.has(normalizedKey)) {
+      missingSet.add(normalizedKey);
+      missingKeys.push(normalizedKey);
+    }
+    return full;
+  });
+
+  return { code: substituted, placeholders, usedKeys, missingKeys };
+}
+
+function applyPlaywrightScriptPlaceholderValues(
+  code: string,
+  replacements: Record<string, string>
+): { code: string; placeholders: string[]; usedKeys: string[]; missingKeys: string[] } {
+  const placeholders = parseScriptPlaceholders(code);
+  const usedKeys: string[] = [];
+  const missingKeys: string[] = [];
+  const usedSet = new Set<string>();
+  const missingSet = new Set<string>();
+
+  let output = String(code || '');
+  for (const placeholderKey of placeholders) {
+    const value = replacements[placeholderKey];
+    if (value === undefined) {
+      if (!missingSet.has(placeholderKey)) {
+        missingSet.add(placeholderKey);
+        missingKeys.push(placeholderKey);
+      }
+      continue;
+    }
+    if (!usedSet.has(placeholderKey)) {
+      usedSet.add(placeholderKey);
+      usedKeys.push(placeholderKey);
+    }
+
+    const quotedPattern = new RegExp(`(['"])\\\\$\\\\{${placeholderKey}\\\\}\\1`, 'g');
+    output = output.replace(quotedPattern, JSON.stringify(value));
+
+    const rawPattern = new RegExp(`\\\\$\\\\{${placeholderKey}\\\\}`, 'g');
+    output = output.replace(rawPattern, value);
+  }
+
+  return { code: output, placeholders, usedKeys, missingKeys };
+}
+
+async function getTestVariablesForOwner(ownerType: TestVariableOwnerType, ownerId: string): Promise<TestVariableApiRecord[]> {
+  const db = getDatabase();
+  const rows = await db
+    .select()
+    .from(testVariables)
+    .where(and(eq(testVariables.ownerType, ownerType), eq(testVariables.ownerId, ownerId)));
+
+  return rows
+    .map((row) => {
+      let decrypted = '';
+      try {
+        decrypted = decryptLocalSecret(row.valueEncrypted);
+      } catch {
+        decrypted = '';
+      }
+      return {
+        id: row.id,
+        key: row.key,
+        value: decrypted,
+        isSecret: row.isSecret === true,
+        platform: normalizeTestVariablePlatform(row.platform) as TestVariablePlatform,
+        notes: row.notes ?? null,
+        createdAt: toEpochMs(row.createdAt),
+        updatedAt: toEpochMs(row.updatedAt),
+      };
+    })
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
+async function saveTestVariablesForOwner(
+  ownerType: TestVariableOwnerType,
+  ownerId: string,
+  variablesInput: unknown
+): Promise<TestVariableApiRecord[]> {
+  if (!Array.isArray(variablesInput)) {
+    throw new Error('variables must be an array');
+  }
+
+  const normalizedRows: Array<{
+    id: string;
+    key: string;
+    valueEncrypted: string;
+    isSecret: boolean;
+    platform: TestVariablePlatform;
+    notes: string | null;
+  }> = [];
+  const seenKeys = new Set<string>();
+
+  for (const item of variablesInput) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const key = normalizeTestVariableKey(obj.key);
+    if (!key) continue;
+    if (seenKeys.has(key)) {
+      throw new Error(`Duplicate variable key: ${key}`);
+    }
+    seenKeys.add(key);
+
+    const rawValue = typeof obj.value === 'string' ? obj.value : String(obj.value ?? '');
+    const isSecret = obj.isSecret !== false;
+    const platform = normalizeTestVariablePlatform(obj.platform);
+    const notes = typeof obj.notes === 'string' ? obj.notes.trim().slice(0, 300) : '';
+
+    normalizedRows.push({
+      id: typeof obj.id === 'string' && obj.id.trim() ? obj.id.trim() : crypto.randomUUID(),
+      key,
+      valueEncrypted: encryptLocalSecret(rawValue),
+      isSecret,
+      platform,
+      notes: notes || null,
+    });
+  }
+
+  const db = getDatabase();
+  const existing = await db
+    .select({ id: testVariables.id })
+    .from(testVariables)
+    .where(and(eq(testVariables.ownerType, ownerType), eq(testVariables.ownerId, ownerId)));
+  const keepIds = new Set(normalizedRows.map((row) => row.id));
+  const deleteIds = existing.map((row) => row.id).filter((id) => !keepIds.has(id));
+  if (deleteIds.length > 0) {
+    await db.delete(testVariables).where(inArray(testVariables.id, deleteIds));
+  }
+
+  const now = new Date();
+  for (const row of normalizedRows) {
+    await db
+      .insert(testVariables)
+      .values({
+        id: row.id,
+        ownerId,
+        ownerType,
+        key: row.key,
+        valueEncrypted: row.valueEncrypted,
+        isSecret: row.isSecret,
+        platform: row.platform,
+        notes: row.notes,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [testVariables.ownerId, testVariables.ownerType, testVariables.key],
+        set: {
+          valueEncrypted: row.valueEncrypted,
+          isSecret: row.isSecret,
+          platform: row.platform,
+          notes: row.notes,
+          updatedAt: now,
+        },
+      });
+  }
+
+  return getTestVariablesForOwner(ownerType, ownerId);
+}
+
+async function deleteTestVariablesForOwner(ownerType: TestVariableOwnerType, ownerId: string): Promise<void> {
+  const db = getDatabase();
+  await db.delete(testVariables).where(and(eq(testVariables.ownerType, ownerType), eq(testVariables.ownerId, ownerId)));
+}
+
+async function resolveExecutionVariablesForScript(params: {
+  ownerType: TestVariableOwnerType;
+  ownerId: string;
+  platform: 'mobile' | 'web';
+  code: string;
+}): Promise<{
+  variables: TestVariableApiRecord[];
+  envMap: Record<string, string>;
+  placeholders: string[];
+  usedKeys: string[];
+  missingKeys: string[];
+  codeResolved: string;
+  envTestText: string;
+}> {
+  const variables = await getTestVariablesForOwner(params.ownerType, params.ownerId);
+  const scopedVars = variables.filter((variable) => testVariableAppliesToPlatform(variable.platform, params.platform));
+  const envMap = Object.fromEntries(scopedVars.map((v) => [v.key, v.value]));
+  const applied = applyScriptPlaceholderValues(params.code, envMap);
+  return {
+    variables: scopedVars,
+    envMap,
+    placeholders: applied.placeholders,
+    usedKeys: applied.usedKeys,
+    missingKeys: applied.missingKeys,
+    codeResolved: applied.code,
+    envTestText: renderDotEnvTest(scopedVars),
+  };
 }
 
 async function markProjectAnalysisTimeout(
@@ -856,6 +1229,7 @@ app.delete('/api/projects/all', async (c) => {
     // Delete from database
     await db.delete(frames);
     await db.delete(projectExports);
+    await db.delete(testVariables);
     await db.delete(projects);
 
     return c.json({ success: true, deleted: allProjects.length });
@@ -1604,6 +1978,9 @@ app.delete('/api/projects/:id', async (c) => {
     // Delete from database
     await db.delete(frames).where(eq(frames.projectId, id));
     await db.delete(projects).where(eq(projects.id, id));
+    await deleteTestVariablesForOwner('project', id);
+    await deleteTestVariablesForOwner('mobile-recording', id);
+    await deleteTestVariablesForOwner('web-recording', id);
 
     // Also delete associated recording directories if they exist
     const mobileRecordingDir = join(PROJECTS_DIR, 'maestro-recordings', id);
@@ -3774,6 +4151,18 @@ app.get('/api/devices', async (c) => {
   }
 });
 
+// List currently available mobile devices that Maestro can target (booted/connected only)
+app.get('/api/testing/mobile/maestro-devices', async (c) => {
+  try {
+    const forceRefresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
+    const devices = await listMaestroDevices({ forceRefresh });
+    return c.json({ devices, refreshed: forceRefresh });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
 // Mobile Recording using MaestroRecorder (captures touch events + generates YAML)
 app.post('/api/testing/mobile/record/start', async (c) => {
   try {
@@ -4587,7 +4976,8 @@ app.post('/api/testing/mobile/recordings/:id/analyze', async (c) => {
     const maestroYaml = generateMaestroYaml(
       analysisResult.actions,
       undefined,
-      analysisResult.appName
+      analysisResult.appName,
+      analysisResult.actionDetectionProvider
     );
 
     const flowPath = join(recordingDir, 'test.yaml');
@@ -4746,6 +5136,8 @@ app.delete('/api/testing/mobile/recordings/:id', async (c) => {
     const db = getDatabase();
     await db.delete(projects).where(eq(projects.id, id));
     await db.delete(frames).where(eq(frames.projectId, id));
+    await deleteTestVariablesForOwner('mobile-recording', id);
+    await deleteTestVariablesForOwner('project', id);
 
     console.log(`[Delete] Removed mobile recording and project: ${id}`);
 
@@ -4757,12 +5149,74 @@ app.delete('/api/testing/mobile/recordings/:id', async (c) => {
   }
 });
 
+// Get mobile replay run status (for UI polling)
+app.get('/api/testing/mobile/replays/:runId', async (c) => {
+  try {
+    const runId = String(c.req.param('runId') || '').trim();
+    if (!runId) return c.json({ error: 'Run ID is required' }, 400);
+    pruneMobileReplayRuns();
+    const run = mobileReplayRuns.get(runId);
+    if (!run) return c.json({ error: 'Replay run not found' }, 404);
+    const now = Date.now();
+    return c.json({
+      ...run,
+      elapsedMs: (run.finishedAt ?? now) - run.createdAt,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Stop a running mobile replay (best-effort: kills local Maestro processes)
+app.post('/api/testing/mobile/replays/:runId/stop', async (c) => {
+  try {
+    const runId = String(c.req.param('runId') || '').trim();
+    if (!runId) return c.json({ error: 'Run ID is required' }, 400);
+    pruneMobileReplayRuns();
+    const run = mobileReplayRuns.get(runId);
+    if (!run) return c.json({ error: 'Replay run not found' }, 404);
+
+    if (run.status !== 'running') {
+      return c.json({
+        success: false,
+        error: `Run is already ${run.status}`,
+        run,
+      }, 409);
+    }
+
+    const now = Date.now();
+    run.status = 'canceled';
+    run.updatedAt = now;
+    run.finishedAt = now;
+    run.durationMs = now - run.createdAt;
+    run.error = 'Run canceled by user';
+    run.output = run.output || 'Run canceled by user';
+    mobileReplayRuns.set(runId, run);
+
+    try {
+      await killZombieMaestroProcesses();
+    } catch {}
+
+    return c.json({ success: true, run });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
 // Replay mobile recording with Maestro
 app.post('/api/testing/mobile/recordings/:id/replay', async (c) => {
   try {
     const { id } = c.req.param();
-    const { readFileSync, existsSync: fsExistsSync } = await import('node:fs');
-    const { exec, execSync } = await import('node:child_process');
+    const body = await c.req.json().catch(() => ({}));
+    const requestedDeviceId = typeof body?.deviceId === 'string' ? body.deviceId.trim() : '';
+    const requestedDeviceName = typeof body?.deviceName === 'string' ? body.deviceName.trim() : '';
+    const requestedDevicePlatform = body?.devicePlatform === 'ios' || body?.devicePlatform === 'android'
+      ? body.devicePlatform
+      : undefined;
+    const skipDeviceValidation = body?.skipDeviceValidation === true;
+    const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
 
     const flowPath = join(PROJECTS_DIR, 'maestro-recordings', id, 'test.yaml');
@@ -4771,25 +5225,135 @@ app.post('/api/testing/mobile/recordings/:id/replay', async (c) => {
       return c.json({ error: 'Flow file not found' }, 404);
     }
 
-    // NOTE: Device focus removed from replay - the device is mirrored in the UI
-    // so the user can see it there. Focus is only needed for initial recording.
+    const flowCode = readFileSync(flowPath, 'utf-8');
+    const resolvedVars = await resolveExecutionVariablesForScript({
+      ownerType: 'mobile-recording',
+      ownerId: id,
+      platform: 'mobile',
+      code: flowCode,
+    });
 
-    // Run Maestro test in background
-    const maestroPath = join(process.env.HOME || '', '.maestro', 'bin', 'maestro');
-    const cmd = existsSync(maestroPath) ? maestroPath : 'maestro';
+    if (resolvedVars.missingKeys.length > 0) {
+      return c.json({
+        error: 'Missing required test variables',
+        missingKeys: resolvedVars.missingKeys,
+        placeholders: resolvedVars.placeholders,
+        usedKeys: resolvedVars.usedKeys,
+      }, 400);
+    }
 
-    exec(`"${cmd}" test "${flowPath}"`, (error, stdout, stderr) => {
-      if (error) {
-        console.error('Maestro replay error:', error);
+    let targetDeviceId: string | undefined;
+    let targetDeviceName: string | undefined;
+    let targetDevicePlatform: 'ios' | 'android' | undefined;
+    let deviceSelectionSource: 'auto' | 'validated' | 'trusted-client' = 'auto';
+    if (requestedDeviceId) {
+      if (skipDeviceValidation && requestedDevicePlatform) {
+        targetDeviceId = requestedDeviceId;
+        targetDeviceName = requestedDeviceName || requestedDeviceId;
+        targetDevicePlatform = requestedDevicePlatform;
+        deviceSelectionSource = 'trusted-client';
       } else {
-        console.log('Maestro replay completed:', stdout);
+        const devices = await listMaestroDevices();
+        const match = devices.find((device) => device.id === requestedDeviceId);
+        if (!match) {
+          return c.json({
+            error: 'Selected device is not currently available',
+            deviceId: requestedDeviceId,
+            availableDevices: devices,
+          }, 400);
+        }
+        targetDeviceId = match.id;
+        targetDeviceName = match.name;
+        targetDevicePlatform = match.platform;
+        deviceSelectionSource = 'validated';
       }
+    }
+    // Use UDID/serial when available (iOS + Android). This is the most stable identifier
+    // and avoids Maestro mismatches with shortened simulator names in some environments.
+    const maestroDeviceArg = targetDeviceId || targetDeviceName;
+
+    const runId = `mrun_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const createdAt = Date.now();
+    mobileReplayRuns.set(runId, {
+      runId,
+      recordingId: id,
+      status: 'running',
+      flowPath,
+      usedKeys: resolvedVars.usedKeys,
+      deviceId: targetDeviceId || null,
+      deviceName: targetDeviceName || null,
+      devicePlatform: targetDevicePlatform || null,
+      createdAt,
+      updatedAt: createdAt,
+      finishedAt: null,
+      durationMs: null,
+      error: null,
+      output: null,
+    });
+    pruneMobileReplayRuns();
+
+    void runMaestroTest({
+      flowPath,
+      device: maestroDeviceArg,
+      env: resolvedVars.envMap,
+      timeout: 300000,
+    }).then((result) => {
+      const now = Date.now();
+      const existingRun = mobileReplayRuns.get(runId);
+      if (existingRun) {
+        const wasCanceled = existingRun.status === 'canceled';
+        if (!wasCanceled) {
+          existingRun.status = result.success ? 'completed' : 'failed';
+          existingRun.error = result.success ? null : (result.error || result.output || 'Maestro test failed');
+        }
+        existingRun.updatedAt = now;
+        existingRun.finishedAt = existingRun.finishedAt ?? now;
+        existingRun.durationMs = typeof result.duration === 'number' ? result.duration : now - existingRun.createdAt;
+        existingRun.output = typeof result.output === 'string' ? result.output.slice(-12000) : null;
+        mobileReplayRuns.set(runId, existingRun);
+      }
+      if (!result.success) {
+        console.error('[Maestro Replay] Failed:', result.error || result.output || 'unknown error');
+      } else {
+        console.log('[Maestro Replay] Completed:', {
+          flowPath,
+          duration: result.duration,
+          usedKeys: resolvedVars.usedKeys,
+          deviceId: targetDeviceId,
+          maestroDeviceArg,
+        });
+      }
+    }).catch((runError) => {
+      const now = Date.now();
+      const existingRun = mobileReplayRuns.get(runId);
+      if (existingRun) {
+        const wasCanceled = existingRun.status === 'canceled';
+        if (!wasCanceled) {
+          existingRun.status = 'failed';
+          existingRun.error = runError instanceof Error ? runError.message : String(runError);
+        }
+        existingRun.updatedAt = now;
+        existingRun.finishedAt = existingRun.finishedAt ?? now;
+        existingRun.durationMs = now - existingRun.createdAt;
+        existingRun.output = existingRun.error;
+        mobileReplayRuns.set(runId, existingRun);
+      }
+      console.error('[Maestro Replay] Unexpected error:', runError);
     });
 
     return c.json({
       success: true,
       message: 'Maestro test started',
-      flowPath
+      flowPath,
+      usedKeys: resolvedVars.usedKeys,
+      envTest: resolvedVars.envTestText,
+      runId,
+      runStatus: 'running',
+      deviceId: targetDeviceId || null,
+      deviceName: targetDeviceName || null,
+      devicePlatform: targetDevicePlatform || null,
+      maestroDeviceArg: maestroDeviceArg || null,
+      deviceSelectionSource,
     });
 
   } catch (error) {
@@ -5169,8 +5733,9 @@ ${prompt}`;
  */
 function createClaudeCliVisionProvider(): ActionDetectorProvider | null {
   if (!isClaudeCliAvailable()) return null;
+  const claudeCliModel = getConfiguredClaudeCliModel();
   return {
-    name: 'claude-cli (vision)',
+    name: `claude-cli (vision, ${claudeCliModel})`,
     sendMessageWithImages: runClaudeCliVision,
   };
 }
@@ -5712,7 +6277,8 @@ async function runOCRInBackground(
           const maestroYaml = generateMaestroYaml(
             analysisResult.actions,
             undefined,
-            analysisResult.appName
+            analysisResult.appName,
+            analysisResult.actionDetectionProvider
           );
 
           // Write YAML to test.yaml in the recording directory (parent of screenshots)
@@ -5884,11 +6450,29 @@ function sanitizeChatCommands(commands: MobileChatCommand[]): MobileChatCommand[
   return commands.filter(cmd => {
     switch (cmd.type) {
       case 'tapOn':
-      case 'inputText':
       case 'assertVisible': {
         const value = typeof cmd.params.text === 'string' ? cmd.params.text.trim() : '';
         if (!value) return false;
         cmd.params.text = value;
+        return true;
+      }
+      case 'inputText': {
+        const value = typeof cmd.params.text === 'string' ? cmd.params.text.trim() : '';
+        if (!value) return false;
+        const safeValue = redactSensitiveTestInput(value, {
+          actionType: 'inputText',
+          description: cmd.description,
+        });
+        cmd.params.text = safeValue;
+        if (typeof cmd.description === 'string' && cmd.description) {
+          cmd.description = redactQuotedStringsInText(cmd.description, {
+            actionType: 'inputText',
+            description: cmd.description,
+          });
+          if (safeValue !== value && cmd.description.includes(value)) {
+            cmd.description = cmd.description.split(value).join(safeValue);
+          }
+        }
         return true;
       }
       case 'swipe':
@@ -6172,8 +6756,11 @@ function generateChatMaestroYaml(commands: Array<{ type: string; params: Record<
         lines.push(`    text: "${escapeYaml(String(cmd.params.text))}"`);
         break;
       case 'inputText':
+        const safeInputText = redactSensitiveTestInput(String(cmd.params.text), {
+          actionType: 'inputText',
+        });
         lines.push('- inputText:');
-        lines.push(`    text: "${escapeYaml(String(cmd.params.text))}"`);
+        lines.push(`    text: "${escapeYaml(safeInputText)}"`);
         break;
       case 'swipe':
       case 'scroll':
@@ -6922,6 +7509,90 @@ app.get('/api/ollama/status', async (c) => {
 });
 
 // ============================================================================
+// TEST VARIABLES API (script/project execution variables)
+// ============================================================================
+
+app.get('/api/test-variables/:ownerType/:ownerId', async (c) => {
+  try {
+    const ownerType = normalizeTestVariableOwnerType(c.req.param('ownerType'));
+    const ownerId = String(c.req.param('ownerId') || '').trim();
+    if (!ownerType || !ownerId) {
+      return c.json({ error: 'Invalid owner type or owner id' }, 400);
+    }
+
+    const variables = await getTestVariablesForOwner(ownerType, ownerId);
+    const code = c.req.query('code');
+    const platformQuery = c.req.query('platform');
+    const platform = platformQuery === 'mobile' || platformQuery === 'web' ? platformQuery : null;
+
+    if (typeof code === 'string' && platform) {
+      const resolved = await resolveExecutionVariablesForScript({
+        ownerType,
+        ownerId,
+        platform,
+        code,
+      });
+      return c.json({
+        variables,
+        envTest: renderDotEnvTest(variables),
+        placeholders: resolved.placeholders,
+        usedKeys: resolved.usedKeys,
+        missingKeys: resolved.missingKeys,
+      });
+    }
+
+    return c.json({
+      variables,
+      envTest: renderDotEnvTest(variables),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.put('/api/test-variables/:ownerType/:ownerId', async (c) => {
+  try {
+    const ownerType = normalizeTestVariableOwnerType(c.req.param('ownerType'));
+    const ownerId = String(c.req.param('ownerId') || '').trim();
+    if (!ownerType || !ownerId) {
+      return c.json({ error: 'Invalid owner type or owner id' }, 400);
+    }
+
+    const body = await c.req.json().catch(() => ({}));
+    let variablesInput: unknown = body?.variables;
+    if (!Array.isArray(variablesInput) && typeof body?.envTestText === 'string') {
+      const parsed = parseDotEnvTest(body.envTestText);
+      const secretKeys = new Set(
+        Array.isArray(body?.secretKeys)
+          ? body.secretKeys
+              .map((value: unknown) => normalizeTestVariableKey(value))
+              .filter((value: string | null): value is string => !!value)
+          : []
+      );
+      variablesInput = parsed.map((item) => ({
+        key: item.key,
+        value: item.value,
+        platform: item.platform || 'both',
+        notes: item.notes || null,
+        isSecret: secretKeys.has(item.key),
+      }));
+    }
+
+    const variables = await saveTestVariablesForOwner(ownerType, ownerId, variablesInput);
+
+    return c.json({
+      success: true,
+      variables,
+      envTest: renderDotEnvTest(variables),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// ============================================================================
 // PLAYWRIGHT RECORDER API
 // ============================================================================
 
@@ -7248,6 +7919,112 @@ app.get('/api/recorder/recordings/:id', async (c) => {
   }
 });
 
+// Save edited Playwright spec code
+app.put('/api/recorder/recordings/:id/spec', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const specCode = typeof body?.specCode === 'string' ? body.specCode : '';
+    const { writeFileSync, existsSync: fsExistsSync, mkdirSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { homedir } = await import('node:os');
+
+    const recordingDir = join(homedir(), '.discoverylab', 'recordings', id);
+    if (!fsExistsSync(recordingDir)) {
+      return c.json({ error: 'Recording not found' }, 404);
+    }
+
+    const specPath = join(recordingDir, 'test.spec.ts');
+    mkdirSync(recordingDir, { recursive: true });
+    writeFileSync(specPath, specCode, 'utf8');
+
+    const placeholders = parseScriptPlaceholders(specCode);
+    return c.json({ success: true, specPath, placeholders });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Run a recorded Playwright spec with project/script test variables
+app.post('/api/recorder/recordings/:id/run', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const headless = body?.headless !== false ? true : false;
+    const timeout = Number.isFinite(Number(body?.timeout)) ? Number(body.timeout) : undefined;
+    const browser = body?.browser === 'firefox' || body?.browser === 'webkit' || body?.browser === 'chromium'
+      ? body.browser
+      : undefined;
+    const { readFileSync, existsSync: fsExistsSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { homedir } = await import('node:os');
+
+    const recordingDir = join(homedir(), '.discoverylab', 'recordings', id);
+    const specPath = join(recordingDir, 'test.spec.ts');
+    if (!fsExistsSync(recordingDir) || !fsExistsSync(specPath)) {
+      return c.json({ error: 'Recording spec not found' }, 404);
+    }
+
+    const specCode = readFileSync(specPath, 'utf8');
+    const resolved = await resolveExecutionVariablesForScript({
+      ownerType: 'web-recording',
+      ownerId: id,
+      platform: 'web',
+      code: specCode,
+    });
+    const applied = applyPlaywrightScriptPlaceholderValues(specCode, resolved.envMap);
+
+    if (applied.missingKeys.length > 0) {
+      return c.json({
+        error: 'Missing required test variables',
+        placeholders: applied.placeholders,
+        usedKeys: applied.usedKeys,
+        missingKeys: applied.missingKeys,
+        envTest: resolved.envTestText,
+      }, 400);
+    }
+
+    const runtimeDir = join(recordingDir, '.runtime');
+    mkdirSync(runtimeDir, { recursive: true });
+    const runStamp = Date.now();
+    const runtimeSpecPath = join(runtimeDir, `test.runtime.${runStamp}.spec.ts`);
+    const runtimeEnvPath = join(runtimeDir, `.env.test.${runStamp}`);
+    writeFileSync(runtimeSpecPath, applied.code, 'utf8');
+    writeFileSync(runtimeEnvPath, resolved.envTestText || '', 'utf8');
+
+    const result = await runPlaywrightTest({
+      testPath: runtimeSpecPath,
+      workers: 1,
+      retries: 0,
+      env: resolved.envMap,
+      config: {
+        browser,
+        headless,
+        timeout,
+        video: body?.video === 'on' || body?.video === 'retain-on-failure' ? body.video : 'retain-on-failure',
+        screenshot: body?.screenshot === 'on' || body?.screenshot === 'only-on-failure' ? body.screenshot : 'only-on-failure',
+        trace: body?.trace === 'on' || body?.trace === 'retain-on-failure' ? body.trace : 'retain-on-failure',
+      },
+      outputDir: join(recordingDir, 'playwright-runs', String(runStamp)),
+      reporter: 'json',
+    });
+
+    return c.json({
+      success: result.success,
+      result,
+      placeholders: applied.placeholders,
+      usedKeys: applied.usedKeys,
+      missingKeys: applied.missingKeys,
+      runtimeSpecPath,
+      runtimeEnvPath,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
 // Delete recording by ID
 app.delete('/api/recorder/recordings/:id', async (c) => {
   try {
@@ -7269,6 +8046,8 @@ app.delete('/api/recorder/recordings/:id', async (c) => {
     const db = getDatabase();
     await db.delete(frames).where(eq(frames.projectId, id));
     await db.delete(projects).where(eq(projects.id, id));
+    await deleteTestVariablesForOwner('web-recording', id);
+    await deleteTestVariablesForOwner('project', id);
 
     // Delete project directory if it exists
     const projectDir = join(PROJECTS_DIR, id);
@@ -7326,6 +8105,9 @@ app.delete('/api/recorder/recordings', async (c) => {
       for (const id of deletedIds) {
         await db.delete(frames).where(eq(frames.projectId, id));
         await db.delete(projects).where(eq(projects.id, id));
+        await deleteTestVariablesForOwner('web-recording', id);
+        await deleteTestVariablesForOwner('mobile-recording', id);
+        await deleteTestVariablesForOwner('project', id);
 
         // Also delete project directory if it exists
         const projectDir = join(PROJECTS_DIR, id);

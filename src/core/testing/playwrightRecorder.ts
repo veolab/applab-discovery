@@ -9,6 +9,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
+import { redactSensitiveTestInput, redactQuotedStringsInText } from '../security/sensitiveInput.js';
 
 // ============================================================================
 // TYPES
@@ -526,14 +527,32 @@ export class PlaywrightRecorder extends EventEmitter {
       console.error('Screenshot failed:', error);
     }
 
+    const baseDescription = actionData.description || actionData.type || 'Action';
+    const rawValue = typeof actionData.value === 'string' ? actionData.value : undefined;
+    const safeValue = rawValue && (actionData.type === 'fill' || actionData.type === 'select')
+      ? redactSensitiveTestInput(rawValue, {
+          actionType: actionData.type,
+          selector: actionData.selector,
+          description: baseDescription,
+        })
+      : rawValue;
+    let safeDescription = redactQuotedStringsInText(baseDescription, {
+      actionType: actionData.type,
+      selector: actionData.selector,
+      description: baseDescription,
+    });
+    if (rawValue && safeValue && rawValue !== safeValue && safeDescription.includes(rawValue)) {
+      safeDescription = safeDescription.split(rawValue).join(safeValue);
+    }
+
     const action: RecordingAction = {
       id: actionId,
       type: actionData.type || 'click',
       timestamp: Date.now(),
       selector: actionData.selector,
-      value: actionData.value,
+      value: safeValue,
       url: actionData.url,
-      description: actionData.description || actionData.type || 'Action',
+      description: safeDescription,
       screenshotPath,
     };
 

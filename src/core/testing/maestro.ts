@@ -13,8 +13,23 @@ import { PROJECTS_DIR } from '../../db/index.js';
 
 const execAsync = promisify(exec);
 
+const MAESTRO_COMMAND_CACHE_SUCCESS_TTL_MS = 5 * 60 * 1000;
+const MAESTRO_COMMAND_CACHE_FAILURE_TTL_MS = 5 * 1000;
+const MAESTRO_DEVICE_CACHE_TTL_MS = 4 * 1000;
+
+let maestroCommandCache: { value: string | null; checkedAt: number } | null = null;
+let maestroCommandResolveInFlight: Promise<string | null> | null = null;
+let maestroDeviceListCache: { devices: MaestroDevice[]; fetchedAt: number } | null = null;
+let maestroDeviceListInFlight: Promise<MaestroDevice[]> | null = null;
+
 function quoteCommand(cmd: string): string {
   return cmd.includes(' ') ? `"${cmd}"` : cmd;
+}
+
+function shellQuoteArg(value: string): string {
+  const str = String(value ?? '');
+  if (!str) return "''";
+  return `'${str.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 function getMaestroCommandCandidates(): string[] {
@@ -33,17 +48,45 @@ function getMaestroCommandCandidates(): string[] {
   return candidates;
 }
 
-async function resolveMaestroCommand(): Promise<string | null> {
-  for (const candidate of getMaestroCommandCandidates()) {
-    try {
-      const cmd = quoteCommand(candidate);
-      await execAsync(`${cmd} --version`);
-      return candidate;
-    } catch {
-      // Try next candidate
+function getMaestroCommandCacheTtlMs(value: string | null): number {
+  return value ? MAESTRO_COMMAND_CACHE_SUCCESS_TTL_MS : MAESTRO_COMMAND_CACHE_FAILURE_TTL_MS;
+}
+
+async function resolveMaestroCommand(options?: { forceRefresh?: boolean }): Promise<string | null> {
+  const forceRefresh = options?.forceRefresh === true;
+  const now = Date.now();
+
+  if (!forceRefresh && maestroCommandCache) {
+    const ttlMs = getMaestroCommandCacheTtlMs(maestroCommandCache.value);
+    if ((now - maestroCommandCache.checkedAt) < ttlMs) {
+      return maestroCommandCache.value;
     }
   }
-  return null;
+
+  if (!forceRefresh && maestroCommandResolveInFlight) {
+    return maestroCommandResolveInFlight;
+  }
+
+  maestroCommandResolveInFlight = (async () => {
+    for (const candidate of getMaestroCommandCandidates()) {
+      try {
+        const cmd = quoteCommand(candidate);
+        await execAsync(`${cmd} --version`);
+        maestroCommandCache = { value: candidate, checkedAt: Date.now() };
+        return candidate;
+      } catch {
+        // Try next candidate
+      }
+    }
+    maestroCommandCache = { value: null, checkedAt: Date.now() };
+    return null;
+  })();
+
+  try {
+    return await maestroCommandResolveInFlight;
+  } finally {
+    maestroCommandResolveInFlight = null;
+  }
 }
 
 // Pending session file - survives server restarts
@@ -170,7 +213,19 @@ export async function getMaestroVersion(): Promise<string | null> {
   }
 }
 
-export async function listMaestroDevices(): Promise<MaestroDevice[]> {
+export async function listMaestroDevices(options?: { forceRefresh?: boolean; ttlMs?: number }): Promise<MaestroDevice[]> {
+  const forceRefresh = options?.forceRefresh === true;
+  const ttlMs = Math.max(0, Number(options?.ttlMs ?? MAESTRO_DEVICE_CACHE_TTL_MS));
+  const now = Date.now();
+
+  if (!forceRefresh && maestroDeviceListCache && (now - maestroDeviceListCache.fetchedAt) < ttlMs) {
+    return maestroDeviceListCache.devices;
+  }
+  if (!forceRefresh && maestroDeviceListInFlight) {
+    return maestroDeviceListInFlight;
+  }
+
+  maestroDeviceListInFlight = (async () => {
   const devices: MaestroDevice[] = [];
 
   try {
@@ -218,7 +273,15 @@ export async function listMaestroDevices(): Promise<MaestroDevice[]> {
     // Android devices not available
   }
 
-  return devices;
+    maestroDeviceListCache = { devices, fetchedAt: Date.now() };
+    return devices;
+  })();
+
+  try {
+    return await maestroDeviceListInFlight;
+  } finally {
+    maestroDeviceListInFlight = null;
+  }
 }
 
 // ============================================================================
@@ -423,7 +486,8 @@ export async function runMaestroTest(options: MaestroRunOptions): Promise<Maestr
   args.push('--output', path.join(outputDir, 'report.xml'));
 
   try {
-    const { stdout, stderr } = await execAsync(`${maestroCmd} ${args.join(' ')}`, {
+    const shellArgs = args.map(shellQuoteArg).join(' ');
+    const { stdout, stderr } = await execAsync(`${maestroCmd} ${shellArgs}`, {
       timeout,
       env: { ...process.env, ...env },
     });
@@ -453,13 +517,28 @@ export async function runMaestroTest(options: MaestroRunOptions): Promise<Maestr
   } catch (error) {
     const duration = Date.now() - startTime;
     const message = error instanceof Error ? error.message : String(error);
+    const errLike = error as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
+    const stdout = typeof errLike?.stdout === 'string'
+      ? errLike.stdout
+      : Buffer.isBuffer(errLike?.stdout)
+        ? errLike.stdout.toString('utf8')
+        : '';
+    const stderr = typeof errLike?.stderr === 'string'
+      ? errLike.stderr
+      : Buffer.isBuffer(errLike?.stderr)
+        ? errLike.stderr.toString('utf8')
+        : '';
+    const detailedOutput = [stderr?.trim(), stdout?.trim(), message]
+      .filter(Boolean)
+      .join('\n\n')
+      .slice(-16000);
 
     return {
       success: false,
-      error: message,
+      error: stderr?.trim() || message,
       duration,
       flowPath,
-      output: message,
+      output: detailedOutput || message,
     };
   }
 }

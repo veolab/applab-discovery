@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { eq, desc } from 'drizzle-orm';
 import type { MCPTool } from '../server.js';
 import { createTextResult, createErrorResult, createJsonResult } from '../server.js';
-import { getDatabase, projects, projectExports, PROJECTS_DIR } from '../../db/index.js';
+import { getDatabase, projects, projectExports, testVariables, PROJECTS_DIR } from '../../db/index.js';
 import type { Project, NewProject } from '../../db/schema.js';
 
 // ============================================================================
@@ -236,6 +236,7 @@ export const projectDeleteTool: MCPTool = {
 
       // Delete project (cascades to exports and frames)
       await db.delete(projects).where(eq(projects.id, params.id));
+      await db.delete(testVariables).where(eq(testVariables.ownerId, params.id));
 
       return createTextResult(`Project ${params.id} deleted successfully`);
     } catch (error) {

@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createRequire } from 'module';
 import { PROJECTS_DIR } from '../../db/index.js';
+import { redactSensitiveTestInput } from '../security/sensitiveInput.js';
 
 const execAsync = promisify(exec);
 const requireFromHere = createRequire(import.meta.url);
@@ -37,6 +38,7 @@ export interface PlaywrightRunOptions {
   workers?: number;
   retries?: number;
   reporter?: 'list' | 'html' | 'json' | 'line';
+  env?: Record<string, string>;
 }
 
 export interface PlaywrightTestResult {
@@ -225,11 +227,11 @@ function generateActionCode(action: PlaywrightAction): string | null {
 
     case 'fill':
       if (!selector) return null;
-      return `await page.fill('${selector}', '${value || ''}');`;
+      return `await page.fill('${selector}', '${redactSensitiveTestInput(String(value || ''), { actionType: 'fill', selector })}');`;
 
     case 'type':
       if (!selector) return null;
-      return `await page.type('${selector}', '${value || ''}');`;
+      return `await page.type('${selector}', '${redactSensitiveTestInput(String(value || ''), { actionType: 'type', selector })}');`;
 
     case 'press':
       if (!selector) return null;
@@ -365,6 +367,7 @@ export async function runPlaywrightTest(options: PlaywrightRunOptions): Promise<
     workers = 1,
     retries = 0,
     reporter = 'json',
+    env = {},
   } = options;
 
   // Create output directory
@@ -415,6 +418,7 @@ export async function runPlaywrightTest(options: PlaywrightRunOptions): Promise<
     const { stdout, stderr } = await execAsync(`npx ${args.join(' ')}`, {
       timeout: config.timeout || 300000,
       cwd: process.cwd(),
+      env: { ...process.env, ...env },
     });
 
     const duration = Date.now() - startTime;
