@@ -4083,20 +4083,41 @@ app.get('/api/devices', async (c) => {
         const avdOutput = execSync(`"${EMULATOR_PATH}" -list-avds`, { encoding: 'utf8' });
         const avds = avdOutput.trim().split('\n').filter(Boolean);
 
-        // Check which ones are running
-        let runningDevices: string[] = [];
+        // Check which AVDs are currently running (map emulator serial -> AVD name)
+        const runningAvdNames = new Set<string>();
         if (ADB_PATH) {
           try {
             const adbOutput = execSync(`"${ADB_PATH}" devices -l`, { encoding: 'utf8' });
-            runningDevices = adbOutput.split('\n')
-              .filter(line => line.includes('device') && !line.includes('offline'))
-              .map(line => line.split('\t')[0]);
+            const runningEmulatorSerials = adbOutput.split('\n')
+              .slice(1)
+              .map(line => line.trim())
+              .filter(Boolean)
+              .map(line => line.split(/\s+/))
+              .filter(parts => parts[0]?.startsWith('emulator-') && parts[1] === 'device')
+              .map(parts => parts[0]);
+
+            for (const serial of runningEmulatorSerials) {
+              try {
+                const avdNameOutput = execSync(`"${ADB_PATH}" -s "${serial}" emu avd name`, {
+                  encoding: 'utf8',
+                  timeout: 1500
+                });
+                const avdName = avdNameOutput
+                  .split('\n')
+                  .map(line => line.trim())
+                  .find(line => line && line !== 'OK');
+                if (avdName) {
+                  runningAvdNames.add(avdName);
+                }
+              } catch {
+                // If name lookup fails, leave AVD unmatched (it will appear as shutdown)
+              }
+            }
           } catch {}
         }
 
         for (const avd of avds) {
-          // Check if this AVD is currently running
-          const isRunning = runningDevices.some(d => d.includes('emulator'));
+          const isRunning = runningAvdNames.has(avd);
           devices.push({
             id: avd,
             name: avd.replace(/_/g, ' '),
