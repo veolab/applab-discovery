@@ -7,6 +7,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import open from 'open';
+import { APP_VERSION } from './core/appVersion.js';
 
 const program = new Command();
 
@@ -16,7 +17,7 @@ const program = new Command();
 program
   .name('discoverylab')
   .description('AI-powered app testing & evidence generator - Claude Code Plugin')
-  .version('0.1.0');
+  .version(APP_VERSION);
 
 // ============================================================================
 // SERVE COMMAND
@@ -224,7 +225,7 @@ program
   .command('info')
   .description('Show version and configuration info')
   .action(async () => {
-    console.log(chalk.cyan('\n  DiscoveryLab v0.1.0\n'));
+    console.log(chalk.cyan(`\n  DiscoveryLab v${APP_VERSION}\n`));
     console.log(chalk.gray('  AI-powered app testing & evidence generator'));
     console.log(chalk.gray('  Claude Code Plugin\n'));
 

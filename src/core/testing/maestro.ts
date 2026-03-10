@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'crypto';
 import { PROJECTS_DIR } from '../../db/index.js';
+import { getAdbCommand } from '../android/adb.js';
 
 const execAsync = promisify(exec);
 
@@ -30,6 +31,14 @@ function shellQuoteArg(value: string): string {
   const str = String(value ?? '');
   if (!str) return "''";
   return `'${str.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function getAdbCommandOrThrow(): string {
+  const adbCommand = getAdbCommand();
+  if (!adbCommand) {
+    throw new Error('ADB not found. Set ANDROID_HOME/ANDROID_SDK_ROOT or add adb to PATH.');
+  }
+  return adbCommand;
 }
 
 function getMaestroCommandCandidates(): string[] {
@@ -253,20 +262,23 @@ export async function listMaestroDevices(options?: { forceRefresh?: boolean; ttl
 
   try {
     // Get Android devices
-    const { stdout: androidOutput } = await execAsync('adb devices -l');
-    const lines = androidOutput.split('\n').slice(1); // Skip header
+    const adbCommand = getAdbCommand();
+    if (adbCommand) {
+      const { stdout: androidOutput } = await execAsync(`${quoteCommand(adbCommand)} devices -l`);
+      const lines = androidOutput.split('\n').slice(1); // Skip header
 
-    for (const line of lines) {
-      const match = line.match(/^(\S+)\s+device\s+(.*)$/);
-      if (match) {
-        const [, id, info] = match;
-        const modelMatch = info.match(/model:(\S+)/);
-        devices.push({
-          id,
-          name: modelMatch ? modelMatch[1] : id,
-          platform: 'android',
-          status: 'connected',
-        });
+      for (const line of lines) {
+        const match = line.match(/^(\S+)\s+device\s+(.*)$/);
+        if (match) {
+          const [, id, info] = match;
+          const modelMatch = info.match(/model:(\S+)/);
+          devices.push({
+            id,
+            name: modelMatch ? modelMatch[1] : id,
+            platform: 'android',
+            status: 'connected',
+          });
+        }
       }
     }
   } catch {
@@ -574,7 +586,8 @@ export async function runMaestroWithCapture(
         recordingProcess = spawn('xcrun', ['simctl', 'io', device, 'recordVideo', videoPath]);
       } else if (targetDevice?.platform === 'android') {
         // Android recording via adb
-        recordingProcess = spawn('adb', ['-s', device, 'shell', 'screenrecord', '/sdcard/recording.mp4']);
+        const adbCommand = getAdbCommandOrThrow();
+        recordingProcess = spawn(adbCommand, ['-s', device, 'shell', 'screenrecord', '/sdcard/recording.mp4']);
       }
     }
 
@@ -592,8 +605,9 @@ export async function runMaestroWithCapture(
       const devices = await listMaestroDevices();
       const targetDevice = devices.find(d => d.id === device || d.name === device);
       if (targetDevice?.platform === 'android') {
-        await execAsync(`adb -s ${device} pull /sdcard/recording.mp4 "${videoPath}"`);
-        await execAsync(`adb -s ${device} shell rm /sdcard/recording.mp4`);
+        const adbCommand = getAdbCommandOrThrow();
+        await execAsync(`${quoteCommand(adbCommand)} -s ${shellQuoteArg(device)} pull /sdcard/recording.mp4 "${videoPath}"`);
+        await execAsync(`${quoteCommand(adbCommand)} -s ${shellQuoteArg(device)} shell rm /sdcard/recording.mp4`);
       }
     }
 
@@ -964,6 +978,8 @@ export class MaestroRecorder extends EventEmitter {
     this.actionCounter = 0;
 
     try {
+      const adbCommand = platform === 'android' ? getAdbCommandOrThrow() : null;
+
       // Set up flow path for maestro record output
       const flowPath = path.join(baseDir, 'test.yaml');
       this.session.flowPath = flowPath;
@@ -1064,7 +1080,7 @@ export class MaestroRecorder extends EventEmitter {
           this.videoProcess = spawn('xcrun', ['simctl', 'io', deviceId, 'recordVideo', videoPath]);
         } else {
           const tempVideoPath = '/sdcard/maestro-recording.mp4';
-          this.videoProcess = spawn('adb', ['-s', deviceId, 'shell', 'screenrecord', '--time-limit', '180', tempVideoPath]);
+          this.videoProcess = spawn(adbCommand!, ['-s', deviceId, 'shell', 'screenrecord', '--time-limit', '180', tempVideoPath]);
         }
       } else {
         if (useNativeRecord) {
@@ -1073,7 +1089,7 @@ export class MaestroRecorder extends EventEmitter {
         // Legacy: Manual event capture
         if (platform === 'android') {
           const tempVideoPath = '/sdcard/maestro-recording.mp4';
-          this.videoProcess = spawn('adb', ['-s', deviceId, 'shell', 'screenrecord', '--time-limit', '180', tempVideoPath]);
+          this.videoProcess = spawn(adbCommand!, ['-s', deviceId, 'shell', 'screenrecord', '--time-limit', '180', tempVideoPath]);
           this.startLegacyCapture(deviceId, platform);
         } else {
           this.videoProcess = spawn('xcrun', ['simctl', 'io', deviceId, 'recordVideo', videoPath]);
@@ -1109,15 +1125,21 @@ export class MaestroRecorder extends EventEmitter {
    * Capture Android touch events via ADB
    */
   private startAndroidEventCapture(deviceId: string): void {
+    const adbCommand = getAdbCommand();
+    if (!adbCommand) {
+      console.error('[MaestroRecorder] ADB not found. Android event capture is unavailable.');
+      return;
+    }
+
     // Get device screen dimensions
-    exec(`adb -s ${deviceId} shell wm size`, (err, stdout) => {
+    exec(`${quoteCommand(adbCommand)} -s ${shellQuoteArg(deviceId)} shell wm size`, (err, stdout) => {
       if (err) return;
       const match = stdout.match(/(\d+)x(\d+)/);
       const screenWidth = match ? parseInt(match[1]) : 1080;
       const screenHeight = match ? parseInt(match[2]) : 1920;
 
       // Start getevent to capture touch input
-      this.adbProcess = spawn('adb', ['-s', deviceId, 'shell', 'getevent', '-lt']);
+      this.adbProcess = spawn(adbCommand, ['-s', deviceId, 'shell', 'getevent', '-lt']);
 
       let touchStartTime = 0;
       let touchStartX = 0;
@@ -1297,7 +1319,8 @@ export class MaestroRecorder extends EventEmitter {
 
     try {
       if (this.session.platform === 'android') {
-        await execAsync(`adb -s ${this.session.deviceId} exec-out screencap -p > "${screenshotPath}"`);
+        const adbCommand = getAdbCommandOrThrow();
+        await execAsync(`${quoteCommand(adbCommand)} -s ${shellQuoteArg(this.session.deviceId)} exec-out screencap -p > "${screenshotPath}"`);
       } else {
         await execAsync(`xcrun simctl io ${this.session.deviceId} screenshot "${screenshotPath}"`);
       }
@@ -1429,8 +1452,9 @@ export class MaestroRecorder extends EventEmitter {
       // For Android, pull the video file
       if (this.session.platform === 'android' && this.session.videoPath) {
         try {
-          await execAsync(`adb -s ${this.session.deviceId} pull /sdcard/maestro-recording.mp4 "${this.session.videoPath}"`);
-          await execAsync(`adb -s ${this.session.deviceId} shell rm /sdcard/maestro-recording.mp4`);
+          const adbCommand = getAdbCommandOrThrow();
+          await execAsync(`${quoteCommand(adbCommand)} -s ${shellQuoteArg(this.session.deviceId)} pull /sdcard/maestro-recording.mp4 "${this.session.videoPath}"`);
+          await execAsync(`${quoteCommand(adbCommand)} -s ${shellQuoteArg(this.session.deviceId)} shell rm /sdcard/maestro-recording.mp4`);
         } catch (e) {
           console.error('Failed to pull video:', e);
         }

@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import { APP_VERSION } from '../core/appVersion.js';
 
 // ============================================================================
 // TYPES
@@ -50,7 +51,7 @@ export class MCPServer {
   private tools: Map<string, MCPTool> = new Map();
   private serverInfo = {
     name: 'discoverylab',
-    version: '0.1.0',
+    version: APP_VERSION,
   };
 
   registerTool(tool: MCPTool): void {

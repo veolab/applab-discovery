@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { platform } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { PROJECTS_DIR } from '../../db/index.js';
+import { getAdbCommand } from '../android/adb.js';
 
 // ============================================================================
 // TYPES
@@ -185,10 +186,27 @@ export async function stopIOSSimulatorRecording(sessionId: string): Promise<Emul
 // ============================================================================
 // ANDROID EMULATOR
 // ============================================================================
+function quoteCommand(cmd: string): string {
+  return cmd.includes(' ') ? `"${cmd}"` : cmd;
+}
+
+function getAdbCommandOrThrow(): string {
+  const adbCommand = getAdbCommand();
+  if (!adbCommand) {
+    throw new Error('ADB not found. Set ANDROID_HOME/ANDROID_SDK_ROOT or add adb to PATH.');
+  }
+  return adbCommand;
+}
+
 export function listAndroidEmulators(): EmulatorDevice[] {
   try {
+    const adbCommand = getAdbCommand();
+    if (!adbCommand) {
+      return [];
+    }
+
     // Get running devices
-    const output = execSync('adb devices -l', { encoding: 'utf-8' });
+    const output = execSync(`${quoteCommand(adbCommand)} devices -l`, { encoding: 'utf-8' });
     const lines = output.split('\n').slice(1); // Skip header
     const devices: EmulatorDevice[] = [];
 
@@ -238,8 +256,16 @@ export async function captureAndroidEmulatorScreenshot(
   const tempPath = '/sdcard/screenshot.png';
 
   return new Promise((resolve) => {
+    let adbCommand: string;
+    try {
+      adbCommand = getAdbCommandOrThrow();
+    } catch (error) {
+      resolve({ success: false, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+
     // Take screenshot on device
-    const captureProc = spawn('adb', ['-s', options.deviceId, 'shell', 'screencap', '-p', tempPath]);
+    const captureProc = spawn(adbCommand, ['-s', options.deviceId, 'shell', 'screencap', '-p', tempPath]);
 
     captureProc.on('close', (captureCode) => {
       if (captureCode !== 0) {
@@ -248,11 +274,11 @@ export async function captureAndroidEmulatorScreenshot(
       }
 
       // Pull screenshot to local
-      const pullProc = spawn('adb', ['-s', options.deviceId, 'pull', tempPath, outputPath]);
+      const pullProc = spawn(adbCommand, ['-s', options.deviceId, 'pull', tempPath, outputPath]);
 
       pullProc.on('close', (pullCode) => {
         // Clean up temp file
-        spawn('adb', ['-s', options.deviceId, 'shell', 'rm', tempPath]);
+        spawn(adbCommand, ['-s', options.deviceId, 'shell', 'rm', tempPath]);
 
         if (pullCode === 0 && existsSync(outputPath)) {
           resolve({ success: true, filePath: outputPath });
@@ -285,6 +311,12 @@ export async function startAndroidEmulatorRecording(
   const filename = `android-recording-${timestamp}.mp4`;
   const outputPath = join(projectDir, filename);
   const tempPath = '/sdcard/recording.mp4';
+  let adbCommand: string;
+  try {
+    adbCommand = getAdbCommandOrThrow();
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 
   // Start recording on device
   const args = ['-s', options.deviceId, 'shell', 'screenrecord'];
@@ -296,10 +328,11 @@ export async function startAndroidEmulatorRecording(
 
   args.push(tempPath);
 
-  const proc = spawn('adb', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = spawn(adbCommand, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 
   androidRecordingSessions.set(sessionId, {
     process: proc,
+    adbCommand,
     deviceId: options.deviceId,
     tempPath,
     outputPath,
@@ -310,7 +343,7 @@ export async function startAndroidEmulatorRecording(
 
 const androidRecordingSessions = new Map<
   string,
-  { process: ReturnType<typeof spawn>; deviceId: string; tempPath: string; outputPath: string }
+  { process: ReturnType<typeof spawn>; adbCommand: string; deviceId: string; tempPath: string; outputPath: string }
 >();
 
 export async function stopAndroidEmulatorRecording(sessionId: string): Promise<EmulatorCaptureResult> {
@@ -326,11 +359,11 @@ export async function stopAndroidEmulatorRecording(sessionId: string): Promise<E
 
     setTimeout(() => {
       // Pull the file after a short delay
-      const pullProc = spawn('adb', ['-s', session.deviceId, 'pull', session.tempPath, session.outputPath]);
+      const pullProc = spawn(session.adbCommand, ['-s', session.deviceId, 'pull', session.tempPath, session.outputPath]);
 
       pullProc.on('close', (pullCode) => {
         // Clean up temp file
-        spawn('adb', ['-s', session.deviceId, 'shell', 'rm', session.tempPath]);
+        spawn(session.adbCommand, ['-s', session.deviceId, 'shell', 'rm', session.tempPath]);
         androidRecordingSessions.delete(sessionId);
 
         if (pullCode === 0 && existsSync(session.outputPath)) {
@@ -430,7 +463,9 @@ export async function stopEmulatorRecording(
 // ============================================================================
 export function checkADB(): boolean {
   try {
-    execSync('adb version', { stdio: 'ignore' });
+    const adbCommand = getAdbCommand();
+    if (!adbCommand) return false;
+    execSync(`${quoteCommand(adbCommand)} version`, { stdio: 'ignore' });
     return true;
   } catch {
     return false;

@@ -8,10 +8,13 @@ import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { exec, execSync, spawn } from 'node:child_process';
+import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eq, desc, and, inArray } from 'drizzle-orm';
 import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR } from '../db/index.js';
+import { APP_VERSION } from '../core/appVersion.js';
+import { findAndroidSdkPath, getAdbCommand, getEmulatorPath, listConnectedAndroidDevices, resolveAndroidDeviceSerial } from '../core/android/adb.js';
 import { getMaestroRecorder, isMaestroInstalled, runMaestroTest, isIdbInstalled, tapViaIdb, killZombieMaestroProcesses, listMaestroDevices } from '../core/testing/maestro.js';
 import type { MaestroRecordingSession } from '../core/testing/maestro.js';
 import { runPlaywrightTest } from '../core/testing/playwright.js';
@@ -518,71 +521,8 @@ function runProjectAnalysisInBackgroundWithWatchdog(
     });
 }
 
-// ============================================================================
-// ANDROID SDK DETECTION (like VS Code does it)
-// ============================================================================
-
-import { homedir, tmpdir } from 'node:os';
-
-/**
- * Find Android SDK path - checks environment variables and common locations
- */
-function findAndroidSdkPath(): string | null {
-  // Check environment variables first
-  const envPaths = [
-    process.env.ANDROID_HOME,
-    process.env.ANDROID_SDK_ROOT,
-    process.env.ANDROID_SDK,
-  ].filter(Boolean);
-
-  for (const envPath of envPaths) {
-    if (envPath && existsSync(join(envPath, 'platform-tools', 'adb'))) {
-      return envPath;
-    }
-  }
-
-  // Common SDK locations on macOS
-  const home = homedir();
-  const commonPaths = [
-    join(home, 'Library', 'Android', 'sdk'),
-    join(home, 'Android', 'Sdk'),
-    '/opt/android-sdk',
-    '/usr/local/android-sdk',
-  ];
-
-  for (const sdkPath of commonPaths) {
-    if (existsSync(join(sdkPath, 'platform-tools', 'adb'))) {
-      return sdkPath;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Get ADB path - returns full path to adb executable
- */
-function getAdbPath(): string | null {
-  const sdkPath = findAndroidSdkPath();
-  if (sdkPath) {
-    return join(sdkPath, 'platform-tools', 'adb');
-  }
-  return null;
-}
-
-/**
- * Get emulator path - returns full path to emulator executable
- */
-function getEmulatorPath(): string | null {
-  const sdkPath = findAndroidSdkPath();
-  if (sdkPath) {
-    return join(sdkPath, 'emulator', 'emulator');
-  }
-  return null;
-}
-
 // Cache the paths
-const ADB_PATH = getAdbPath();
+const ADB_PATH = getAdbCommand();
 const EMULATOR_PATH = getEmulatorPath();
 
 // ============================================================================
@@ -1109,7 +1049,7 @@ app.get('/', (c) => {
 app.get('/api/health', (c) => {
   return c.json({
     status: 'ok',
-    version: '0.1.0',
+    version: APP_VERSION,
     timestamp: new Date().toISOString(),
   });
 });
@@ -2176,7 +2116,8 @@ app.post('/api/capture/start', async (c) => {
     }
 
     const screenshotPath = join(projectDir, 'capture.png');
-    const captureType = body.type || 'screen';
+    const captureType = body.sourceType || body.type || 'screen';
+    const sourceId = typeof body.sourceId === 'string' ? body.sourceId.trim() : '';
 
     // Detect platform
     const osPlatform = process.platform === 'darwin' ? 'macos' : process.platform;
@@ -2185,7 +2126,22 @@ app.post('/api/capture/start', async (c) => {
       try {
         if (captureType === 'simulator') {
           // Capture iOS Simulator
-          await execAsync(`xcrun simctl io booted screenshot "${screenshotPath}"`);
+          const simulatorId = sourceId.replace(/^simulator:/i, '') || 'booted';
+          await execAsync(`xcrun simctl io "${simulatorId}" screenshot "${screenshotPath}"`);
+        } else if (captureType === 'android') {
+          const adbPath = ADB_PATH || 'adb';
+          const resolvedDeviceId = resolveAndroidDeviceSerial(sourceId || body.deviceId, adbPath);
+          if (!resolvedDeviceId) {
+            return c.json({
+              error: 'No Android device connected',
+              hint: 'Start an Android emulator or connect a device, then try again.'
+            }, 400);
+          }
+
+          const tempDevicePath = `/sdcard/discoverylab-capture-${Date.now()}.png`;
+          await execAsync(`"${adbPath}" -s "${resolvedDeviceId}" shell screencap -p "${tempDevicePath}"`);
+          await execAsync(`"${adbPath}" -s "${resolvedDeviceId}" pull "${tempDevicePath}" "${screenshotPath}"`);
+          await execAsync(`"${adbPath}" -s "${resolvedDeviceId}" shell rm "${tempDevicePath}"`).catch(() => {});
         } else {
           // Capture screen - try interactive mode if silent fails
           try {
@@ -2227,7 +2183,7 @@ app.post('/api/capture/start', async (c) => {
       id,
       name: `Capture ${now.toLocaleString()}`,
       videoPath: screenshotPath,
-      platform: captureType === 'simulator' ? 'ios' : 'macos',
+      platform: captureType === 'simulator' ? 'ios' : captureType === 'android' ? 'android' : 'macos',
       status: 'draft',
       createdAt: now,
       updatedAt: now,
@@ -2357,6 +2313,17 @@ app.post('/api/capture/mobile/start', async (c) => {
       return c.json({ error: 'Device ID and platform required' }, 400);
     }
 
+    let targetDeviceId = String(deviceId).trim();
+    if (platform === 'android') {
+      const resolvedSerial = resolveAndroidDeviceSerial(targetDeviceId);
+      if (!resolvedSerial) {
+        return c.json({
+          error: `Android device "${targetDeviceId}" not found. Select a running emulator/device and try again.`
+        }, 400);
+      }
+      targetDeviceId = resolvedSerial;
+    }
+
     const { exec, spawn } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const { mkdirSync } = await import('node:fs');
@@ -2375,20 +2342,20 @@ app.post('/api/capture/mobile/start', async (c) => {
 
     if (platform === 'ios') {
       // iOS Simulator video recording
-      recordProcess = spawn('xcrun', ['simctl', 'io', deviceId, 'recordVideo', videoPath], {
+      recordProcess = spawn('xcrun', ['simctl', 'io', targetDeviceId, 'recordVideo', videoPath], {
         stdio: 'pipe'
       });
     } else if (platform === 'android') {
       // Android screen recording via adb
       const adbPath = ADB_PATH || 'adb';
-      recordProcess = spawn(adbPath, ['-s', deviceId, 'shell', 'screenrecord', '/sdcard/recording.mp4'], {
+      recordProcess = spawn(adbPath, ['-s', targetDeviceId, 'shell', 'screenrecord', '/sdcard/recording.mp4'], {
         stdio: 'pipe'
       });
     }
 
     captureSession = {
       type: 'mobile',
-      deviceId,
+      deviceId: targetDeviceId,
       platform,
       deviceName,
       startTime: Date.now(),
@@ -2447,8 +2414,9 @@ app.post('/api/capture/mobile/stop', async (c) => {
     if (session.platform === 'android' && session.deviceId) {
       const adbPath = ADB_PATH || 'adb';
       try {
-        await execAsync(`"${adbPath}" -s ${session.deviceId} pull /sdcard/recording.mp4 "${session.videoPath}"`);
-        await execAsync(`"${adbPath}" -s ${session.deviceId} shell rm /sdcard/recording.mp4`);
+        const resolvedDeviceId = resolveAndroidDeviceSerial(session.deviceId) || session.deviceId;
+        await execAsync(`"${adbPath}" -s "${resolvedDeviceId}" pull /sdcard/recording.mp4 "${session.videoPath}"`);
+        await execAsync(`"${adbPath}" -s "${resolvedDeviceId}" shell rm /sdcard/recording.mp4`);
       } catch (err) {
         console.error('Failed to pull Android recording:', err);
       }
@@ -4077,49 +4045,26 @@ app.get('/api/devices', async (c) => {
       }
     } catch {}
 
+    const connectedAndroidDevices = listConnectedAndroidDevices();
+
     // Get Android Emulators (AVDs)
     if (EMULATOR_PATH) {
       try {
         const avdOutput = execSync(`"${EMULATOR_PATH}" -list-avds`, { encoding: 'utf8' });
         const avds = avdOutput.trim().split('\n').filter(Boolean);
+        const runningEmulatorByAvd = new Map<string, string>();
 
-        // Check which AVDs are currently running (map emulator serial -> AVD name)
-        const runningAvdNames = new Set<string>();
-        if (ADB_PATH) {
-          try {
-            const adbOutput = execSync(`"${ADB_PATH}" devices -l`, { encoding: 'utf8' });
-            const runningEmulatorSerials = adbOutput.split('\n')
-              .slice(1)
-              .map(line => line.trim())
-              .filter(Boolean)
-              .map(line => line.split(/\s+/))
-              .filter(parts => parts[0]?.startsWith('emulator-') && parts[1] === 'device')
-              .map(parts => parts[0]);
-
-            for (const serial of runningEmulatorSerials) {
-              try {
-                const avdNameOutput = execSync(`"${ADB_PATH}" -s "${serial}" emu avd name`, {
-                  encoding: 'utf8',
-                  timeout: 1500
-                });
-                const avdName = avdNameOutput
-                  .split('\n')
-                  .map(line => line.trim())
-                  .find(line => line && line !== 'OK');
-                if (avdName) {
-                  runningAvdNames.add(avdName);
-                }
-              } catch {
-                // If name lookup fails, leave AVD unmatched (it will appear as shutdown)
-              }
-            }
-          } catch {}
+        for (const device of connectedAndroidDevices) {
+          if (device.state === 'device' && device.serial.startsWith('emulator-') && device.avdName) {
+            runningEmulatorByAvd.set(device.avdName, device.serial);
+          }
         }
 
         for (const avd of avds) {
-          const isRunning = runningAvdNames.has(avd);
+          const runningSerial = runningEmulatorByAvd.get(avd);
+          const isRunning = Boolean(runningSerial);
           devices.push({
-            id: avd,
+            id: runningSerial || avd,
             name: avd.replace(/_/g, ' '),
             platform: 'android',
             status: isRunning ? 'booted' : 'shutdown',
@@ -4130,31 +4075,18 @@ app.get('/api/devices', async (c) => {
     }
 
     // Get physical Android devices
-    if (ADB_PATH) {
-      try {
-        const adbOutput = execSync(`"${ADB_PATH}" devices -l`, { encoding: 'utf8' });
-        const lines = adbOutput.split('\n').slice(1);
-        for (const line of lines) {
-          if (line.trim() && !line.includes('emulator')) {
-            const parts = line.split(/\s+/);
-            const deviceId = parts[0];
-            if (!deviceId) continue;
+    for (const device of connectedAndroidDevices) {
+      if (device.serial.startsWith('emulator-')) continue;
 
-            const isOffline = line.includes('offline');
-            const modelMatch = line.match(/model:(\S+)/);
-            const deviceMatch = line.match(/device:(\S+)/);
-            const name = modelMatch?.[1] || deviceMatch?.[1] || deviceId;
-
-            devices.push({
-              id: deviceId,
-              name: name.replace(/_/g, ' '),
-              platform: 'android',
-              status: isOffline ? 'offline' : 'connected',
-              type: 'physical'
-            });
-          }
-        }
-      } catch {}
+      const isOffline = device.state === 'offline';
+      const name = device.model || device.device || device.serial;
+      devices.push({
+        id: device.serial,
+        name: name.replace(/_/g, ' '),
+        platform: 'android',
+        status: isOffline ? 'offline' : 'connected',
+        type: 'physical'
+      });
     }
 
     return c.json({
@@ -4202,6 +4134,16 @@ app.post('/api/testing/mobile/record/start', async (c) => {
     if (requestedDeviceId && requestedPlatform) {
       platform = requestedPlatform as 'ios' | 'android';
       deviceId = requestedDeviceId;
+
+      if (platform === 'android') {
+        const resolvedSerial = resolveAndroidDeviceSerial(deviceId);
+        if (!resolvedSerial) {
+          return c.json({
+            error: `Selected Android device "${deviceId}" is not connected. Start the emulator/device and retry.`
+          }, 400);
+        }
+        deviceId = resolvedSerial;
+      }
 
       // Get device name for the selected device
       if (platform === 'ios') {
@@ -4412,6 +4354,10 @@ app.post('/api/testing/mobile/device/tap', async (c) => {
       }
     }
 
+    if (tapPlatform === 'android') {
+      tapDeviceId = resolveAndroidDeviceSerial(tapDeviceId) || null;
+    }
+
     if (!tapDeviceId) {
       return c.json({ error: 'No target device found' }, 400);
     }
@@ -4425,7 +4371,7 @@ app.post('/api/testing/mobile/device/tap', async (c) => {
 
       while (attempts < maxAttempts) {
         try {
-          execSync(`"${adbPath}" -s ${tapDeviceId} shell input tap ${Math.round(tapX)} ${Math.round(tapY)}`, {
+          execSync(`"${adbPath}" -s "${tapDeviceId}" shell input tap ${Math.round(tapX)} ${Math.round(tapY)}`, {
             timeout: 5000,
           });
           lastError = null;
@@ -7262,22 +7208,8 @@ app.get('/api/setup/status', async (c) => {
 // DATA DIRECTORY INFO
 // ============================================================================
 app.get('/api/info', async (c) => {
-  let version = '0.0.0';
-  try {
-    const { readFileSync } = await import('node:fs');
-    const { join, dirname } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    // Walk up to find package.json (handles dist/ and src/ locations)
-    for (const base of [__dirname, join(__dirname, '..'), join(__dirname, '..', '..')]) {
-      try {
-        const pkg = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8'));
-        if (pkg.version) { version = pkg.version; break; }
-      } catch { /* continue */ }
-    }
-  } catch { /* fallback */ }
   return c.json({
-    version,
+    version: APP_VERSION,
     dataDir: DATA_DIR,
   });
 });
@@ -8475,8 +8407,8 @@ function startLiveStream(platform: 'ios' | 'android', deviceId?: string): void {
   if (platform === 'android' && liveStreamDeviceId) {
     try {
       const adbPath = ADB_PATH || 'adb';
-      execSync(`"${adbPath}" -s ${liveStreamDeviceId} shell input keyevent 224`, { timeout: 2000 });
-      execSync(`"${adbPath}" -s ${liveStreamDeviceId} shell input keyevent 82`, { timeout: 2000 });
+      execSync(`"${adbPath}" -s "${liveStreamDeviceId}" shell input keyevent 224`, { timeout: 2000 });
+      execSync(`"${adbPath}" -s "${liveStreamDeviceId}" shell input keyevent 82`, { timeout: 2000 });
     } catch {}
   }
 
@@ -8513,6 +8445,14 @@ app.post('/api/live-stream/start', async (c) => {
 
     if (!platform || !['ios', 'android'].includes(platform)) {
       return c.json({ error: 'Invalid platform. Must be "ios" or "android"' }, 400);
+    }
+
+    if (platform === 'android' && deviceId) {
+      const resolvedSerial = resolveAndroidDeviceSerial(String(deviceId));
+      if (!resolvedSerial) {
+        return c.json({ error: `Android device "${deviceId}" not found` }, 400);
+      }
+      deviceId = resolvedSerial;
     }
 
     if (platform === 'android' && !deviceId) {
