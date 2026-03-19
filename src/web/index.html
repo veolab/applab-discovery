@@ -5634,6 +5634,69 @@
             border: none;
         }
 
+        /* Generic skeleton shimmer */
+        .skeleton {
+            position: relative;
+            background: var(--bg-tertiary);
+            overflow: hidden;
+            border-radius: 8px;
+        }
+        .skeleton::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.03) 60%, transparent 100%);
+            animation: skeletonShimmer 2s ease-in-out infinite;
+        }
+
+        /* Project card thumbnail skeleton */
+        .project-thumb .skeleton-thumb {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            inset: 0;
+        }
+        .project-thumb { position: relative; }
+
+        /* Video player skeleton */
+        .video-player-container .video-skeleton {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            border-radius: 12px;
+        }
+
+        /* Analysis view loading skeleton */
+        .analysis-skeleton {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        .analysis-skeleton .skel-card {
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            padding: 20px;
+        }
+        .analysis-skeleton .skel-card.full { grid-column: 1 / -1; }
+        .analysis-skeleton .skel-line {
+            height: 12px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+        .analysis-skeleton .skel-line.w60 { width: 60%; }
+        .analysis-skeleton .skel-line.w40 { width: 40%; }
+        .analysis-skeleton .skel-line.w80 { width: 80%; }
+        .analysis-skeleton .skel-line.w100 { width: 100%; }
+        .analysis-skeleton .skel-video {
+            width: 100%;
+            padding-bottom: 56.25%;
+            border-radius: 8px;
+        }
+
+        @media (max-width: 768px) {
+            .analysis-skeleton { grid-template-columns: 1fr; }
+        }
+
         /* Skeleton loader for template rendering */
         .template-skeleton {
             position: relative;
@@ -11145,10 +11208,14 @@
         }
 
         function getProjectThumb(project) {
+            const skelHtml = '<div class="skeleton skeleton-thumb"></div>';
+            const onImgLoad = `this.previousElementSibling?.remove()`;
+            const onImgError = `this.previousElementSibling?.remove(); this.parentElement.innerHTML='No preview'`;
+
             // Prefer AI-selected thumbnail (best frame)
             if (project.thumbnailPath) {
                 const url = `/api/file?path=${encodeURIComponent(project.thumbnailPath)}`;
-                return `<img src="${url}" alt="${project.name}" onerror="this.parentElement.innerHTML='No preview'">`;
+                return `${skelHtml}<img src="${url}" alt="${project.name}" onload="${onImgLoad}" onerror="${onImgError}">`;
             }
 
             // Fallback to video path
@@ -11157,10 +11224,10 @@
                 const url = `/api/file?path=${encodeURIComponent(project.videoPath)}`;
 
                 if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) {
-                    return `<img src="${url}" alt="${project.name}" onerror="this.parentElement.innerHTML='No preview'">`;
+                    return `${skelHtml}<img src="${url}" alt="${project.name}" onload="${onImgLoad}" onerror="${onImgError}">`;
                 }
                 if (['mp4', 'mov', 'webm'].includes(ext)) {
-                    return `<video src="${url}" muted onerror="this.parentElement.innerHTML='No preview'"></video>`;
+                    return `${skelHtml}<video src="${url}" muted onloadeddata="${onImgLoad}" onerror="${onImgError}"></video>`;
                 }
             }
             return 'No preview';
@@ -11343,6 +11410,29 @@
                 editScriptBtn.style.display = isMobileProject ? 'flex' : 'none';
             }
 
+            // Show loading skeleton while fetching full project data
+            container.innerHTML = `
+                <div class="analysis-skeleton">
+                    <div class="skel-card skeleton">
+                        <div class="skel-line skeleton w60"></div>
+                        <div class="skel-line skeleton w40"></div>
+                        <div class="skel-line skeleton w80"></div>
+                    </div>
+                    <div class="skel-card skeleton">
+                        <div class="skel-line skeleton w80"></div>
+                        <div class="skel-line skeleton w60"></div>
+                    </div>
+                    <div class="skel-card skeleton full">
+                        <div class="skel-video skeleton"></div>
+                    </div>
+                    <div class="skel-card skeleton full">
+                        <div class="skel-line skeleton w100"></div>
+                        <div class="skel-line skeleton w60"></div>
+                        <div class="skel-line skeleton w80"></div>
+                    </div>
+                </div>
+            `;
+
             // Fetch full project data including frames
             try {
                 const response = await fetch(`/api/projects/${currentProject.id}`);
@@ -11420,7 +11510,8 @@
 
                             <!-- Raw video (default) -->
                             <div class="video-player-container" id="rawVideoContainer">
-                                <video id="analysisVideo" controls preload="metadata" src="${videoUrl}"></video>
+                                <div class="skeleton video-skeleton" id="videoLoadingSkeleton"></div>
+                                <video id="analysisVideo" controls preload="metadata" src="${videoUrl}" onloadeddata="document.getElementById('videoLoadingSkeleton')?.remove()" onerror="document.getElementById('videoLoadingSkeleton')?.remove()"></video>
                             </div>
 
                             <!-- Template skeleton loader (shown during render) -->
@@ -11847,6 +11938,14 @@
                     #templateEditModal .te-route-item label { font-size: 11px; margin: 0; cursor: pointer; flex: 1; display: flex; align-items: center; gap: 6px; }
                     #templateEditModal .te-route-count { color: var(--text-muted); font-size: 10px; }
                     #templateEditModal .te-section-title { font-size: 11px; font-weight: 500; color: var(--text-secondary); margin: 10px 0 6px; }
+                    #templateEditModal .te-tabs-header { display: flex; align-items: center; justify-content: space-between; margin: 10px 0 6px; }
+                    #templateEditModal .te-tabs-header .te-section-title { margin: 0; }
+                    #templateEditModal .te-add-tab-btn { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text-secondary); cursor: pointer; padding: 2px 6px; font-size: 14px; line-height: 1; }
+                    #templateEditModal .te-add-tab-btn:hover { border-color: var(--accent); color: var(--accent); }
+                    #templateEditModal .te-tabs-scroll { max-height: 300px; overflow-y: auto; }
+                    #templateEditModal .te-paste-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 2px; position: absolute; top: 6px; right: 6px; }
+                    #templateEditModal .te-paste-btn:hover { color: var(--accent); }
+                    #templateEditModal .te-tab-body { position: relative; }
                 </style>
                 <div class="modal te-modal">
                     <div class="modal-header">
@@ -11884,8 +11983,8 @@
             // Render fields for current mode
             renderTemplateEditFields(currentMode);
 
-            // If terminal mode, load route checklist
-            if (isShowcase && currentMode === 'terminal') {
+            // Load route checklist for terminal mode (Showcase) or Studio
+            if ((isShowcase && currentMode === 'terminal') || !isShowcase) {
                 loadRouteChecklist();
             }
         }
@@ -11916,54 +12015,84 @@
                         <input type="text" class="te-title-line" data-index="${i}" value="${(line || '').replace(/"/g, '&quot;')}" autocomplete="off">
                     </div>
                 `).join('');
-            } else if (isShowcase && mode === 'terminal') {
-                // Terminal mode: single title input + route checklist
-                fieldsArea.innerHTML = `
-                    <div class="te-field te-field-full">
-                        <label>Title</label>
-                        <input type="text" id="teTitle" value="${(props.title || '').replace(/"/g, '&quot;')}" autocomplete="off">
-                    </div>
-                    <div class="te-field te-field-full">
-                        <div class="te-section-title">Captured Routes</div>
-                        <div id="teRouteChecklist" style="max-height: 200px; overflow-y: auto;">
-                            <span style="font-size:11px; color:var(--text-muted)">Loading routes...</span>
-                        </div>
-                    </div>
-                    <div class="te-field te-field-full" id="teSelectedTabsSection" style="display:none;">
-                        <div class="te-section-title">Selected Tabs (editable JSON)</div>
-                        <div id="teTabsList"></div>
-                    </div>
-                `;
             } else {
-                // Studio: single title + existing tabs
-                let tabsHtml = '';
-                if (props.hasNetworkData && props.terminalTabs && props.terminalTabs.length > 0) {
-                    const tabRows = props.terminalTabs.map((tab, i) => `
-                        <div class="te-tab-row">
-                            <div class="te-tab-header" onclick="this.parentElement.classList.toggle('open')">
-                                <span class="te-tab-arrow">&#9654;</span>
-                                <input type="text" class="te-tab-label" data-index="${i}" value="${(tab.label || '').replace(/"/g, '&quot;')}" onclick="event.stopPropagation()" autocomplete="off">
-                                <button class="te-tab-remove" title="Remove tab" onclick="event.stopPropagation(); this.closest('.te-tab-row').remove();">&times;</button>
-                            </div>
-                            <div class="te-tab-body">
-                                <textarea class="te-tab-content" data-index="${i}" rows="6">${(tab.content || '').replace(/</g, '&lt;')}</textarea>
-                            </div>
-                        </div>
-                    `).join('');
-                    tabsHtml = `
-                        <div class="te-field te-field-full" style="margin-top: 6px;">
-                            <label>Terminal Tabs (${props.terminalTabs.length})</label>
-                            <div id="teTabsList">${tabRows}</div>
-                        </div>
-                    `;
-                }
-                fieldsArea.innerHTML = `
-                    <div class="te-field te-field-full">
-                        <label>Title</label>
-                        <input type="text" id="teTitle" value="${(props.title || '').replace(/"/g, '&quot;')}" autocomplete="off">
+                // Terminal mode (Showcase) or Studio: unified terminal editor
+                const existingTabs = (props.terminalTabs && props.terminalTabs.length > 0) ? props.terminalTabs : [];
+                fieldsArea.innerHTML = buildTerminalEditorHtml(props, existingTabs);
+            }
+        }
+
+        function buildTerminalEditorHtml(props, existingTabs) {
+            const tabRows = existingTabs.map((tab, i) => `
+                <div class="te-tab-row">
+                    <div class="te-tab-header" onclick="this.parentElement.classList.toggle('open')">
+                        <span class="te-tab-arrow">&#9654;</span>
+                        <input type="text" class="te-tab-label" data-index="${i}" value="${(tab.label || '').replace(/"/g, '&quot;')}" onclick="event.stopPropagation()" autocomplete="off">
+                        <button class="te-tab-remove" title="Remove tab" onclick="event.stopPropagation(); this.closest('.te-tab-row').remove();">&times;</button>
                     </div>
-                    ${tabsHtml}
-                `;
+                    <div class="te-tab-body">
+                        <textarea class="te-tab-content" data-index="${i}" rows="8">${(tab.content || '').replace(/</g, '&lt;')}</textarea>
+                        <button class="te-paste-btn" title="Paste from clipboard" onclick="event.stopPropagation(); pasteToTab(this);">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+
+            return `
+                <div class="te-field te-field-full">
+                    <label>Title</label>
+                    <input type="text" id="teTitle" value="${(props.title || '').replace(/"/g, '&quot;')}" autocomplete="off">
+                </div>
+                <div class="te-field te-field-full">
+                    <div class="te-tabs-header">
+                        <div class="te-section-title">Terminal Tabs</div>
+                        <button class="te-add-tab-btn" title="Add tab" onclick="addCustomTab()">+</button>
+                    </div>
+                    <div class="te-tabs-scroll">
+                        <div id="teTabsList">${tabRows}</div>
+                    </div>
+                </div>
+                <div class="te-field te-field-full" id="teCapturedRoutesSection">
+                    <div class="te-section-title">Captured Routes</div>
+                    <div id="teRouteChecklist" style="max-height: 200px; overflow-y: auto;">
+                        <span style="font-size:11px; color:var(--text-muted)">Loading routes...</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function addCustomTab() {
+            const tabsList = document.querySelector('#teTabsList');
+            if (!tabsList) return;
+            const count = tabsList.querySelectorAll('.te-tab-row').length;
+            const newTab = document.createElement('div');
+            newTab.className = 'te-tab-row open';
+            newTab.innerHTML = `
+                <div class="te-tab-header" onclick="this.parentElement.classList.toggle('open')">
+                    <span class="te-tab-arrow">&#9654;</span>
+                    <input type="text" class="te-tab-label" value="Tab ${count + 1}" onclick="event.stopPropagation()" autocomplete="off">
+                    <button class="te-tab-remove" title="Remove tab" onclick="event.stopPropagation(); this.closest('.te-tab-row').remove();">&times;</button>
+                </div>
+                <div class="te-tab-body">
+                    <textarea class="te-tab-content" rows="8">// write your code here</textarea>
+                    <button class="te-paste-btn" title="Paste from clipboard" onclick="event.stopPropagation(); pasteToTab(this);">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+                    </button>
+                </div>
+            `;
+            tabsList.appendChild(newTab);
+            newTab.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        async function pasteToTab(btn) {
+            const textarea = btn.closest('.te-tab-body').querySelector('.te-tab-content');
+            if (!textarea) return;
+            try {
+                const text = await navigator.clipboard.readText();
+                textarea.value = text;
+            } catch {
+                showToast('Clipboard access denied', 'info');
             }
         }
 
@@ -11982,6 +12111,7 @@
         let _routeChecklistData = [];
         async function loadRouteChecklist() {
             if (!currentProject) return;
+            const section = document.getElementById('teCapturedRoutesSection');
             const checklist = document.getElementById('teRouteChecklist');
             if (!checklist) return;
             try {
@@ -11989,9 +12119,10 @@
                 const data = await res.json();
                 _routeChecklistData = data.routes || [];
                 if (!_routeChecklistData.length) {
-                    checklist.innerHTML = '<span style="font-size:11px; color:var(--text-muted)">No network data captured</span>';
+                    if (section) section.style.display = 'none';
                     return;
                 }
+                if (section) section.style.display = '';
                 checklist.innerHTML = _routeChecklistData.map((r, i) => `
                     <div class="te-route-item">
                         <label>
@@ -12004,7 +12135,7 @@
                 `).join('');
                 updateSelectedTabs();
             } catch {
-                checklist.innerHTML = '<span style="font-size:11px; color:var(--text-muted)">Failed to load routes</span>';
+                if (section) section.style.display = 'none';
             }
         }
 
@@ -12012,35 +12143,46 @@
             const modal = document.getElementById('templateEditModal');
             if (!modal) return;
             const checks = modal.querySelectorAll('.te-route-check');
-            const section = modal.querySelector('#teSelectedTabsSection');
             const tabsList = modal.querySelector('#teTabsList');
-            if (!section || !tabsList) return;
+            if (!tabsList) return;
 
-            const selectedRoutes = [];
             checks.forEach((chk, i) => {
-                if (chk.checked && _routeChecklistData[i]) {
-                    selectedRoutes.push(_routeChecklistData[i]);
+                const r = _routeChecklistData[i];
+                if (!r) return;
+                const routeLabel = r.label || `${r.method} ${r.route}`;
+                const existingTab = tabsList.querySelector(`.te-tab-row[data-route-index="${i}"]`);
+
+                if (chk.checked && !existingTab) {
+                    // Add tab for newly checked route
+                    const newTab = document.createElement('div');
+                    newTab.className = 'te-tab-row';
+                    newTab.setAttribute('data-route-index', i);
+                    newTab.innerHTML = `
+                        <div class="te-tab-header" onclick="this.parentElement.classList.toggle('open')">
+                            <span class="te-tab-arrow">&#9654;</span>
+                            <input type="text" class="te-tab-label" value="${routeLabel.replace(/"/g, '&quot;')}" onclick="event.stopPropagation()" autocomplete="off">
+                            <button class="te-tab-remove" title="Remove tab" onclick="event.stopPropagation(); uncheckRouteForTab(this.closest('.te-tab-row')); this.closest('.te-tab-row').remove();">&times;</button>
+                        </div>
+                        <div class="te-tab-body">
+                            <textarea class="te-tab-content" rows="8">${(r.content || '').replace(/</g, '&lt;')}</textarea>
+                            <button class="te-paste-btn" title="Paste from clipboard" onclick="event.stopPropagation(); pasteToTab(this);">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+                            </button>
+                        </div>
+                    `;
+                    tabsList.appendChild(newTab);
+                } else if (!chk.checked && existingTab) {
+                    // Remove tab for unchecked route
+                    existingTab.remove();
                 }
             });
+        }
 
-            if (!selectedRoutes.length) {
-                section.style.display = 'none';
-                tabsList.innerHTML = '';
-                return;
-            }
-
-            section.style.display = '';
-            tabsList.innerHTML = selectedRoutes.map((r, i) => `
-                <div class="te-tab-row">
-                    <div class="te-tab-header" onclick="this.parentElement.classList.toggle('open')">
-                        <span class="te-tab-arrow">&#9654;</span>
-                        <input type="text" class="te-tab-label" data-index="${i}" value="${(r.label || '').replace(/"/g, '&quot;')}" onclick="event.stopPropagation()" autocomplete="off">
-                    </div>
-                    <div class="te-tab-body">
-                        <textarea class="te-tab-content" data-index="${i}" rows="6">${(r.content || '').replace(/</g, '&lt;')}</textarea>
-                    </div>
-                </div>
-            `).join('');
+        function uncheckRouteForTab(tabRow) {
+            const routeIndex = tabRow?.getAttribute('data-route-index');
+            if (routeIndex == null) return;
+            const check = document.querySelector(`.te-route-check[data-index="${routeIndex}"]`);
+            if (check) check.checked = false;
         }
 
         async function saveTemplateEditModal() {
