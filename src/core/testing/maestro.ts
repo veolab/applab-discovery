@@ -799,6 +799,234 @@ export interface MaestroRecordingSession {
   status: 'recording' | 'paused' | 'stopped' | 'error';
 }
 
+export function parseMaestroActionsFromYaml(yamlContent: string): MaestroRecordingAction[] {
+  const actions: MaestroRecordingAction[] = [];
+  const lines = yamlContent.split('\n');
+
+  let currentAction: Partial<MaestroRecordingAction> | null = null;
+  let actionIndex = 0;
+
+  const nextId = () => `action_${String(++actionIndex).padStart(3, '0')}`;
+  const stripInlineComment = (value: string) => {
+    let inSingle = false;
+    let inDouble = false;
+    let escaped = false;
+    for (let index = 0; index < value.length; index += 1) {
+      const char = value[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"' && !inSingle) {
+        inDouble = !inDouble;
+        continue;
+      }
+      if (char === "'" && !inDouble) {
+        inSingle = !inSingle;
+        continue;
+      }
+      if (char === '#' && !inSingle && !inDouble) {
+        return value.slice(0, index).trimEnd();
+      }
+    }
+    return value;
+  };
+  const cleanValue = (value: string) => stripInlineComment(value).trim().replace(/^["']|["']$/g, '');
+  const pushAction = (action: Partial<MaestroRecordingAction>) => {
+    actions.push({
+      id: action.id || nextId(),
+      type: action.type || 'tap',
+      timestamp: action.timestamp || Date.now(),
+      description: action.description || action.type || 'Action',
+      x: action.x,
+      y: action.y,
+      endX: action.endX,
+      endY: action.endY,
+      text: action.text,
+      direction: action.direction,
+      seconds: action.seconds,
+      appId: action.appId,
+      duration: action.duration,
+      screenshotPath: action.screenshotPath,
+    });
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('#') || trimmed === '' || trimmed === '---') {
+      continue;
+    }
+
+    if (trimmed.startsWith('appId:')) {
+      continue;
+    }
+
+    if (trimmed.startsWith('- tapOn:')) {
+      const inlineValue = cleanValue(trimmed.replace('- tapOn:', ''));
+      if (inlineValue) {
+        pushAction({
+          type: 'tap',
+          description: `Tap on "${inlineValue}"`,
+          text: inlineValue,
+        });
+        continue;
+      }
+      currentAction = { type: 'tap', description: 'Tap' };
+    } else if (trimmed.startsWith('- tap:')) {
+      currentAction = { type: 'tap', description: 'Tap' };
+    } else if (trimmed.startsWith('- swipe:')) {
+      currentAction = { type: 'swipe', description: 'Swipe' };
+    } else if (trimmed.startsWith('- scroll:')) {
+      currentAction = { type: 'scroll', description: 'Scroll' };
+    } else if (trimmed.startsWith('- scrollUntilVisible:')) {
+      currentAction = { type: 'scroll', description: 'Scroll' };
+    } else if (trimmed.startsWith('- inputText:')) {
+      const text = cleanValue(trimmed.replace('- inputText:', ''));
+      pushAction({
+        type: 'input',
+        description: `Input: ${text.slice(0, 20)}${text.length > 20 ? '...' : ''}`,
+        text,
+      });
+      continue;
+    } else if (trimmed.startsWith('- launchApp:')) {
+      const appId = cleanValue(trimmed.replace('- launchApp:', ''));
+      pushAction({
+        type: 'launch',
+        description: `Launch: ${appId}`,
+        text: appId,
+        appId,
+      });
+      continue;
+    } else if (trimmed === '- launchApp') {
+      pushAction({
+        type: 'launch',
+        description: 'Launch app',
+      });
+      continue;
+    } else if (trimmed.startsWith('- assertVisible:')) {
+      const inlineValue = cleanValue(trimmed.replace('- assertVisible:', ''));
+      if (inlineValue) {
+        pushAction({
+          type: 'assert',
+          description: `Assert visible "${inlineValue}"`,
+          text: inlineValue,
+        });
+        continue;
+      }
+      currentAction = { type: 'assert', description: 'Assert visible' };
+    } else if (trimmed.startsWith('- extendedWaitUntil:')) {
+      currentAction = { type: 'wait', description: 'Wait' };
+    } else if (trimmed.startsWith('- pressKey:')) {
+      const key = cleanValue(trimmed.replace('- pressKey:', '')).toLowerCase();
+      if (key === 'back') {
+        pushAction({ type: 'back', description: 'Back button' });
+      } else if (key === 'home') {
+        pushAction({ type: 'home', description: 'Home button' });
+      } else {
+        pushAction({
+          type: 'pressKey',
+          description: `Press: ${key}`,
+          text: key,
+        });
+      }
+      continue;
+    } else if (trimmed.startsWith('- back')) {
+      pushAction({ type: 'back', description: 'Back button' });
+      continue;
+    }
+
+    if (currentAction && trimmed.startsWith('point:')) {
+      const point = cleanValue(trimmed.replace('point:', ''));
+      const [x, y] = point.split(',').map(n => parseInt(n.trim()));
+      if (!isNaN(x) && !isNaN(y)) {
+        currentAction.x = x;
+        currentAction.y = y;
+        currentAction.description = `Tap at (${x}, ${y})`;
+        pushAction(currentAction);
+        currentAction = null;
+        continue;
+      }
+    }
+
+    if (currentAction && trimmed.startsWith('text:')) {
+      const text = cleanValue(trimmed.replace('text:', ''));
+      currentAction.text = text;
+      if (currentAction.type === 'assert') {
+        currentAction.description = `Assert visible "${text}"`;
+      } else {
+        currentAction.description = `Tap on "${text}"`;
+      }
+      pushAction(currentAction);
+      currentAction = null;
+      continue;
+    }
+
+    if (currentAction && trimmed.startsWith('id:')) {
+      const id = cleanValue(trimmed.replace('id:', ''));
+      currentAction.text = id;
+      currentAction.description = `Tap on id: ${id}`;
+      pushAction(currentAction);
+      currentAction = null;
+      continue;
+    }
+
+    if (
+      currentAction &&
+      (currentAction.type === 'swipe' || currentAction.type === 'scroll') &&
+      trimmed.startsWith('direction:')
+    ) {
+      const direction = cleanValue(trimmed.replace('direction:', '')).toLowerCase();
+      currentAction.direction = direction;
+      currentAction.description = currentAction.type === 'swipe'
+        ? `Swipe ${direction}`
+        : `Scroll ${direction}`;
+      pushAction(currentAction);
+      currentAction = null;
+      continue;
+    }
+
+    if (currentAction && currentAction.type === 'wait' && trimmed.startsWith('timeout:')) {
+      const timeoutMs = parseInt(cleanValue(trimmed.replace('timeout:', '')), 10);
+      const seconds = Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? Math.max(1, Math.round(timeoutMs / 1000))
+        : 3;
+      currentAction.seconds = seconds;
+      currentAction.description = `Wait ${seconds}s`;
+      pushAction(currentAction);
+      currentAction = null;
+      continue;
+    }
+
+    if (currentAction && currentAction.type === 'swipe') {
+      if (trimmed.startsWith('start:')) {
+        const point = cleanValue(trimmed.replace('start:', ''));
+        const [x, y] = point.split(',').map(n => parseInt(n.trim()));
+        if (!isNaN(x) && !isNaN(y)) {
+          currentAction.x = x;
+          currentAction.y = y;
+        }
+      } else if (trimmed.startsWith('end:')) {
+        const point = cleanValue(trimmed.replace('end:', ''));
+        const [x, y] = point.split(',').map(n => parseInt(n.trim()));
+        if (!isNaN(x) && !isNaN(y)) {
+          currentAction.endX = x;
+          currentAction.endY = y;
+          currentAction.description = `Swipe from (${currentAction.x}, ${currentAction.y}) to (${x}, ${y})`;
+          pushAction(currentAction);
+          currentAction = null;
+        }
+      }
+    }
+  }
+
+  return actions;
+}
+
 export class MaestroRecorder extends EventEmitter {
   private session: MaestroRecordingSession | null = null;
   private adbProcess: ChildProcess | null = null;
@@ -1473,6 +1701,19 @@ export class MaestroRecorder extends EventEmitter {
       }
     }
 
+    if (this.session.actions.length === 0 && this.session.flowPath && fs.existsSync(this.session.flowPath)) {
+      try {
+        const fallbackYaml = await fs.promises.readFile(this.session.flowPath, 'utf-8');
+        const parsedActions = parseMaestroActionsFromYaml(fallbackYaml);
+        if (parsedActions.length > 0) {
+          this.session.actions = parsedActions;
+          console.log(`[MaestroRecorder] Rehydrated ${parsedActions.length} actions from YAML for manual capture`);
+        }
+      } catch (error) {
+        console.error('[MaestroRecorder] Failed to rehydrate actions from YAML:', error);
+      }
+    }
+
     // Save session metadata
     const metadataPath = path.join(this.session.screenshotsDir, '..', 'session.json');
     await fs.promises.writeFile(metadataPath, JSON.stringify(this.session, null, 2));
@@ -1492,215 +1733,13 @@ export class MaestroRecorder extends EventEmitter {
    * Parse actions from Maestro YAML content
    */
   private parseActionsFromYaml(yamlContent: string): MaestroRecordingAction[] {
-    const actions: MaestroRecordingAction[] = [];
-    const lines = yamlContent.split('\n');
-
-    let currentAction: Partial<MaestroRecordingAction> | null = null;
-    let actionIndex = 0;
-
-    const nextId = () => `action_${String(++actionIndex).padStart(3, '0')}`;
-    const cleanValue = (value: string) => value.trim().replace(/^["']|["']$/g, '');
-    const pushAction = (action: Partial<MaestroRecordingAction>) => {
-      actions.push({
-        id: action.id || nextId(),
-        type: action.type || 'tap',
-        timestamp: action.timestamp || Date.now(),
-        description: action.description || action.type || 'Action',
-        x: action.x,
-        y: action.y,
-        endX: action.endX,
-        endY: action.endY,
-        text: action.text,
-        direction: action.direction,
-        seconds: action.seconds,
-        appId: action.appId,
-        duration: action.duration,
-        screenshotPath: action.screenshotPath,
-      });
-    };
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-
-      // Skip comments and empty lines
-      if (trimmed.startsWith('#') || trimmed === '' || trimmed === '---') {
-        continue;
-      }
-
-      if (trimmed.startsWith('appId:')) {
-        const parsedAppId = cleanValue(trimmed.replace('appId:', ''));
-        if (this.session && parsedAppId && !this.session.appId) {
-          this.session.appId = parsedAppId;
-        }
-        continue;
-      }
-
-      // Detect action types
-      if (trimmed.startsWith('- tapOn:')) {
-        const inlineValue = cleanValue(trimmed.replace('- tapOn:', ''));
-        if (inlineValue) {
-          pushAction({
-            type: 'tap',
-            description: `Tap on "${inlineValue}"`,
-            text: inlineValue,
-          });
-          continue;
-        }
-        currentAction = { type: 'tap', description: 'Tap' };
-      } else if (trimmed.startsWith('- tap:')) {
-        currentAction = { type: 'tap', description: 'Tap' };
-      } else if (trimmed.startsWith('- swipe:')) {
-        currentAction = { type: 'swipe', description: 'Swipe' };
-      } else if (trimmed.startsWith('- scroll:')) {
-        currentAction = { type: 'scroll', description: 'Scroll' };
-      } else if (trimmed.startsWith('- scrollUntilVisible:')) {
-        currentAction = { type: 'scroll', description: 'Scroll' };
-      } else if (trimmed.startsWith('- inputText:')) {
-        const text = cleanValue(trimmed.replace('- inputText:', ''));
-        pushAction({
-          type: 'input',
-          description: `Input: ${text.slice(0, 20)}${text.length > 20 ? '...' : ''}`,
-          text,
-        });
-        continue;
-      } else if (trimmed.startsWith('- launchApp:')) {
-        const appId = cleanValue(trimmed.replace('- launchApp:', ''));
-        pushAction({
-          type: 'launch',
-          description: `Launch: ${appId}`,
-          text: appId,
-          appId,
-        });
-        continue;
-      } else if (trimmed === '- launchApp') {
-        pushAction({
-          type: 'launch',
-          description: 'Launch app',
-        });
-        continue;
-      } else if (trimmed.startsWith('- assertVisible:')) {
-        const inlineValue = cleanValue(trimmed.replace('- assertVisible:', ''));
-        if (inlineValue) {
-          pushAction({
-            type: 'assert',
-            description: `Assert visible "${inlineValue}"`,
-            text: inlineValue,
-          });
-          continue;
-        }
-        currentAction = { type: 'assert', description: 'Assert visible' };
-      } else if (trimmed.startsWith('- extendedWaitUntil:')) {
-        currentAction = { type: 'wait', description: 'Wait' };
-      } else if (trimmed.startsWith('- pressKey:')) {
-        const key = cleanValue(trimmed.replace('- pressKey:', '')).toLowerCase();
-        if (key === 'back') {
-          pushAction({ type: 'back', description: 'Back button' });
-        } else if (key === 'home') {
-          pushAction({ type: 'home', description: 'Home button' });
-        } else {
-          pushAction({
-            type: 'pressKey',
-            description: `Press: ${key}`,
-            text: key,
-          });
-        }
-        continue;
-      } else if (trimmed.startsWith('- back')) {
-        pushAction({ type: 'back', description: 'Back button' });
-        continue;
-      }
-
-      // Parse point coordinates
-      if (currentAction && trimmed.startsWith('point:')) {
-        const point = cleanValue(trimmed.replace('point:', ''));
-        const [x, y] = point.split(',').map(n => parseInt(n.trim()));
-        if (!isNaN(x) && !isNaN(y)) {
-          currentAction.x = x;
-          currentAction.y = y;
-          currentAction.description = `Tap at (${x}, ${y})`;
-          pushAction(currentAction);
-          currentAction = null;
-          continue;
-        }
-      }
-
-      // Parse text selector
-      if (currentAction && trimmed.startsWith('text:')) {
-        const text = cleanValue(trimmed.replace('text:', ''));
-        currentAction.text = text;
-        if (currentAction.type === 'assert') {
-          currentAction.description = `Assert visible "${text}"`;
-        } else {
-          currentAction.description = `Tap on "${text}"`;
-        }
-        pushAction(currentAction);
-        currentAction = null;
-        continue;
-      }
-
-      // Parse id selector
-      if (currentAction && trimmed.startsWith('id:')) {
-        const id = cleanValue(trimmed.replace('id:', ''));
-        currentAction.text = id;
-        currentAction.description = `Tap on id: ${id}`;
-        pushAction(currentAction);
-        currentAction = null;
-        continue;
-      }
-
-      // Parse swipe/scroll directions
-      if (
-        currentAction &&
-        (currentAction.type === 'swipe' || currentAction.type === 'scroll') &&
-        trimmed.startsWith('direction:')
-      ) {
-        const direction = cleanValue(trimmed.replace('direction:', '')).toLowerCase();
-        currentAction.direction = direction;
-        currentAction.description = currentAction.type === 'swipe'
-          ? `Swipe ${direction}`
-          : `Scroll ${direction}`;
-        pushAction(currentAction);
-        currentAction = null;
-        continue;
-      }
-
-      // Parse wait timeout
-      if (currentAction && currentAction.type === 'wait' && trimmed.startsWith('timeout:')) {
-        const timeoutMs = parseInt(cleanValue(trimmed.replace('timeout:', '')), 10);
-        const seconds = Number.isFinite(timeoutMs) && timeoutMs > 0
-          ? Math.max(1, Math.round(timeoutMs / 1000))
-          : 3;
-        currentAction.seconds = seconds;
-        currentAction.description = `Wait ${seconds}s`;
-        pushAction(currentAction);
-        currentAction = null;
-        continue;
-      }
-
-      // Parse swipe start/end
-      if (currentAction && currentAction.type === 'swipe') {
-        if (trimmed.startsWith('start:')) {
-          const point = cleanValue(trimmed.replace('start:', ''));
-          const [x, y] = point.split(',').map(n => parseInt(n.trim()));
-          if (!isNaN(x) && !isNaN(y)) {
-            currentAction.x = x;
-            currentAction.y = y;
-          }
-        } else if (trimmed.startsWith('end:')) {
-          const point = cleanValue(trimmed.replace('end:', ''));
-          const [x, y] = point.split(',').map(n => parseInt(n.trim()));
-          if (!isNaN(x) && !isNaN(y)) {
-            currentAction.endX = x;
-            currentAction.endY = y;
-            currentAction.description = `Swipe from (${currentAction.x}, ${currentAction.y}) to (${x}, ${y})`;
-            pushAction(currentAction);
-            currentAction = null;
-          }
-        }
-      }
+    const parsedActions = parseMaestroActionsFromYaml(yamlContent);
+    const appIdMatch = yamlContent.match(/^\s*appId:\s*([^\n#]+)/m);
+    const parsedAppId = appIdMatch?.[1]?.trim().replace(/^["']|["']$/g, '') || '';
+    if (this.session && parsedAppId && !this.session.appId) {
+      this.session.appId = parsedAppId;
     }
-
-    return actions;
+    return parsedActions;
   }
 
   private mergeParsedActionsWithRecorded(

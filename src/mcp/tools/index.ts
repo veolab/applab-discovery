@@ -13,6 +13,8 @@ export { exportTools } from './export.js';
 export { testingTools } from './testing.js';
 export { integrationTools } from './integrations.js';
 export { taskHubTools } from './taskhub.js';
+export { esvpTools } from './esvp.js';
+export { templateTools } from './templates.js';
 
 // Re-export individual tools if needed
 export { uiOpenTool, uiStatusTool } from './ui.js';
@@ -95,3 +97,26 @@ export {
   taskHubTestMapGetTool,
   taskHubTestMapToggleTool,
 } from './taskhub.js';
+export {
+  esvpStatusTool,
+  esvpDevicesTool,
+  esvpSessionsListTool,
+  esvpSessionCreateTool,
+  esvpSessionGetTool,
+  esvpSessionInspectTool,
+  esvpSessionTranscriptTool,
+  esvpSessionArtifactsListTool,
+  esvpSessionArtifactGetTool,
+  esvpSessionActionsTool,
+  esvpSessionCheckpointTool,
+  esvpSessionFinishTool,
+  esvpReplayRunTool,
+  esvpReplayValidateTool,
+  esvpSessionNetworkTool,
+  esvpNetworkConfigureTool,
+  esvpNetworkTraceAttachTool,
+} from './esvp.js';
+export {
+  templateListTool,
+  templateRenderTool,
+} from './templates.js';

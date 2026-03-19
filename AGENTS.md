@@ -121,6 +121,57 @@ dlab.ui.open
 | `dlab.drive.upload` | Upload assets to Google Drive |
 | `dlab.jira.attach` | Attach screenshots/videos to Jira issue |
 
+### ESVP Public Contract (`dlab.esvp.*`)
+
+These tools treat AppLab Discovery as an open-source client of a shared ESVP control-plane. They only speak the public HTTP contract and must not embed private Entropy Lab logic.
+
+| Tool | Description |
+|------|-------------|
+| `dlab.esvp.status` | Check ESVP control-plane health |
+| `dlab.esvp.devices` | List ADB devices, `ios-sim`, and `maestro-ios` targets visible to ESVP |
+| `dlab.esvp.sessions.list` | List public ESVP sessions |
+| `dlab.esvp.session.create` | Create a public ESVP session |
+| `dlab.esvp.session.get` | Get the latest public summary for a session |
+| `dlab.esvp.session.inspect` | Read session + transcript + artifacts |
+| `dlab.esvp.session.transcript` | Fetch the canonical public transcript |
+| `dlab.esvp.session.artifacts.list` | List public session artifacts |
+| `dlab.esvp.session.artifact.get` | Read a public artifact payload |
+| `dlab.esvp.session.actions` | Run public ESVP actions |
+| `dlab.esvp.session.checkpoint` | Capture a checkpoint |
+| `dlab.esvp.session.finish` | Finish a session |
+| `dlab.esvp.replay.run` | Replay a session through the public endpoint |
+| `dlab.esvp.replay.validate` | Validate replay support and inspect the reason if it fails |
+| `dlab.esvp.session.network` | Read public network state, effective profile, and managed proxy metadata |
+| `dlab.esvp.network.configure` | Apply or clear a public network profile |
+| `dlab.esvp.network.trace.attach` | Attach a public network trace artifact |
+
+Mobile recording bridge:
+
+- `POST /api/testing/mobile/recordings/:id/esvp/validate`
+  - validates a Maestro recording against ESVP using `adb` for Android and `maestro-ios` for iOS
+  - accepts optional `network` input; by default App Lab now treats it as `external-proxy`
+  - the preferred local path is a client-owned proxy, with ESVP used only for `network_profile` / `network_trace`
+  - if `external-proxy` is selected without `proxy.host` / `proxy.port`, App Lab auto-starts a local HTTP proxy, clears it at the end, and attaches the captured `network_trace`
+  - App Lab Settings expose an emergency lock that blocks new App-owned proxy autostart and immediately finalizes active local proxies when enabled
+  - App Lab Settings also expose a panic button to force cleanup of active App-owned proxies without changing the lock state
+  - `managed-proxy` remains available only when explicitly requested
+- `POST /api/testing/mobile/recordings/:id/esvp/sync-network`
+  - normalizes ESVP `network_trace` artifacts into the same `networkEntries` model used by the web recorder UI
+  - when trace payloads include headers and request/response previews, App Lab exposes them in Analysis with segmented `Overview`, `Request`, `Response`, and `Headers` inspectors
+- current limitation:
+  - automatic local proxying here is limited to HTTP proxy capture and trace attach; advanced fault injection still needs `managed-proxy`
+  - `DISCOVERYLAB_NETWORK_PROXY_BIND_HOST` can override the listening host when Android physical devices need LAN reachability
+  - Android local proxying requires a host reachable by the device (`10.0.2.2` on the Emulator; host/LAN IP on physical devices)
+  - iOS can validate replay through `maestro-ios`, and `127.0.0.1` works for Simulator when the proxy runs on the same macOS host
+
+Set `ESVP_BASE_URL` when the control-plane is not running on `http://127.0.0.1:8787`.
+
+Default connection strategy:
+
+- if `ESVP_BASE_URL` exists, tools use remote mode
+- otherwise DiscoveryLab tries to boot an embedded local OSS runtime
+- during development, `DISCOVERYLAB_ESVP_LOCAL_MODULE` can point to the absolute path of the public local runtime module
+
 ## Agent Workflows
 
 ### 1. Mobile App Testing Workflow

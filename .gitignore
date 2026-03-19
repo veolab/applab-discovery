@@ -52,6 +52,9 @@ temp/
 # Claude Code
 .claude/
 
+# Template bundles (private repo)
+vendor/templates/
+
 # Outdated documentation (needs update)
 SPEC.md
 ARCHITECTURE-ANALYSIS.md

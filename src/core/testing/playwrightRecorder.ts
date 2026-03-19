@@ -10,6 +10,12 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { redactSensitiveTestInput, redactQuotedStringsInText } from '../security/sensitiveInput.js';
+import {
+  attachPlaywrightNetworkCapture,
+  PLAYWRIGHT_NETWORK_RESOURCE_TYPES,
+  type CapturedNetworkEntry,
+  type NetworkCaptureMeta,
+} from './networkCapture.js';
 
 // ============================================================================
 // TYPES
@@ -42,6 +48,8 @@ export interface RecordingSession {
   viewportMode?: 'auto' | 'fixed';
   captureResolution?: { width: number; height: number };
   deviceScaleFactor?: number;
+  networkEntries: CapturedNetworkEntry[];
+  networkCapture: NetworkCaptureMeta;
 }
 
 export interface RecorderEvents {
@@ -63,6 +71,7 @@ export class PlaywrightRecorder extends EventEmitter {
   private session: RecordingSession | null = null;
   private actionCounter = 0;
   private nameHelperInjected = false;
+  private networkCaptureDetach: (() => void) | null = null;
 
   /**
    * TSX/esbuild injects `__name(...)` calls into nested functions. When we pass
@@ -129,6 +138,12 @@ export class PlaywrightRecorder extends EventEmitter {
       actions: [],
       screenshotsDir,
       status: 'recording',
+      networkEntries: [],
+      networkCapture: {
+        truncated: false,
+        maxEntries: 1200,
+        resourceTypes: [...PLAYWRIGHT_NETWORK_RESOURCE_TYPES],
+      },
     };
 
     this.actionCounter = 0;
@@ -178,6 +193,10 @@ export class PlaywrightRecorder extends EventEmitter {
 
       this.page = await this.context.newPage();
       this.nameHelperInjected = false;
+      this.networkCaptureDetach = attachPlaywrightNetworkCapture(this.page, {
+        entries: this.session.networkEntries,
+        meta: this.session.networkCapture,
+      }).detach;
 
       // Setup action listeners - MUST be awaited before navigation
       await this.setupPageListeners();
@@ -624,6 +643,8 @@ export class PlaywrightRecorder extends EventEmitter {
       await new Promise(resolve => setTimeout(resolve, 1000));
       await this.browser?.close();
     } catch {}
+    this.networkCaptureDetach?.();
+    this.networkCaptureDetach = null;
 
     this.browser = null;
     this.context = null;

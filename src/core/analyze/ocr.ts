@@ -304,16 +304,30 @@ export interface BatchOCRResult {
   totalText: string;
 }
 
+export interface BatchOCRProgress {
+  current: number;
+  total: number;
+  imagePath: string;
+  ocr: OCRResult;
+}
+
 export async function recognizeTextBatch(
   imagePaths: string[],
-  options: OCROptions = {}
+  options: OCROptions = {},
+  onProgress?: (progress: BatchOCRProgress) => void
 ): Promise<BatchOCRResult> {
   const results: BatchOCRResult['results'] = [];
   const textParts: string[] = [];
 
-  for (const imagePath of imagePaths) {
+  for (const [index, imagePath] of imagePaths.entries()) {
     const ocr = await recognizeText(imagePath, options);
     results.push({ imagePath, ocr });
+    onProgress?.({
+      current: index + 1,
+      total: imagePaths.length,
+      imagePath,
+      ocr,
+    });
 
     if (ocr.success && ocr.text) {
       textParts.push(ocr.text);

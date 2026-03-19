@@ -32,6 +32,13 @@ export interface ActionDetectorProvider {
   sendMessage?: (prompt: string) => Promise<string>;
 }
 
+export interface VisibleActionSelectionResult {
+  selectedLabel: string | null;
+  confidence?: number;
+  reason?: string;
+  providerName?: string;
+}
+
 /**
  * Build the analysis prompt for a given number of screenshots
  */
@@ -47,7 +54,8 @@ Analyze the visual changes between consecutive screenshots and identify:
 
 For each detected action, determine:
 - The type of action (tap, type, scroll, swipe, back, launch, wait)
-- A description of what element was interacted with
+- A short human description of what happened
+- For tap actions, set "element" to the shortest exact visible label on screen when possible. Examples: "Looks", "View Plans", "Continue". Do not use descriptive phrases like "Looks tab in bottom navigation" unless that full phrase is literally visible.
 - The approximate screen coordinates if it's a tap (as percentage of screen, e.g., x: 50, y: 30 means center-top)
 - Any text that was typed
 - Scroll/swipe direction
@@ -72,6 +80,89 @@ Respond in JSON format:
   Be conservative - only include actions you're confident about (confidence > 0.7).
   Focus on meaningful interactions, not every tiny change.
   Return ONLY valid JSON (no Markdown, no code fences, no extra commentary).`;
+}
+
+function buildVisibleActionSelectionPrompt(candidates: string[]): string {
+  return `You are looking at a single mobile app screenshot.
+
+Choose which of the candidate UI actions is currently visible and tappable on screen right now.
+
+Rules:
+- Prefer exact visible button/link/tab labels.
+- If none of the candidates are clearly visible, return null.
+- Do not guess based on what might happen next.
+
+Respond in JSON only:
+{
+  "selectedLabel": "one of the candidate labels exactly as provided, or null",
+  "confidence": 0.0-1.0,
+  "reason": "brief explanation"
+}
+
+Candidates:
+${candidates.map((candidate, index) => `${index + 1}. ${candidate}`).join('\n')}`;
+}
+
+function normalizeWhitespace(value?: string): string {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function extractQuotedLabel(value?: string): string {
+  const text = normalizeWhitespace(value);
+  if (!text) return '';
+  const match = text.match(/["“”']([^"“”']{2,80})["“”']/);
+  return normalizeWhitespace(match?.[1]);
+}
+
+function normalizeTapElementLabel(value?: string): string {
+  const raw = normalizeWhitespace(value);
+  if (!raw) return '';
+
+  const quoted = extractQuotedLabel(raw);
+  if (quoted) return quoted;
+
+  const variants: string[] = [];
+  const seen = new Set<string>();
+  const push = (candidate?: string) => {
+    const normalized = normalizeWhitespace(candidate);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    variants.push(normalized);
+  };
+
+  push(raw);
+  push(raw.replace(/\s+(?:in|inside|within|from|on)\s+.+$/i, ''));
+  push(raw.replace(/\s+(?:button|tab|icon|link|banner|card|item|field|input|modal|sheet|screen|section|row)$/i, ''));
+  push(
+    raw
+      .split(/\s+/)
+      .filter((part) => !['my', 'the', 'a', 'an', 'to', 'for', 'of'].includes(part.toLowerCase()))
+      .join(' ')
+  );
+
+  return variants[variants.length - 1] || variants[0] || raw;
+}
+
+function normalizeDetectedAction(action: DetectedAction): DetectedAction {
+  const normalized: DetectedAction = {
+    ...action,
+    description: normalizeWhitespace(action.description),
+    element: normalizeWhitespace(action.element),
+    text: normalizeWhitespace(action.text),
+  };
+
+  if (normalized.type === 'tap') {
+    const literalElement = normalizeTapElementLabel(normalized.element || normalized.description);
+    if (literalElement) {
+      normalized.element = literalElement;
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeDetectedActions(actions: DetectedAction[]): DetectedAction[] {
+  return (actions || []).map(normalizeDetectedAction);
 }
 
 /**
@@ -174,6 +265,42 @@ function parseAnalysisResponse(text: string): AnalysisResult {
   throw new Error(`Could not parse JSON from response (${detail}). Preview: ${sanitizePreview(raw)}`);
 }
 
+function parseVisibleActionSelectionResponse(text: string): VisibleActionSelectionResult {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    throw new Error('Could not parse visible action selection (empty response)');
+  }
+
+  const candidates: string[] = [raw, ...extractCodeFenceCandidates(raw), ...extractBraceObjectCandidates(raw)];
+  const seen = new Set<string>();
+  let lastError: unknown = null;
+
+  for (const candidate of candidates) {
+    const normalized = candidate.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    try {
+      const parsed = JSON.parse(normalized) as {
+        selectedLabel?: unknown;
+        confidence?: unknown;
+        reason?: unknown;
+      };
+      return {
+        selectedLabel: typeof parsed.selectedLabel === 'string' && parsed.selectedLabel.trim()
+          ? parsed.selectedLabel.trim()
+          : null,
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : undefined,
+        reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const detail = lastError instanceof Error ? lastError.message : 'unknown parse error';
+  throw new Error(`Could not parse visible action selection (${detail}). Preview: ${sanitizePreview(raw)}`);
+}
+
 /**
  * Analyze screenshots using Anthropic API with vision (base64 images)
  */
@@ -219,6 +346,44 @@ async function analyzeWithAnthropicVision(
   return parseAnalysisResponse(textContent.text);
 }
 
+async function selectVisibleActionWithAnthropicVision(
+  apiKey: string,
+  screenshotPath: string,
+  prompt: string
+): Promise<VisibleActionSelectionResult> {
+  const anthropic = new Anthropic({ apiKey });
+  const imageData = readFileSync(screenshotPath);
+  const base64 = imageData.toString('base64');
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 1024,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: 'image/png',
+              data: base64,
+            },
+          },
+          { type: 'text', text: prompt },
+        ],
+      },
+    ],
+  });
+
+  const textContent = response.content.find((content) => content.type === 'text');
+  if (!textContent || textContent.type !== 'text') {
+    throw new Error('No text response from Claude');
+  }
+
+  return parseVisibleActionSelectionResponse(textContent.text);
+}
+
 /**
  * Analyze screenshots to detect user actions using Claude Vision
  */
@@ -259,6 +424,7 @@ export async function analyzeScreenshotsForActions(
     try {
       console.log('[AIActionDetector] Using Anthropic API vision (fast path)');
       const result = await analyzeWithAnthropicVision(apiKey, screenshotPaths, prompt);
+      result.actions = normalizeDetectedActions(result.actions);
       result.actionDetectionProvider = 'anthropic-api vision (claude-sonnet-4-20250514)';
       console.log(`[AIActionDetector] Detected ${result.actions.length} actions`);
       return result;
@@ -276,6 +442,7 @@ export async function analyzeScreenshotsForActions(
       console.log(`[AIActionDetector] Using provider: ${candidate.name} (image support)`);
       const response = await candidate.sendMessageWithImages(prompt, screenshotPaths);
       const result = parseAnalysisResponse(response);
+      result.actions = normalizeDetectedActions(result.actions);
       result.actionDetectionProvider = candidate.name;
       console.log(`[AIActionDetector] Detected ${result.actions.length} actions`);
       return result;
@@ -302,6 +469,64 @@ export async function analyzeScreenshotsForActions(
     summary: 'No vision-capable AI provider available',
     skipped: true
   };
+}
+
+export async function selectVisibleActionFromScreenshot(
+  screenshotPath: string,
+  candidateLabels: string[],
+  provider?: ActionDetectorProvider | ActionDetectorProvider[]
+): Promise<VisibleActionSelectionResult | null> {
+  const normalizedCandidates = Array.from(
+    new Set(
+      (candidateLabels || [])
+        .map((candidate) => normalizeWhitespace(candidate))
+        .filter(Boolean)
+    )
+  );
+  if (normalizedCandidates.length === 0) {
+    return null;
+  }
+
+  const prompt = buildVisibleActionSelectionPrompt(normalizedCandidates);
+  const providerCandidates = (Array.isArray(provider) ? provider : [provider]).filter(
+    (p): p is ActionDetectorProvider => !!p
+  );
+  const strategyErrors: string[] = [];
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (apiKey) {
+    try {
+      const result = await selectVisibleActionWithAnthropicVision(apiKey, screenshotPath, prompt);
+      return {
+        ...result,
+        providerName: 'anthropic-api vision (claude-sonnet-4-20250514)',
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      strategyErrors.push(`anthropic-api vision: ${message}`);
+    }
+  }
+
+  for (const candidate of providerCandidates) {
+    if (!candidate.sendMessageWithImages) continue;
+    try {
+      const response = await candidate.sendMessageWithImages(prompt, [screenshotPath]);
+      const result = parseVisibleActionSelectionResponse(response);
+      return {
+        ...result,
+        providerName: candidate.name,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      strategyErrors.push(`${candidate.name}: ${message}`);
+    }
+  }
+
+  if (strategyErrors.length > 0) {
+    console.warn('[AIActionDetector] Visible action selection failed:', strategyErrors.slice(0, 2).join(' | '));
+  }
+
+  return null;
 }
 
 /**
@@ -347,9 +572,10 @@ export function generateMaestroYaml(
 
       case 'tap':
         if (action.element) {
+          const literalElement = normalizeTapElementLabel(action.element || commentDescription);
           // Try to tap by text first
           lines.push(`- tapOn:`);
-          lines.push(`    text: "${escapeYaml(action.element)}"`);
+          lines.push(`    text: "${escapeYaml(literalElement)}"`);
         } else if (action.coordinates) {
           // Fall back to coordinates
           lines.push(`- tapOn:`);

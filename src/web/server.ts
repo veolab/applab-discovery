@@ -6,22 +6,50 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
-import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, readdirSync, writeFileSync } from 'node:fs';
 import { exec, execSync, spawn } from 'node:child_process';
+import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eq, desc, and, inArray } from 'drizzle-orm';
-import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR } from '../db/index.js';
+import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR, EXPORTS_DIR } from '../db/index.js';
+import { isTemplatesInstalled, getAvailableTemplates, getTemplate, getBundlePath } from '../core/templates/loader.js';
+import { startRender, getRenderJob, getCachedRender } from '../core/templates/renderer.js';
+import type { TemplateProps, TemplateId, TerminalTab } from '../core/templates/types.js';
 import { APP_VERSION } from '../core/appVersion.js';
 import { findAndroidSdkPath, getAdbCommand, getEmulatorPath, listConnectedAndroidDevices, resolveAndroidDeviceSerial } from '../core/android/adb.js';
-import { getMaestroRecorder, isMaestroInstalled, runMaestroTest, isIdbInstalled, tapViaIdb, killZombieMaestroProcesses, listMaestroDevices } from '../core/testing/maestro.js';
+import { getMaestroRecorder, isMaestroInstalled, runMaestroTest, isIdbInstalled, tapViaIdb, killZombieMaestroProcesses, listMaestroDevices, parseMaestroActionsFromYaml } from '../core/testing/maestro.js';
 import type { MaestroRecordingSession } from '../core/testing/maestro.js';
 import { runPlaywrightTest } from '../core/testing/playwright.js';
 import { analyzeScreenshotsForActions, generateMaestroYaml } from '../core/analyze/aiActionDetector.js';
 import type { ActionDetectorProvider } from '../core/analyze/aiActionDetector.js';
 import { redactSensitiveTestInput, redactQuotedStringsInText } from '../core/security/sensitiveInput.js';
 import { encryptLocalSecret, decryptLocalSecret } from '../core/security/localSecretStore.js';
+import { createMobileAppIconCover, createWebFaviconCover, isIgnoredMobileAppId } from '../core/project/coverArt.js';
+import {
+  attachPlaywrightNetworkCapture,
+  PLAYWRIGHT_NETWORK_RESOURCE_TYPES,
+  type CapturedNetworkEntry,
+  type NetworkCaptureMeta,
+} from '../core/testing/networkCapture.js';
+import {
+  collectESVPSessionNetworkData,
+  validateMaestroRecordingWithESVP,
+} from '../core/integrations/esvp-mobile.js';
+import { buildAppLabNetworkProfile } from '../core/integrations/esvp-network-profile.js';
+import {
+  ensureLocalCaptureProxyProfile,
+  finalizeAllLocalCaptureProxySessions,
+  finalizeLocalCaptureProxySession,
+  listLocalCaptureProxyStates,
+} from '../core/integrations/local-network-proxy.js';
+import {
+  attachESVPNetworkTrace,
+  configureESVPNetwork,
+  createESVPSession,
+  runESVPActions,
+} from '../core/integrations/esvp.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -82,6 +110,365 @@ const ALLOWED_TEST_VAR_PLATFORMS = new Set<TestVariablePlatform>(['mobile', 'web
 const TEST_VAR_KEY_REGEX = /^[A-Z][A-Z0-9_]{0,63}$/;
 const SCRIPT_PLACEHOLDER_REGEX = /\$\{([A-Z][A-Z0-9_]*)\}/g;
 const mobileReplayRuns = new Map<string, MobileReplayRunRecord>();
+
+function getMobileRecordingDir(recordingId: string): string {
+  return join(PROJECTS_DIR, 'maestro-recordings', recordingId);
+}
+
+function getMobileRecordingSessionPath(recordingId: string): string {
+  return join(getMobileRecordingDir(recordingId), 'session.json');
+}
+
+async function readMobileRecordingSessionData(recordingId: string): Promise<any> {
+  const sessionPath = getMobileRecordingSessionPath(recordingId);
+  if (!existsSync(sessionPath)) {
+    throw new Error('Recording not found');
+  }
+  return JSON.parse(readFileSync(sessionPath, 'utf-8'));
+}
+
+async function writeMobileRecordingSessionData(recordingId: string, sessionData: any): Promise<void> {
+  const { writeFile } = await import('node:fs/promises');
+  const sessionPath = getMobileRecordingSessionPath(recordingId);
+  await writeFile(sessionPath, JSON.stringify(sessionData, null, 2));
+}
+
+function normalizeRecordingAppIdForESVP(appId?: string): string | undefined {
+  const value = String(appId || '').trim();
+  if (!value) return undefined;
+  if (value === 'com.example.app') return undefined;
+  if (value.includes('# TODO')) return undefined;
+  return value;
+}
+
+function resolveRecordingExecutor(session: any): 'adb' | 'maestro-ios' | 'ios-sim' {
+  return session?.platform === 'ios' ? 'ios-sim' : 'adb';
+}
+
+function getFirstRecordingScreenshotPath(session: any): string | undefined {
+  if (typeof session?.screenshotsDir !== 'string' || !existsSync(session.screenshotsDir)) {
+    return undefined;
+  }
+  const files = readdirSync(session.screenshotsDir)
+    .filter((file) => file.toLowerCase().endsWith('.png'))
+    .sort();
+  if (files.length === 0) return undefined;
+  return join(session.screenshotsDir, files[0]);
+}
+
+function buildDefaultESVPNetworkProfile(session?: { platform?: string | null; deviceId?: string | null }) {
+  return buildAppLabNetworkProfile(
+    {
+      enabled: true,
+      mode: 'external-proxy',
+      profile: 'applab-standard-capture',
+      label: 'App Lab Standard Capture',
+    },
+    {
+      platform: session?.platform,
+      deviceId: session?.deviceId,
+    }
+  );
+}
+
+function resolvePersistedNetworkProfile(
+  runtimeNetwork?: Record<string, unknown> | null,
+  existingNetwork?: Record<string, unknown> | null,
+  fallbackProfile?: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  if (runtimeNetwork?.effective_profile && typeof runtimeNetwork.effective_profile === 'object') {
+    return runtimeNetwork.effective_profile as Record<string, unknown>;
+  }
+  if (runtimeNetwork?.active_profile && typeof runtimeNetwork.active_profile === 'object') {
+    return runtimeNetwork.active_profile as Record<string, unknown>;
+  }
+  if (existingNetwork?.effectiveProfile && typeof existingNetwork.effectiveProfile === 'object') {
+    return existingNetwork.effectiveProfile as Record<string, unknown>;
+  }
+  if (existingNetwork?.activeProfile && typeof existingNetwork.activeProfile === 'object') {
+    return existingNetwork.activeProfile as Record<string, unknown>;
+  }
+  return fallbackProfile || null;
+}
+
+async function touchProjectUpdatedAt(projectId: string): Promise<void> {
+  const db = getDatabase();
+  await db.update(projects)
+    .set({ updatedAt: new Date() })
+    .where(eq(projects.id, projectId));
+}
+
+type AnalysisFlowKind = 'mobile' | 'web';
+type AnalysisStepStatus = 'running' | 'done' | 'failed' | 'skipped';
+type AnalysisStepRange = { start: number; end: number };
+type ProjectAnalysisProgressState = {
+  projectId: string;
+  flow: AnalysisFlowKind;
+  step: string;
+  status: AnalysisStepStatus;
+  detail: string | null;
+  error: string | null;
+  percent: number;
+  etaSeconds: number | null;
+  startedAt: number;
+  updatedAt: number;
+  totalUnits: number | null;
+  completedUnits: number | null;
+};
+
+const ANALYSIS_PROGRESS_RANGES: Record<AnalysisFlowKind, Record<string, AnalysisStepRange>> = {
+  mobile: {
+    queued: { start: 1, end: 4 },
+    ocr: { start: 4, end: 62 },
+    summary: { start: 62, end: 82 },
+    actions: { start: 82, end: 95 },
+    save: { start: 95, end: 100 },
+    done: { start: 100, end: 100 },
+    error: { start: 0, end: 100 },
+  },
+  web: {
+    queued: { start: 1, end: 4 },
+    extract: { start: 4, end: 30 },
+    ocr: { start: 30, end: 78 },
+    summary: { start: 78, end: 96 },
+    save: { start: 96, end: 100 },
+    done: { start: 100, end: 100 },
+    error: { start: 0, end: 100 },
+  },
+};
+
+const analysisProgressByProject = new Map<string, ProjectAnalysisProgressState>();
+const analysisProgressCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clampAnalysisPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function getAnalysisStepRange(flow: AnalysisFlowKind, step: string): AnalysisStepRange {
+  return ANALYSIS_PROGRESS_RANGES[flow][step] || ANALYSIS_PROGRESS_RANGES[flow].save;
+}
+
+function computeAnalysisPercent(
+  flow: AnalysisFlowKind,
+  step: string,
+  status: AnalysisStepStatus,
+  completedUnits?: number | null,
+  totalUnits?: number | null
+): number {
+  const range = getAnalysisStepRange(flow, step);
+  if (status === 'done' || status === 'skipped') {
+    return range.end;
+  }
+
+  const span = Math.max(0, range.end - range.start);
+  let ratio = 0;
+  if (typeof completedUnits === 'number' && typeof totalUnits === 'number' && totalUnits > 0) {
+    ratio = Math.max(0, Math.min(1, completedUnits / totalUnits));
+    if (status === 'running' && ratio === 0) {
+      ratio = 0.02;
+    }
+  } else if (status === 'running') {
+    ratio = 0.08;
+  }
+
+  return clampAnalysisPercent(range.start + (span * ratio));
+}
+
+function computeAnalysisEtaSeconds(
+  startedAt: number,
+  percent: number,
+  status: AnalysisStepStatus
+): number | null {
+  if (status !== 'running') return null;
+  const normalized = clampAnalysisPercent(percent);
+  if (normalized < 3 || normalized >= 100) return null;
+
+  const elapsedMs = Math.max(Date.now() - startedAt, 1000);
+  const ratio = normalized / 100;
+  const estimatedTotalMs = elapsedMs / ratio;
+  const remainingMs = Math.max(estimatedTotalMs - elapsedMs, 0);
+
+  return Math.max(1, Math.ceil(Math.min(remainingMs, BACKGROUND_ANALYSIS_TIMEOUT_MS) / 1000));
+}
+
+function scheduleProjectAnalysisProgressCleanup(projectId: string, delayMs = 60_000): void {
+  const existingTimer = analysisProgressCleanupTimers.get(projectId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const timeout = setTimeout(() => {
+    analysisProgressCleanupTimers.delete(projectId);
+    analysisProgressByProject.delete(projectId);
+  }, delayMs);
+
+  analysisProgressCleanupTimers.set(projectId, timeout);
+}
+
+function getProjectAnalysisProgress(projectId: string): ProjectAnalysisProgressState | null {
+  const existing = analysisProgressByProject.get(projectId);
+  if (!existing) return null;
+
+  return {
+    ...existing,
+    etaSeconds: computeAnalysisEtaSeconds(existing.startedAt, existing.percent, existing.status),
+  };
+}
+
+function setProjectAnalysisProgress(params: {
+  projectId: string;
+  flow: AnalysisFlowKind;
+  step: string;
+  status: AnalysisStepStatus;
+  detail?: string;
+  error?: string;
+  completedUnits?: number | null;
+  totalUnits?: number | null;
+  startedAt?: number;
+  broadcast?: boolean;
+}): ProjectAnalysisProgressState {
+  const existingTimer = analysisProgressCleanupTimers.get(params.projectId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    analysisProgressCleanupTimers.delete(params.projectId);
+  }
+
+  const existing = analysisProgressByProject.get(params.projectId);
+  const startedAt = existing?.startedAt ?? params.startedAt ?? Date.now();
+  const sameStep = existing?.step === params.step;
+  const completedUnits = params.completedUnits !== undefined
+    ? params.completedUnits
+    : sameStep
+      ? existing?.completedUnits ?? null
+      : null;
+  const totalUnits = params.totalUnits !== undefined
+    ? params.totalUnits
+    : sameStep
+      ? existing?.totalUnits ?? null
+      : null;
+  const percent = computeAnalysisPercent(
+    params.flow,
+    params.step,
+    params.status,
+    completedUnits,
+    totalUnits
+  );
+
+  const next: ProjectAnalysisProgressState = {
+    projectId: params.projectId,
+    flow: params.flow,
+    step: params.step,
+    status: params.status,
+    detail: params.detail ?? (sameStep ? existing?.detail ?? null : null),
+    error: params.error ?? null,
+    percent: Math.round(percent),
+    etaSeconds: computeAnalysisEtaSeconds(startedAt, percent, params.status),
+    startedAt,
+    updatedAt: Date.now(),
+    totalUnits,
+    completedUnits,
+  };
+
+  analysisProgressByProject.set(params.projectId, next);
+
+  if (params.status === 'done' || params.status === 'failed' || params.step === 'done' || params.step === 'error') {
+    scheduleProjectAnalysisProgressCleanup(params.projectId);
+  }
+
+  if (params.broadcast !== false) {
+    broadcastToClients({
+      type: 'analysisProgress',
+      data: {
+        projectId: params.projectId,
+        step: params.step,
+        status: params.status,
+        detail: next.detail,
+        error: next.error,
+        percent: next.percent,
+        etaSeconds: next.etaSeconds,
+        flow: next.flow,
+        totalUnits: next.totalUnits,
+        completedUnits: next.completedUnits,
+        startedAt: next.startedAt,
+      }
+    });
+  }
+
+  return next;
+}
+
+function clearProjectAnalysisProgress(projectId: string): void {
+  const timer = analysisProgressCleanupTimers.get(projectId);
+  if (timer) {
+    clearTimeout(timer);
+    analysisProgressCleanupTimers.delete(projectId);
+  }
+  analysisProgressByProject.delete(projectId);
+}
+
+function withProjectAnalysisProgress<T extends { id: string; status: unknown }>(
+  project: T
+): T & { analysisProgress: ProjectAnalysisProgressState | null } {
+  return {
+    ...project,
+    analysisProgress: isAnalyzingProjectStatus(project.status) ? getProjectAnalysisProgress(project.id) : null,
+  };
+}
+
+async function isLocalTcpPortReachable(
+  port: number,
+  host = '127.0.0.1',
+  timeoutMs = 350
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ port, host });
+
+    const finish = (result: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function waitForLocalTcpPort(
+  port: number,
+  options: { host?: string; timeoutMs?: number; intervalMs?: number } = {}
+): Promise<boolean> {
+  const host = options.host || '127.0.0.1';
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const intervalMs = options.intervalMs ?? 200;
+  const startedAt = Date.now();
+
+  while ((Date.now() - startedAt) < timeoutMs) {
+    if (await isLocalTcpPortReachable(port, host)) {
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+
+  return false;
+}
+
+function startProjectAnalysisProgress(
+  projectId: string,
+  flow: AnalysisFlowKind,
+  detail: string
+): ProjectAnalysisProgressState {
+  return setProjectAnalysisProgress({
+    projectId,
+    flow,
+    step: 'queued',
+    status: 'running',
+    detail,
+  });
+}
 
 function pruneMobileReplayRuns(maxEntries = 80): void {
   const now = Date.now();
@@ -441,13 +828,18 @@ async function markProjectAnalysisTimeout(
   }).where(eq(projects.id, projectId));
 
   console.warn(`[AnalysisTimeout] Project ${projectId} marked as timeout: ${reason}`);
+  const existingProgress = getProjectAnalysisProgress(projectId);
+  setProjectAnalysisProgress({
+    projectId,
+    flow: existingProgress?.flow || 'mobile',
+    step: 'error',
+    status: 'failed',
+    detail: reason,
+    error: timeoutMessage,
+  });
   broadcastToClients({
     type: 'projectAnalysisUpdated',
     data: { projectId, status: 'timeout', reason }
-  });
-  broadcastToClients({
-    type: 'analysisProgress',
-    data: { projectId, step: 'error', status: 'failed', error: timeoutMessage }
   });
 }
 
@@ -481,6 +873,7 @@ function runOCRInBackgroundWithWatchdog(
   screenshotFiles: string[],
   sourceLabel: string
 ): void {
+  startProjectAnalysisProgress(projectId, 'mobile', `Preparing analysis for ${screenshotFiles.length} screenshot${screenshotFiles.length === 1 ? '' : 's'}...`);
   let finished = false;
   const watchdog = setTimeout(() => {
     if (finished) return;
@@ -503,6 +896,7 @@ function runProjectAnalysisInBackgroundWithWatchdog(
   projectId: string,
   sourceLabel: string
 ): void {
+  startProjectAnalysisProgress(projectId, 'web', 'Preparing capture analysis...');
   let finished = false;
   const watchdog = setTimeout(() => {
     if (finished) return;
@@ -1074,6 +1468,7 @@ type NormalizedProjectRecord = ProjectRecord & {
   taskHubLinks: unknown[];
   taskRequirements: unknown[];
   taskTestMap: unknown[];
+  analysisProgress: ProjectAnalysisProgressState | null;
 };
 
 function resolveVideoPath(videoPath: string | null): string | null {
@@ -1099,6 +1494,21 @@ function resolveVideoPath(videoPath: string | null): string | null {
   }
 }
 
+function resolveRecordingBaseDir(videoPath: string | null): string | null {
+  if (!videoPath || !existsSync(videoPath)) return null;
+
+  try {
+    if (statSync(videoPath).isDirectory()) {
+      return videoPath;
+    }
+
+    const parentDir = dirname(videoPath);
+    return basename(parentDir) === 'video' ? dirname(parentDir) : parentDir;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeProjectRecord(project: ProjectRecord): NormalizedProjectRecord {
   const normalized = {
     ...project,
@@ -1107,9 +1517,89 @@ function normalizeProjectRecord(project: ProjectRecord): NormalizedProjectRecord
     taskHubLinks: parseJsonField(project.taskHubLinks, [] as unknown[]),
     taskRequirements: parseJsonField(project.taskRequirements, [] as unknown[]),
     taskTestMap: parseJsonField(project.taskTestMap, [] as unknown[]),
-  } as NormalizedProjectRecord;
+  };
 
-  return normalized;
+  return withProjectAnalysisProgress(normalized) as NormalizedProjectRecord;
+}
+
+function getRecordingSessionFinalUrl(sessionData: any): string | null {
+  if (!sessionData || typeof sessionData !== 'object') return null;
+
+  const actions = Array.isArray(sessionData.actions) ? sessionData.actions : [];
+  for (let index = actions.length - 1; index >= 0; index -= 1) {
+    const action = actions[index];
+    if (typeof action?.url === 'string' && action.url.trim()) {
+      return action.url.trim();
+    }
+  }
+
+  return typeof sessionData.url === 'string' && sessionData.url.trim()
+    ? sessionData.url.trim()
+    : null;
+}
+
+function isSyntheticProjectCover(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  const filename = basename(filePath).toLowerCase();
+  return filename === 'cover-app-icon.png' || filename === 'cover-site-icon.png';
+}
+
+async function maybeRepairMobileProjectThumbnail(project: ProjectRecord): Promise<ProjectRecord> {
+  if (project.platform !== 'ios' && project.platform !== 'android') {
+    return project;
+  }
+
+  if (project.thumbnailPath && isSyntheticProjectCover(project.thumbnailPath) && existsSync(project.thumbnailPath)) {
+    return project;
+  }
+
+  const recordingBaseDir = resolveRecordingBaseDir(project.videoPath);
+  if (!recordingBaseDir || !existsSync(recordingBaseDir)) {
+    return project;
+  }
+
+  const sessionPath = join(recordingBaseDir, 'session.json');
+  if (!existsSync(sessionPath)) {
+    return project;
+  }
+
+  try {
+    const sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
+    if (
+      (sessionData?.platform !== 'ios' && sessionData?.platform !== 'android')
+      || typeof sessionData?.deviceId !== 'string'
+    ) {
+      return project;
+    }
+
+    const iconCoverPath = await createMobileAppIconCover({
+      platform: sessionData.platform,
+      deviceId: sessionData.deviceId,
+      appId: typeof sessionData.appId === 'string' ? sessionData.appId : null,
+      outputDir: recordingBaseDir,
+      adbPath: ADB_PATH,
+    });
+
+    if (!iconCoverPath || !existsSync(iconCoverPath)) {
+      return project;
+    }
+
+    if (project.thumbnailPath !== iconCoverPath) {
+      const db = getDatabase();
+      await db.update(projects)
+        .set({
+          thumbnailPath: iconCoverPath,
+        })
+        .where(eq(projects.id, project.id));
+    }
+
+    return {
+      ...project,
+      thumbnailPath: iconCoverPath,
+    };
+  } catch {
+    return project;
+  }
 }
 
 // List projects
@@ -1135,6 +1625,8 @@ app.get('/api/projects', async (c) => {
     if (platform) {
       results = results.filter((p) => p.platform === platform);
     }
+
+    results = await Promise.all(results.map((p) => maybeRepairMobileProjectThumbnail(p as ProjectRecord)));
 
     return c.json({
       count: results.length,
@@ -1185,7 +1677,6 @@ app.get('/api/projects/:id', async (c) => {
     const db = getDatabase();
     const id = c.req.param('id');
     const { existsSync, readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
 
     const result = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
 
@@ -1193,7 +1684,10 @@ app.get('/api/projects/:id', async (c) => {
       return c.json({ error: 'Project not found' }, 404);
     }
 
-    const project = normalizeProjectRecord(result[0] as ProjectRecord);
+    const rawProject = await maybeRepairMobileProjectThumbnail(result[0] as ProjectRecord);
+    const project = normalizeProjectRecord(rawProject);
+    const recordingBaseDir = resolveRecordingBaseDir(rawProject.videoPath);
+    const actualVideoPath = resolveVideoPath(rawProject.videoPath);
 
     // Get exports
     const exports = await db
@@ -1212,36 +1706,12 @@ app.get('/api/projects/:id', async (c) => {
     // Try to load actions and viewport from session.json if project has videoPath (recording directory)
     let actions: any[] = [];
     let viewport: { width: number; height: number } | undefined;
-    let actualVideoPath: string | null = project.videoPath;
+    let networkEntries: CapturedNetworkEntry[] = [];
+    let networkCapture: NetworkCaptureMeta | null = null;
+    let esvp: Record<string, unknown> | null = null;
 
-    if (project.videoPath && existsSync(project.videoPath)) {
-      const { readdirSync, statSync } = await import('node:fs');
-
-      // Check if videoPath is a directory
-      if (statSync(project.videoPath).isDirectory()) {
-        // Look for video file in the video subdirectory
-        const videoDir = join(project.videoPath, 'video');
-        if (existsSync(videoDir) && statSync(videoDir).isDirectory()) {
-          const videoFiles = readdirSync(videoDir).filter(f =>
-            /\.(mp4|mov|webm)$/i.test(f)
-          );
-          if (videoFiles.length > 0) {
-            actualVideoPath = join(videoDir, videoFiles[0]);
-          }
-        }
-
-        // Also check for video directly in the recording directory
-        if (actualVideoPath === project.videoPath) {
-          const directFiles = readdirSync(project.videoPath).filter(f =>
-            /\.(mp4|mov|webm)$/i.test(f)
-          );
-          if (directFiles.length > 0) {
-            actualVideoPath = join(project.videoPath, directFiles[0]);
-          }
-        }
-      }
-
-      const sessionPath = join(project.videoPath, 'session.json');
+    if (recordingBaseDir && existsSync(recordingBaseDir)) {
+      const sessionPath = join(recordingBaseDir, 'session.json');
       if (existsSync(sessionPath)) {
         try {
           const sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
@@ -1251,20 +1721,32 @@ app.get('/api/projects/:id', async (c) => {
           if (sessionData.viewport) {
             viewport = sessionData.viewport;
           }
+          if (Array.isArray(sessionData.networkEntries)) {
+            networkEntries = sessionData.networkEntries;
+          }
+          if (sessionData.networkCapture && typeof sessionData.networkCapture === 'object') {
+            networkCapture = sessionData.networkCapture;
+          }
+          if (sessionData.esvp && typeof sessionData.esvp === 'object') {
+            esvp = sessionData.esvp;
+          }
         } catch (e) {
           // Ignore parsing errors
         }
       }
     }
 
-    return c.json({
+    return c.json(withProjectAnalysisProgress({
       ...project,
       videoPath: actualVideoPath, // Return the actual video file path
       exports,
       frames: projectFrames,
       actions,
       viewport,
-    });
+      networkEntries,
+      networkCapture,
+      esvp,
+    }));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -2272,7 +2754,9 @@ let captureSession: {
   deviceId?: string;
   platform?: string;
   deviceName?: string;
+  appId?: string | null;
   url?: string;
+  faviconCandidates?: string[];
   startTime: number;
   videoPath?: string;
   screenshotsDir?: string;
@@ -2281,6 +2765,9 @@ let captureSession: {
   context?: any;
   page?: any;
   projectId?: string;
+  networkEntries?: CapturedNetworkEntry[];
+  networkCapture?: NetworkCaptureMeta;
+  networkDetach?: () => void;
 } | null = null;
 
 // Get current capture session status
@@ -2336,6 +2823,7 @@ app.post('/api/capture/mobile/start', async (c) => {
     mkdirSync(screenshotsDir, { recursive: true });
 
     const videoPath = join(projectDir, 'recording.mp4');
+    const initialAppId = getForegroundAppIdForPlatform(platform, targetDeviceId);
 
     // Start video recording based on platform
     let recordProcess: any = null;
@@ -2358,6 +2846,7 @@ app.post('/api/capture/mobile/start', async (c) => {
       deviceId: targetDeviceId,
       platform,
       deviceName,
+      appId: initialAppId,
       startTime: Date.now(),
       videoPath,
       screenshotsDir,
@@ -2402,6 +2891,7 @@ app.post('/api/capture/mobile/stop', async (c) => {
 
     const session = captureSession;
     const projectId = session.projectId!;
+    const projectDir = dirname(session.videoPath || '');
 
     // Stop recording process
     if (session.process) {
@@ -2422,12 +2912,26 @@ app.post('/api/capture/mobile/stop', async (c) => {
       }
     }
 
+    const resolvedAppId = session.deviceId && session.platform
+      ? (session.appId || getForegroundAppIdForPlatform(session.platform as 'ios' | 'android', session.deviceId))
+      : null;
+    const iconCoverPath = (resolvedAppId && session.deviceId && session.platform && projectDir)
+      ? await createMobileAppIconCover({
+          platform: session.platform as 'ios' | 'android',
+          deviceId: session.deviceId,
+          appId: resolvedAppId,
+          outputDir: projectDir,
+          adbPath: ADB_PATH,
+        })
+      : null;
+
     captureSession = null;
 
     // Update project status to trigger OCR analysis
     const db = getDatabase();
     await db.update(projects)
       .set({
+        thumbnailPath: iconCoverPath || undefined,
         status: 'processing',
         updatedAt: new Date()
       })
@@ -2440,6 +2944,7 @@ app.post('/api/capture/mobile/stop', async (c) => {
       success: true,
       projectId,
       videoPath: session.videoPath,
+      thumbnailPath: iconCoverPath,
       message: 'Recording stopped, analyzing...'
     });
 
@@ -2472,6 +2977,12 @@ app.post('/api/capture/web/start', async (c) => {
     // Launch Playwright browser with video recording
     let browser: any = null;
     let page: any = null;
+    const networkEntries: CapturedNetworkEntry[] = [];
+    const networkCapture: NetworkCaptureMeta = {
+      truncated: false,
+      maxEntries: 1200,
+      resourceTypes: [...PLAYWRIGHT_NETWORK_RESOURCE_TYPES],
+    };
 
     try {
       const { chromium } = await import('playwright');
@@ -2489,6 +3000,10 @@ app.post('/api/capture/web/start', async (c) => {
       });
 
       page = await context.newPage();
+      const networkHandle = attachPlaywrightNetworkCapture(page, {
+        entries: networkEntries,
+        meta: networkCapture,
+      });
       await page.goto(startUrl);
 
       captureSession = {
@@ -2499,7 +3014,10 @@ app.post('/api/capture/web/start', async (c) => {
         browser,
         context,
         page,
-        projectId
+        projectId,
+        networkEntries,
+        networkCapture,
+        networkDetach: networkHandle.detach,
       };
 
       // Create project in database
@@ -2546,6 +3064,34 @@ app.post('/api/capture/web/stop', async (c) => {
 
     const session = captureSession;
     const projectId = session.projectId!;
+    const endedAt = Date.now();
+    const { writeFileSync } = await import('node:fs');
+    const projectDir = join(PROJECTS_DIR, projectId);
+    let finalPageUrl = session.url || null;
+    let faviconCandidates: string[] = [];
+
+    if (session.page) {
+      try {
+        const pageMeta = await session.page.evaluate(() => {
+          const doc = (globalThis as any).document;
+          const locationHref = (globalThis as any).location?.href || '';
+          const links = Array.from(doc?.querySelectorAll?.('link[rel]') || [])
+            .filter((link: any) => /\b(icon|apple-touch-icon|mask-icon)\b/i.test(link?.getAttribute?.('rel') || ''))
+            .map((link: any) => link?.href)
+            .filter(Boolean);
+
+          return {
+            url: locationHref,
+            faviconCandidates: links,
+          };
+        });
+
+        finalPageUrl = pageMeta?.url || finalPageUrl;
+        faviconCandidates = Array.isArray(pageMeta?.faviconCandidates) ? pageMeta.faviconCandidates : [];
+      } catch {
+        // Ignore favicon extraction errors and fall back to URL heuristics.
+      }
+    }
 
     // Close browser to finalize video
     if (session.page) {
@@ -2560,6 +3106,30 @@ app.post('/api/capture/web/stop', async (c) => {
 
     // Wait for video file to be written
     await new Promise(resolve => setTimeout(resolve, 1000));
+    session.networkDetach?.();
+
+    if (projectId) {
+      const sessionPath = join(projectDir, 'session.json');
+      writeFileSync(sessionPath, JSON.stringify({
+        id: projectId,
+        name: `Web Capture - ${new Date(session.startTime).toISOString()}`,
+        url: finalPageUrl || session.url,
+        platform: 'web',
+        startedAt: session.startTime,
+        endedAt,
+        status: 'stopped',
+        viewport: { width: 1280, height: 720 },
+        actions: [],
+        networkEntries: session.networkEntries || [],
+        networkCapture: session.networkCapture || null,
+      }, null, 2));
+    }
+
+    const faviconCoverPath = await createWebFaviconCover({
+      pageUrl: finalPageUrl || session.url,
+      explicitCandidates: faviconCandidates,
+      outputDir: projectDir,
+    });
 
     captureSession = null;
 
@@ -2567,6 +3137,7 @@ app.post('/api/capture/web/stop', async (c) => {
     const db = getDatabase();
     await db.update(projects)
       .set({
+        thumbnailPath: faviconCoverPath || undefined,
         status: 'processing',
         updatedAt: new Date()
       })
@@ -2578,6 +3149,7 @@ app.post('/api/capture/web/stop', async (c) => {
     return c.json({
       success: true,
       projectId,
+      thumbnailPath: faviconCoverPath,
       message: 'Recording stopped, analyzing...'
     });
 
@@ -2591,6 +3163,25 @@ app.post('/api/capture/web/stop', async (c) => {
 // Background OCR analysis function
 async function analyzeProjectInBackground(projectId: string) {
   const db = getDatabase();
+  const broadcastProgress = (
+    step: string,
+    status: AnalysisStepStatus,
+    detail?: string,
+    error?: string,
+    completedUnits?: number | null,
+    totalUnits?: number | null
+  ) => {
+    setProjectAnalysisProgress({
+      projectId,
+      flow: 'web',
+      step,
+      status,
+      detail,
+      error,
+      completedUnits,
+      totalUnits,
+    });
+  };
 
   try {
     // Get project
@@ -2601,6 +3192,7 @@ async function analyzeProjectInBackground(projectId: string) {
     const projectDir = project.videoPath;
 
     if (!projectDir || !existsSync(projectDir)) {
+      broadcastProgress('error', 'failed', 'Capture directory not found', 'Project directory is missing');
       await db.update(projects)
         .set({ status: 'failed', updatedAt: new Date() })
         .where(eq(projects.id, projectId));
@@ -2617,6 +3209,16 @@ async function analyzeProjectInBackground(projectId: string) {
     const videoFile = files.find(f => f.endsWith('.mp4') || f.endsWith('.webm') || f.endsWith('.mov'));
 
     if (!videoFile) {
+      broadcastProgress('save', 'done', 'Capture saved without video analysis');
+      setProjectAnalysisProgress({
+        projectId,
+        flow: 'web',
+        step: 'done',
+        status: 'done',
+        detail: 'Capture saved',
+        completedUnits: 1,
+        totalUnits: 1,
+      });
       await db.update(projects)
         .set({ status: 'completed', updatedAt: new Date() })
         .where(eq(projects.id, projectId));
@@ -2639,12 +3241,24 @@ async function analyzeProjectInBackground(projectId: string) {
     mkdirSync(framesDir, { recursive: true });
 
     // Extract 1 frame per second
+    broadcastProgress('extract', 'running', 'Extracting frames from video...');
     await execAsync(`ffmpeg -i "${videoPath}" -vf "fps=1" -q:v 2 "${framesDir}/frame_%04d.jpg" -y`);
+    broadcastProgress('extract', 'done', 'Frames extracted');
 
     // Get frame files
     const frameFiles = readdirSync(framesDir).filter(f => f.endsWith('.jpg')).sort();
 
     if (frameFiles.length === 0) {
+      broadcastProgress('save', 'done', 'No frames extracted from video');
+      setProjectAnalysisProgress({
+        projectId,
+        flow: 'web',
+        step: 'done',
+        status: 'done',
+        detail: 'Capture saved',
+        completedUnits: 1,
+        totalUnits: 1,
+      });
       await db.update(projects)
         .set({ status: 'completed', updatedAt: new Date() })
         .where(eq(projects.id, projectId));
@@ -2663,8 +3277,10 @@ async function analyzeProjectInBackground(projectId: string) {
 
     try {
       const { recognizeText } = await import('../core/analyze/ocr.js');
+      const ocrFrames = frameFiles.slice(0, 10);
+      broadcastProgress('ocr', 'running', `Processing 0/${ocrFrames.length} frames...`, undefined, 0, ocrFrames.length);
 
-      for (const frameFile of frameFiles.slice(0, 10)) { // Limit to first 10 frames
+      for (const [index, frameFile] of ocrFrames.entries()) {
         const framePath = join(framesDir, frameFile);
         const ocrResult = await recognizeText(framePath);
         if (ocrResult.success && ocrResult.text) {
@@ -2676,9 +3292,29 @@ async function analyzeProjectInBackground(projectId: string) {
             ocrConfidences.push(ocrResult.confidence);
           }
         }
+
+        broadcastProgress(
+          'ocr',
+          'running',
+          `Processing ${index + 1}/${ocrFrames.length} frames...`,
+          undefined,
+          index + 1,
+          ocrFrames.length
+        );
       }
+
+      broadcastProgress(
+        'ocr',
+        'done',
+        allOcrText ? `Extracted ${allOcrText.length} characters` : 'No text detected',
+        undefined,
+        ocrFrames.length,
+        ocrFrames.length
+      );
     } catch (err) {
       console.error('OCR analysis error:', err);
+      const errorMessage = err instanceof Error ? err.message : 'OCR failed';
+      broadcastProgress('ocr', 'failed', 'OCR failed', errorMessage);
     }
 
     let aiSummary = allOcrText
@@ -2687,22 +3323,43 @@ async function analyzeProjectInBackground(projectId: string) {
 
     if (allOcrText) {
       try {
+        broadcastProgress('summary', 'running', 'Connecting to LLM provider...');
         const provider = await getLLMProvider();
         if (provider) {
           console.log(`[BackgroundOCR] Generating web App Intelligence summary with ${provider.name}...`);
+          broadcastProgress('summary', 'running', `Using ${provider.name}...`);
           const summaryResult = await generateAppIntelligenceSummary(provider, allOcrText, 'web');
           aiSummary = summaryResult.summary;
           if (!summaryResult.ok) {
             console.warn(`[BackgroundOCR] Web summary generation failed via ${summaryResult.providerName}: ${summaryResult.error || 'unknown error'}`);
+            broadcastProgress(
+              'summary',
+              'failed',
+              'Summary generation failed',
+              summaryResult.error || `Provider failed: ${summaryResult.providerName}`
+            );
+          } else {
+            broadcastProgress('summary', 'done', `Generated ${aiSummary.length} character summary`);
           }
+        } else {
+          broadcastProgress('summary', 'skipped', 'No LLM provider configured');
         }
       } catch (summaryError) {
         console.warn('[BackgroundOCR] Web summary generation failed (unexpected wrapper error):', summaryError);
+        const errorMessage = summaryError instanceof Error ? summaryError.message : 'Summary generation failed';
+        broadcastProgress('summary', 'failed', 'Summary generation failed', errorMessage);
       }
+    } else {
+      broadcastProgress('summary', 'skipped', 'Skipped — no text to analyze');
     }
 
     // Update project with results
-    const thumbnailPath = join(framesDir, bestFrame);
+    const extractedThumbnailPath = join(framesDir, bestFrame);
+    const resolvedThumbnailPath = project.thumbnailPath && existsSync(project.thumbnailPath)
+      ? project.thumbnailPath
+      : existsSync(extractedThumbnailPath)
+        ? extractedThumbnailPath
+        : null;
     const ocrEngine = ocrEngines.has('vision')
       ? 'vision'
       : ocrEngines.has('tesseract')
@@ -2712,17 +3369,29 @@ async function analyzeProjectInBackground(projectId: string) {
       ? ocrConfidences.reduce((sum, value) => sum + value, 0) / ocrConfidences.length
       : null;
 
+    broadcastProgress('save', 'running', 'Saving results to database...');
     await db.update(projects)
       .set({
         status: 'analyzed',
         ocrText: allOcrText || null,
         ocrEngine,
         ocrConfidence,
-        thumbnailPath: existsSync(thumbnailPath) ? thumbnailPath : null,
+        thumbnailPath: resolvedThumbnailPath,
         aiSummary,
         updatedAt: new Date()
       })
       .where(eq(projects.id, projectId));
+
+    broadcastProgress('save', 'done', 'Analysis complete');
+    setProjectAnalysisProgress({
+      projectId,
+      flow: 'web',
+      step: 'done',
+      status: 'done',
+      detail: 'Analysis complete',
+      completedUnits: 1,
+      totalUnits: 1,
+    });
 
     broadcastToClients({
       type: 'projectAnalysisUpdated',
@@ -2731,6 +3400,8 @@ async function analyzeProjectInBackground(projectId: string) {
 
   } catch (error) {
     console.error('Background analysis error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    broadcastProgress('error', 'failed', undefined, errorMessage);
     await db.update(projects)
       .set({ status: 'failed', updatedAt: new Date() })
       .where(eq(projects.id, projectId));
@@ -3180,8 +3851,12 @@ app.get('/api/grid/project-frames/:id', async (c) => {
       }
     }
 
-    // Include thumbnail if different from videoPath
-    if (project.thumbnailPath && project.thumbnailPath !== project.videoPath) {
+    // Include thumbnail if different from videoPath and it is a real capture/frame.
+    if (
+      project.thumbnailPath
+      && project.thumbnailPath !== project.videoPath
+      && !isSyntheticProjectCover(project.thumbnailPath)
+    ) {
       availableFrames.unshift({
         path: project.thumbnailPath,
         previewUrl: `/api/file?path=${encodeURIComponent(project.thumbnailPath)}`,
@@ -3510,18 +4185,23 @@ app.get('/api/file', async (c) => {
     }
 
     const decodedPath = decodeURIComponent(filePath);
+    const resolvedPath = resolveVideoPath(decodedPath) || decodedPath;
 
-    if (!existsSync(decodedPath)) {
+    if (!existsSync(resolvedPath)) {
       return c.json({ error: 'File not found' }, 404);
     }
 
     const { readFileSync, statSync } = await import('node:fs');
     const { basename, extname } = await import('node:path');
 
-    const stat = statSync(decodedPath);
-    const content = readFileSync(decodedPath);
-    const fileName = basename(decodedPath);
-    const ext = extname(decodedPath).toLowerCase();
+    const stat = statSync(resolvedPath);
+    if (stat.isDirectory()) {
+      return c.json({ error: 'Path resolves to a directory' }, 400);
+    }
+
+    const content = readFileSync(resolvedPath);
+    const fileName = basename(resolvedPath);
+    const ext = extname(resolvedPath).toLowerCase();
 
     // Determine content type
     const mimeTypes: Record<string, string> = {
@@ -3829,30 +4509,30 @@ app.get('/api/integrations/jira-mcp/status', async (c) => {
 
 app.post('/api/testing/maestro/studio', async (c) => {
   try {
-    const { exec, execSync } = await import('node:child_process');
-    const { homedir } = await import('node:os');
-    const { createConnection } = await import('node:net');
+    const maestroAvailable = await isMaestroInstalled();
+    if (!maestroAvailable) {
+      return c.json({
+        success: false,
+        message: 'Maestro CLI is not installed or not available in PATH.',
+      }, 400);
+    }
 
-    const maestroPath = `${homedir()}/.maestro/bin/maestro`;
+    const maestroCandidates = [
+      `${homedir()}/.maestro/bin/maestro`,
+      '/opt/homebrew/bin/maestro',
+      '/usr/local/bin/maestro',
+      'maestro',
+    ];
     const javaPath = '/opt/homebrew/opt/openjdk@17/bin';
     const env = { ...process.env, PATH: `${javaPath}:${process.env.PATH}` };
     const studioUrl = 'http://localhost:9999';
+    const studioPort = 9999;
+    const maestroCommand = maestroCandidates.find((candidate) => candidate === 'maestro' || existsSync(candidate)) || 'maestro';
 
     // Check if Maestro Studio is already running (port 9999)
-    const isPortInUse = await new Promise<boolean>((resolve) => {
-      const socket = createConnection({ port: 9999, host: 'localhost' });
-      socket.on('connect', () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.on('error', () => {
-        resolve(false);
-      });
-    });
+    const isPortInUse = await isLocalTcpPortReachable(studioPort);
 
     if (isPortInUse) {
-      // Already running, just open browser
-      exec(`open ${studioUrl}`);
       return c.json({
         success: true,
         message: 'Maestro Studio already running',
@@ -3893,20 +4573,28 @@ app.post('/api/testing/maestro/studio', async (c) => {
     }
 
     // Run maestro studio in background
-    exec(`${maestroPath} studio`, { env }, (error) => {
-      if (error) console.error('Maestro studio error:', error);
+    const studioProcess = spawn(maestroCommand, ['studio'], {
+      env,
+      detached: true,
+      stdio: 'ignore',
     });
+    studioProcess.unref();
 
-    // Wait a bit then open browser
-    setTimeout(() => {
-      exec(`open ${studioUrl}`);
-    }, 2000);
+    const studioReady = await waitForLocalTcpPort(studioPort, { timeoutMs: 12_000, intervalMs: 200 });
+    if (!studioReady) {
+      return c.json({
+        success: false,
+        message: 'Maestro Studio did not become ready in time. Try again and check the local CLI output if it keeps failing.',
+        url: studioUrl,
+      }, 504);
+    }
 
     return c.json({
       success: true,
-      message: 'Starting Maestro Studio...',
+      message: 'Maestro Studio ready',
       url: studioUrl,
-      deviceType
+      deviceType,
+      alreadyRunning: false,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -4237,12 +4925,14 @@ app.post('/api/testing/mobile/record/start', async (c) => {
     const recorder = getMaestroRecorder();
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const sessionName = `Mobile Test - ${timestamp}`;
+    const initialAppId = getForegroundAppIdForPlatform(platform, deviceId);
 
     const session = await recorder.startRecording(
       sessionName,
       deviceId,
       deviceName,
-      platform
+      platform,
+      initialAppId || undefined
     );
 
     return c.json({
@@ -4251,6 +4941,7 @@ app.post('/api/testing/mobile/record/start', async (c) => {
       platform,
       deviceId,
       deviceName,
+      appId: session.appId || initialAppId || null,
       captureMode: session.captureMode || 'manual',
       captureModeReason: session.captureModeReason || null,
       message: `Recording ${deviceName} (capturing touch events)...`
@@ -4580,6 +5271,10 @@ app.post('/api/testing/mobile/record/stop', async (c) => {
     const { readdirSync, writeFileSync, existsSync, readFileSync } = await import('node:fs');
     const outputDir = dirname(session.flowPath || session.screenshotsDir);
 
+    if (!session.appId && session.deviceId && session.platform) {
+      session.appId = getForegroundAppIdForPlatform(session.platform, session.deviceId) || undefined;
+    }
+
     // Find first screenshot for thumbnail
     let thumbnailPath: string | null = null;
     let screenshotCount = 0;
@@ -4594,6 +5289,20 @@ app.post('/api/testing/mobile/record/stop', async (c) => {
       }
     } catch {
       // No screenshots found
+    }
+
+    const iconCoverPath = session.deviceId && session.platform
+      ? await createMobileAppIconCover({
+          platform: session.platform,
+          deviceId: session.deviceId,
+          appId: session.appId,
+          outputDir,
+          adbPath: ADB_PATH,
+        })
+      : null;
+
+    if (iconCoverPath) {
+      thumbnailPath = iconCoverPath;
     }
 
     // Track if we'll run background analysis
@@ -4688,6 +5397,7 @@ appId: com.example.app # TODO: Set your app ID
     return c.json({
       success: true,
       projectId,
+      name: projectName,
       sessionId: session.id,
       flowPath: session.flowPath,
       flowCode: flowContent,
@@ -4698,6 +5408,7 @@ appId: com.example.app # TODO: Set your app ID
       aiAnalysisUsed: willAnalyze, // Renamed but kept for frontend compatibility
       ocrAnalysisUsed: willAnalyze,
       ocrInProgress: willAnalyze, // New flag for frontend polling
+      status: willAnalyze ? 'analyzing' : 'completed',
       platform: session.platform,
       deviceName: session.deviceName,
       captureMode: session.captureMode || 'manual',
@@ -4773,6 +5484,9 @@ app.get('/api/projects/:id/analysis-status', async (c) => {
     }
 
     const statusValue = typeof project.status === 'string' ? project.status : '';
+    const analysisProgress = isAnalyzingProjectStatus(statusValue)
+      ? getProjectAnalysisProgress(projectId)
+      : null;
     return c.json({
       isAnalyzing: isAnalyzingProjectStatus(statusValue),
       status: statusValue,
@@ -4781,7 +5495,8 @@ app.get('/api/projects/:id/analysis-status', async (c) => {
       ocrEngine: project.ocrEngine || null,
       ocrConfidence: project.ocrConfidence ?? null,
       ocrTextLength: project.ocrText?.length || 0,
-      aiSummaryLength: project.aiSummary?.length || 0
+      aiSummaryLength: project.aiSummary?.length || 0,
+      analysisProgress,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -5056,6 +5771,516 @@ app.get('/api/testing/mobile/recordings/:id', async (c) => {
       flowCode
     });
 
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
+    const network =
+      body?.network && typeof body.network === 'object'
+        ? body.network
+        : body?.network === false ? null : { enabled: true };
+    const captureLogcat = typeof body?.captureLogcat === 'boolean' ? body.captureLogcat : undefined;
+    const replay = typeof body?.replay === 'boolean' ? body.replay : undefined;
+    const session = await readMobileRecordingSessionData(id);
+    const translatedSessionActions = Array.isArray(session.actions) ? session.actions : [];
+    const shouldRehydrateActionsFromYaml =
+      typeof session.flowPath === 'string' &&
+      session.flowPath.trim() &&
+      existsSync(session.flowPath) &&
+      (
+        translatedSessionActions.length === 0 ||
+        session.captureMode === 'manual' ||
+        translatedSessionActions.some((action: any) => typeof action?.text === 'string' && action.text.includes(' # '))
+      );
+
+    if (shouldRehydrateActionsFromYaml) {
+      try {
+        const yamlContent = readFileSync(session.flowPath, 'utf-8');
+        const parsedActions = parseMaestroActionsFromYaml(yamlContent);
+        if (parsedActions.length > 0) {
+          session.actions = parsedActions;
+          await writeMobileRecordingSessionData(id, session);
+        }
+      } catch {
+        // Best effort fallback only.
+      }
+    }
+
+    const visionProviders = await getActionDetectionVisionProviders();
+    const result = await validateMaestroRecordingWithESVP(
+      {
+        id: String(session.id || id),
+        name: String(session.name || `Recording ${id}`),
+        platform: session.platform === 'ios' ? 'ios' : 'android',
+        deviceId: String(session.deviceId || ''),
+        deviceName: typeof session.deviceName === 'string' ? session.deviceName : undefined,
+        appId: typeof session.appId === 'string' ? session.appId : undefined,
+        actions: Array.isArray(session.actions) ? session.actions : [],
+      },
+      {
+        serverUrl,
+        network,
+        captureLogcat,
+        replay,
+        allowAppLabOwnedProxyAutostart: !appLabNetworkProxySettings.emergencyLockEnabled,
+        bootstrapScreenshotPath: getFirstRecordingScreenshotPath(session),
+        recoveryVisionProvider: visionProviders.length > 0 ? visionProviders : undefined,
+      }
+    );
+
+    session.esvp = {
+      ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
+      currentSessionId: result.sourceSessionId || null,
+      connectionMode: result.connectionMode,
+      serverUrl: result.serverUrl,
+      executor: result.executor,
+      validation: {
+        supported: result.supported,
+        reason: result.reason || null,
+        sourceSessionId: result.sourceSessionId || null,
+        replaySessionId: result.replaySessionId || null,
+        translatedActionCount: result.translatedActions.length,
+        bootstrap: result.bootstrap || null,
+        skippedActions: result.skippedActions,
+        recovery: result.recovery || null,
+        checkpointComparison: result.checkpointComparison || null,
+        replayConsistency: result.replayConsistency || null,
+        networkProfileApplied: result.networkProfileApplied || null,
+        validatedAt: new Date().toISOString(),
+      },
+      network: {
+        sourceSessionId: result.sourceSessionId || null,
+        traceKinds: result.traceKinds,
+        syncedAt: new Date().toISOString(),
+        entryCount: result.networkEntries.length,
+        managedProxy: result.managedProxy || null,
+        captureProxy: result.captureProxy || null,
+        activeProfile: result.networkState?.active_profile || null,
+        effectiveProfile: result.networkState?.effective_profile || null,
+        configuredAt: result.networkState?.configured_at || null,
+        clearedAt: result.networkState?.cleared_at || null,
+        lastError: result.networkState?.last_error || null,
+      },
+    };
+
+    if (result.networkEntries.length > 0) {
+      session.networkEntries = result.networkEntries;
+      session.networkCapture = result.networkCapture;
+    } else if (!session.networkCapture && result.supported) {
+      session.networkCapture = result.networkCapture;
+    }
+
+    // Auto-sync: if validation collected zero entries but the ESVP session has traces,
+    // attempt a deferred sync to catch late-flushed artifacts.
+    let autoSynced = false;
+    if (
+      result.networkEntries.length === 0 &&
+      result.supported &&
+      result.sourceSessionId &&
+      ((result.networkState?.managed_proxy?.entry_count ?? 0) > 0 || (result.networkState?.trace_count ?? 0) > 0)
+    ) {
+      try {
+        const { collectESVPSessionNetworkData } = await import('../core/integrations/esvp-mobile.js');
+        const deferred = await collectESVPSessionNetworkData(result.sourceSessionId, serverUrl);
+        if (deferred.networkEntries.length > 0) {
+          session.networkEntries = deferred.networkEntries;
+          session.networkCapture = deferred.networkCapture;
+          session.esvp.network = {
+            ...session.esvp.network,
+            traceKinds: deferred.traceKinds,
+            entryCount: deferred.networkEntries.length,
+            syncedAt: new Date().toISOString(),
+          };
+          result.networkEntries = deferred.networkEntries;
+          result.networkCapture = deferred.networkCapture;
+          result.traceKinds = deferred.traceKinds;
+          autoSynced = true;
+        }
+      } catch {
+        // Best effort — ignore deferred sync failures.
+      }
+    }
+
+    await writeMobileRecordingSessionData(id, session);
+    await touchProjectUpdatedAt(id).catch(() => {});
+
+    return c.json({
+      success: true,
+      autoSyncedNetwork: autoSynced,
+      ...result,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/testing/mobile/recordings/:id/esvp/network/start', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
+    const session = await readMobileRecordingSessionData(id);
+    const executor = resolveRecordingExecutor(session);
+    const appId = normalizeRecordingAppIdForESVP(session?.appId);
+    const requestedNetworkProfile = buildAppLabNetworkProfile(
+      body?.network && typeof body.network === 'object'
+        ? body.network
+        : {
+            enabled: true,
+            mode: 'external-proxy',
+            profile: 'applab-standard-capture',
+            label: 'App Lab Standard Capture',
+          },
+      {
+        platform: session?.platform,
+        deviceId: session?.deviceId,
+      }
+    ) || buildDefaultESVPNetworkProfile(session);
+    const existingNetwork = session?.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object'
+      ? session.esvp.network
+      : null;
+
+    if (existingNetwork?.captureStatus === 'running' && typeof existingNetwork.activeCaptureSessionId === 'string' && existingNetwork.activeCaptureSessionId) {
+      return c.json({
+        success: true,
+        reused: true,
+        sessionId: existingNetwork.activeCaptureSessionId,
+        managedProxy: existingNetwork.managedProxy || null,
+        captureProxy: existingNetwork.captureProxy || null,
+        effectiveProfile: existingNetwork.effectiveProfile || null,
+      });
+    }
+
+    const created = await createESVPSession(
+      {
+        executor,
+        deviceId: String(session.deviceId || ''),
+        meta: {
+          source: 'applab-discovery-network-capture',
+          recording_id: String(session.id || id),
+          recording_name: String(session.name || `Recording ${id}`),
+          recording_platform: session.platform === 'ios' ? 'ios' : 'android',
+          recording_device_name: typeof session.deviceName === 'string' ? session.deviceName : null,
+          ...(appId ? { appId, app_id: appId } : {}),
+        },
+      },
+      serverUrl
+    );
+    const sourceSessionId = String(created?.session?.id || created?.id || '');
+    if (!sourceSessionId) {
+      throw new Error('Failed to create an ESVP session for network capture.');
+    }
+    if (!requestedNetworkProfile) {
+      return c.json({ error: 'No network profile could be resolved for this recording.' }, 400);
+    }
+
+    const preparedNetworkProfile = await ensureLocalCaptureProxyProfile({
+      sessionId: sourceSessionId,
+      profile: requestedNetworkProfile,
+      platform: session?.platform,
+      deviceId: session?.deviceId,
+      allowAppLabOwnedProxy: !appLabNetworkProxySettings.emergencyLockEnabled,
+      lifecycle: {
+        executor,
+        deviceId: String(session.deviceId || ''),
+        serverUrl,
+        captureLogcat: executor === 'adb',
+        cleanupMeta: {
+          recording_id: String(session.id || id),
+          recording_name: String(session.name || `Recording ${id}`),
+          recording_platform: session.platform === 'ios' ? 'ios' : 'android',
+        },
+      },
+    });
+
+    const networkResult = await configureESVPNetwork(
+      sourceSessionId,
+      preparedNetworkProfile.profile || requestedNetworkProfile,
+      serverUrl
+    );
+
+    if (appId) {
+      await runESVPActions(
+        sourceSessionId,
+        {
+          actions: [{ name: 'launch', args: { appId } }],
+          finish: false,
+          checkpointAfterEach: false,
+          captureLogcat: executor === 'adb',
+        },
+        serverUrl
+      ).catch(() => null);
+    }
+
+    session.esvp = {
+      ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
+      currentSessionId: sourceSessionId,
+      connectionMode: typeof session?.esvp?.connectionMode === 'string' ? session.esvp.connectionMode : 'local',
+      serverUrl: serverUrl || (typeof session?.esvp?.serverUrl === 'string' ? session.esvp.serverUrl : null),
+      executor,
+      network: {
+        ...(existingNetwork || {}),
+        sourceSessionId,
+        activeCaptureSessionId: sourceSessionId,
+        captureStatus: 'running',
+        captureStartedAt: new Date().toISOString(),
+        entryCount: Number(existingNetwork?.entryCount || 0),
+        traceKinds: Array.isArray(existingNetwork?.traceKinds) ? existingNetwork.traceKinds : [],
+        managedProxy: networkResult?.network?.managed_proxy || null,
+        captureProxy: preparedNetworkProfile.captureProxy || null,
+        activeProfile: resolvePersistedNetworkProfile(networkResult?.network, existingNetwork, preparedNetworkProfile.profile),
+        effectiveProfile: resolvePersistedNetworkProfile(networkResult?.network, existingNetwork, preparedNetworkProfile.profile),
+        configuredAt: networkResult?.network?.configured_at || null,
+        clearedAt: null,
+        lastError: networkResult?.network?.last_error || null,
+      },
+    };
+
+    await writeMobileRecordingSessionData(id, session);
+    await touchProjectUpdatedAt(id).catch(() => {});
+
+    return c.json({
+      success: true,
+      sessionId: sourceSessionId,
+      network: session.esvp.network,
+      managedProxy: session.esvp.network?.managedProxy || null,
+      captureProxy: session.esvp.network?.captureProxy || null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/testing/mobile/recordings/:id/esvp/network/stop', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
+    const session = await readMobileRecordingSessionData(id);
+    const executor = resolveRecordingExecutor(session);
+    const network = session?.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object'
+      ? session.esvp.network
+      : null;
+    const sessionId =
+      typeof body?.sessionId === 'string' && body.sessionId.trim()
+        ? body.sessionId.trim()
+        : typeof network?.activeCaptureSessionId === 'string' && network.activeCaptureSessionId
+          ? network.activeCaptureSessionId
+          : typeof network?.sourceSessionId === 'string' && network.sourceSessionId
+            ? network.sourceSessionId
+            : '';
+
+    if (!sessionId) {
+      return c.json({ error: 'No active ESVP network capture session was found.' }, 400);
+    }
+
+    const finalization = await finalizeLocalCaptureProxySession({
+      sourceSessionId: sessionId,
+      executor,
+      deviceId: String(session.deviceId || ''),
+      serverUrl,
+      captureLogcat: executor === 'adb',
+      clearNetwork: true,
+      cleanupMeta: {
+        recording_id: String(session.id || id),
+        recording_name: String(session.name || `Recording ${id}`),
+        recording_platform: session.platform === 'ios' ? 'ios' : 'android',
+      },
+    });
+
+    const networkData = await collectESVPSessionNetworkData(sessionId, serverUrl);
+    session.networkEntries = networkData.networkEntries;
+    session.networkCapture = networkData.networkCapture;
+    session.esvp = {
+      ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
+      currentSessionId: sessionId,
+      network: {
+        ...(network || {}),
+        sourceSessionId: sessionId,
+        activeCaptureSessionId: null,
+        captureStatus: 'stopped',
+        captureStoppedAt: new Date().toISOString(),
+        traceKinds: networkData.traceKinds,
+        entryCount: networkData.networkEntries.length,
+        managedProxy: networkData.networkState?.managed_proxy ?? network?.managedProxy ?? null,
+        captureProxy: finalization.captureProxy || network?.captureProxy || null,
+        activeProfile: resolvePersistedNetworkProfile(networkData.networkState, network),
+        effectiveProfile: resolvePersistedNetworkProfile(networkData.networkState, network),
+        configuredAt: networkData.networkState?.configured_at || null,
+        clearedAt: networkData.networkState?.cleared_at || finalization.clearedAt || null,
+        lastError: networkData.networkState?.last_error || (finalization.errors[0] || null),
+        syncedAt: new Date().toISOString(),
+      },
+    };
+
+    await writeMobileRecordingSessionData(id, session);
+    await touchProjectUpdatedAt(id).catch(() => {});
+
+    return c.json({
+      success: true,
+      sessionId,
+      networkEntries: networkData.networkEntries,
+      networkCapture: networkData.networkCapture,
+      traceKinds: networkData.traceKinds,
+      captureProxy: finalization.captureProxy || null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/testing/mobile/recordings/:id/esvp/network/trace-attach', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
+    const payload = body?.payload;
+    if (!payload || (typeof payload !== 'object' && !Array.isArray(payload))) {
+      return c.json({ error: 'A JSON trace payload is required.' }, 400);
+    }
+
+    const session = await readMobileRecordingSessionData(id);
+    const executor = resolveRecordingExecutor(session);
+    const appId = normalizeRecordingAppIdForESVP(session?.appId);
+    const traceKind = typeof body?.traceKind === 'string' && body.traceKind.trim()
+      ? body.traceKind.trim()
+      : 'http_trace';
+
+    let sessionId =
+      typeof body?.sessionId === 'string' && body.sessionId.trim()
+        ? body.sessionId.trim()
+        : typeof session?.esvp?.currentSessionId === 'string' && session.esvp.currentSessionId
+          ? session.esvp.currentSessionId
+          : typeof session?.esvp?.network?.sourceSessionId === 'string' && session.esvp.network.sourceSessionId
+            ? session.esvp.network.sourceSessionId
+            : '';
+
+    if (!sessionId) {
+      const created = await createESVPSession(
+        {
+          executor,
+          deviceId: String(session.deviceId || ''),
+          meta: {
+            source: 'applab-discovery-external-trace',
+            recording_id: String(session.id || id),
+            recording_name: String(session.name || `Recording ${id}`),
+            ...(appId ? { appId, app_id: appId } : {}),
+          },
+        },
+        serverUrl
+      );
+      sessionId = String(created?.session?.id || created?.id || '');
+    }
+
+    if (!sessionId) {
+      throw new Error('Failed to create an ESVP session for the external trace.');
+    }
+
+    await attachESVPNetworkTrace(
+      sessionId,
+      {
+        trace_kind: traceKind,
+        label: typeof body?.label === 'string' && body.label.trim() ? body.label.trim() : 'external-trace',
+        payload,
+      },
+      serverUrl
+    );
+
+    const networkData = await collectESVPSessionNetworkData(sessionId, serverUrl);
+    session.networkEntries = networkData.networkEntries;
+    session.networkCapture = networkData.networkCapture;
+    session.esvp = {
+      ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
+      currentSessionId: sessionId,
+      executor,
+      network: {
+        ...(session?.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object'
+          ? session.esvp.network
+          : {}),
+        sourceSessionId: sessionId,
+        captureStatus: 'attached',
+        traceKinds: networkData.traceKinds,
+        entryCount: networkData.networkEntries.length,
+        managedProxy: networkData.networkState?.managed_proxy ?? session?.esvp?.network?.managedProxy ?? null,
+        captureProxy: session?.esvp?.network?.captureProxy || null,
+        activeProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
+        effectiveProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
+        configuredAt: networkData.networkState?.configured_at || null,
+        clearedAt: networkData.networkState?.cleared_at || null,
+        lastError: networkData.networkState?.last_error || null,
+        syncedAt: new Date().toISOString(),
+      },
+    };
+
+    await writeMobileRecordingSessionData(id, session);
+    await touchProjectUpdatedAt(id).catch(() => {});
+
+    return c.json({
+      success: true,
+      sessionId,
+      networkEntries: networkData.networkEntries,
+      networkCapture: networkData.networkCapture,
+      traceKinds: networkData.traceKinds,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/testing/mobile/recordings/:id/esvp/sync-network', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
+    const session = await readMobileRecordingSessionData(id);
+    const preferredSessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+    const validation = session?.esvp && typeof session.esvp === 'object' ? session.esvp.validation : null;
+    const sessionId =
+      preferredSessionId ||
+      (validation && typeof validation.sourceSessionId === 'string' ? validation.sourceSessionId : '') ||
+      (session?.esvp && typeof session.esvp.currentSessionId === 'string' ? session.esvp.currentSessionId : '');
+
+    if (!sessionId) {
+      return c.json({ error: 'Nenhuma sessão ESVP associada encontrada para sincronizar rede.' }, 400);
+    }
+
+    const networkData = await collectESVPSessionNetworkData(sessionId, serverUrl);
+    session.networkEntries = networkData.networkEntries;
+    session.networkCapture = networkData.networkCapture;
+    session.esvp = {
+      ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
+      network: {
+        ...(session?.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object'
+          ? session.esvp.network
+          : {}),
+        sourceSessionId: sessionId,
+        traceKinds: networkData.traceKinds,
+        syncedAt: new Date().toISOString(),
+        entryCount: networkData.networkEntries.length,
+      },
+    };
+
+    await writeMobileRecordingSessionData(id, session);
+    await touchProjectUpdatedAt(id).catch(() => {});
+
+    return c.json({
+      success: true,
+      sessionId,
+      networkEntries: networkData.networkEntries,
+      networkCapture: networkData.networkCapture,
+      traceKinds: networkData.traceKinds,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -6151,10 +7376,23 @@ async function runOCRInBackground(
 ): Promise<void> {
   console.log(`[BackgroundOCR] Starting analysis for project ${projectId} with ${screenshotFiles.length} screenshots`);
 
-  const broadcastProgress = (step: string, status: string, detail?: string, error?: string) => {
-    broadcastToClients({
-      type: 'analysisProgress',
-      data: { projectId, step, status, detail, error }
+  const broadcastProgress = (
+    step: string,
+    status: AnalysisStepStatus,
+    detail?: string,
+    error?: string,
+    completedUnits?: number | null,
+    totalUnits?: number | null
+  ) => {
+    setProjectAnalysisProgress({
+      projectId,
+      flow: 'mobile',
+      step,
+      status,
+      detail,
+      error,
+      completedUnits,
+      totalUnits,
     });
   };
 
@@ -6163,10 +7401,23 @@ async function runOCRInBackground(
     const { join } = await import('node:path');
 
     // Step 1: OCR
-    broadcastProgress('ocr', 'running', `Processing ${screenshotFiles.length} screenshots...`);
+    broadcastProgress('ocr', 'running', `Processing 0/${screenshotFiles.length} screenshots...`, undefined, 0, screenshotFiles.length);
 
     const fullPaths = screenshotFiles.map(f => join(screenshotsDir, f));
-    const ocrResult = await recognizeTextBatch(fullPaths, { recognitionLevel: 'accurate' });
+    const ocrResult = await recognizeTextBatch(
+      fullPaths,
+      { recognitionLevel: 'accurate' },
+      (progress) => {
+        broadcastProgress(
+          'ocr',
+          'running',
+          `Processing ${progress.current}/${progress.total} screenshots...`,
+          undefined,
+          progress.current,
+          progress.total
+        );
+      }
+    );
 
     let ocrText = '';
     let aiSummary = '';
@@ -6194,7 +7445,7 @@ async function runOCRInBackground(
     if (ocrResult.success && ocrResult.totalText) {
       ocrText = ocrResult.totalText;
       console.log(`[BackgroundOCR] Extracted ${ocrText.length} characters from ${fullPaths.length} screenshots`);
-      broadcastProgress('ocr', 'done', `Extracted ${ocrText.length} characters`);
+      broadcastProgress('ocr', 'done', `Extracted ${ocrText.length} characters`, undefined, fullPaths.length, fullPaths.length);
 
       // Step 2: AI Summary
       broadcastProgress('summary', 'running', 'Connecting to LLM provider...');
@@ -6224,7 +7475,7 @@ async function runOCRInBackground(
     } else {
       aiSummary = `Analyzed ${fullPaths.length} screenshots. No text detected via OCR.`;
       console.log('[BackgroundOCR] No text found in screenshots');
-      broadcastProgress('ocr', 'done', 'No text detected');
+      broadcastProgress('ocr', 'done', 'No text detected', undefined, fullPaths.length, fullPaths.length);
       broadcastProgress('summary', 'skipped', 'Skipped — no text to analyze');
     }
 
@@ -6275,6 +7526,29 @@ async function runOCRInBackground(
       broadcastProgress('actions', 'skipped', 'Not enough screenshots for action detection');
     }
 
+    const recordingDir = join(screenshotsDir, '..');
+    let iconCoverPath: string | null = null;
+    try {
+      const sessionPath = join(recordingDir, 'session.json');
+      if (existsSync(sessionPath)) {
+        const sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
+        if (
+          (sessionData?.platform === 'ios' || sessionData?.platform === 'android')
+          && typeof sessionData?.deviceId === 'string'
+        ) {
+          iconCoverPath = await createMobileAppIconCover({
+            platform: sessionData.platform,
+            deviceId: sessionData.deviceId,
+            appId: typeof sessionData.appId === 'string' ? sessionData.appId : null,
+            outputDir: recordingDir,
+            adbPath: ADB_PATH,
+          });
+        }
+      }
+    } catch (iconError) {
+      console.warn('[BackgroundOCR] Mobile icon cover generation failed:', iconError);
+    }
+
     // Step 4: Save
     broadcastProgress('save', 'running', 'Saving results to database...');
 
@@ -6286,12 +7560,22 @@ async function runOCRInBackground(
       ocrConfidence,
       aiSummary,
       frameCount: detectedActionsCount > 0 ? detectedActionsCount : undefined,
+      ...(iconCoverPath ? { thumbnailPath: iconCoverPath } : {}),
       updatedAt: new Date()
     }).where(eq(projects.id, projectId));
 
     broadcastProgress('save', 'done', 'Analysis complete');
 
     console.log(`[BackgroundOCR] Analysis complete for project ${projectId}`);
+    setProjectAnalysisProgress({
+      projectId,
+      flow: 'mobile',
+      step: 'done',
+      status: 'done',
+      detail: 'Analysis complete',
+      completedUnits: 1,
+      totalUnits: 1,
+    });
     broadcastToClients({
       type: 'projectAnalysisUpdated',
       data: { projectId, status: 'analyzed' }
@@ -7215,6 +8499,117 @@ app.get('/api/info', async (c) => {
 });
 
 // ============================================================================
+// NETWORK PROXY SAFETY SETTINGS API
+// ============================================================================
+
+type AppLabNetworkProxySettings = {
+  emergencyLockEnabled: boolean;
+};
+
+const DEFAULT_APP_LAB_NETWORK_PROXY_SETTINGS: AppLabNetworkProxySettings = {
+  emergencyLockEnabled: false,
+};
+
+let appLabNetworkProxySettings: AppLabNetworkProxySettings = {
+  ...DEFAULT_APP_LAB_NETWORK_PROXY_SETTINGS,
+};
+
+function sanitizeAppLabNetworkProxySettings(value: unknown): AppLabNetworkProxySettings {
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    emergencyLockEnabled: record.emergencyLockEnabled === true,
+  };
+}
+
+function getAppLabNetworkProxySettingsPath(): string {
+  return join(DATA_DIR, 'network-proxy-settings.json');
+}
+
+function resolveAppLabNetworkProxyTimeoutMs(): number | null {
+  const raw = typeof process.env.DISCOVERYLAB_NETWORK_PROXY_MAX_DURATION_MS === 'string'
+    ? process.env.DISCOVERYLAB_NETWORK_PROXY_MAX_DURATION_MS.trim()
+    : '';
+  if (!raw) return 15 * 60 * 1000;
+  const durationMs = Number(raw);
+  if (!Number.isFinite(durationMs)) return 15 * 60 * 1000;
+  if (durationMs <= 0) return null;
+  return Math.max(30000, Math.min(24 * 60 * 60 * 1000, Math.round(durationMs)));
+}
+
+function buildAppLabNetworkProxySettingsPayload(extra: Record<string, unknown> = {}) {
+  const activeProxies = listLocalCaptureProxyStates();
+  return {
+    ...appLabNetworkProxySettings,
+    autoDisableOnServerShutdown: true,
+    autoDisableTimeoutMs: resolveAppLabNetworkProxyTimeoutMs(),
+    activeProxyCount: activeProxies.filter((proxy) => proxy.active).length,
+    activeProxies,
+    ...extra,
+  };
+}
+
+function persistAppLabNetworkProxySettings() {
+  writeFileSync(getAppLabNetworkProxySettingsPath(), JSON.stringify(appLabNetworkProxySettings, null, 2));
+}
+
+(async () => {
+  try {
+    const settingsPath = getAppLabNetworkProxySettingsPath();
+    if (existsSync(settingsPath)) {
+      appLabNetworkProxySettings = {
+        ...DEFAULT_APP_LAB_NETWORK_PROXY_SETTINGS,
+        ...sanitizeAppLabNetworkProxySettings(JSON.parse(readFileSync(settingsPath, 'utf8'))),
+      };
+      console.log('[Network Proxy Settings] Loaded from file');
+    }
+  } catch {
+    console.log('[Network Proxy Settings] No saved settings found');
+  }
+})();
+
+app.get('/api/settings/network-proxy', async (c) => {
+  return c.json(buildAppLabNetworkProxySettingsPayload());
+});
+
+app.put('/api/settings/network-proxy', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    appLabNetworkProxySettings = {
+      ...appLabNetworkProxySettings,
+      ...sanitizeAppLabNetworkProxySettings(body),
+    };
+    persistAppLabNetworkProxySettings();
+
+    const finalization = appLabNetworkProxySettings.emergencyLockEnabled
+      ? await finalizeAllLocalCaptureProxySessions({ reason: 'settings-emergency-lock' })
+      : null;
+
+    return c.json(buildAppLabNetworkProxySettingsPayload({
+      success: true,
+      finalization,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/settings/network-proxy/emergency-stop', async (c) => {
+  try {
+    const finalization = await finalizeAllLocalCaptureProxySessions({ reason: 'manual-emergency-stop' });
+    return c.json(buildAppLabNetworkProxySettingsPayload({
+      success: true,
+      finalization,
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// ============================================================================
 // LLM SETTINGS API
 // ============================================================================
 
@@ -7662,15 +9057,20 @@ app.post('/api/recorder/stop', async (c) => {
         if (existsSync(sessionPath)) {
           const sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
           const sessionName = sessionData?.name || sessionData?.session?.name || `Recording ${recordingId}`;
+          const recordingUrl = getRecordingSessionFinalUrl(sessionData);
+          const faviconCoverPath = await createWebFaviconCover({
+            pageUrl: recordingUrl,
+            outputDir: recordingDir,
+          });
 
           const sqlite = getSqlite();
           projectId = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           const now = Date.now();
 
           sqlite.prepare(`
-            INSERT INTO projects (id, name, video_path, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `).run(projectId, sessionName, recordingDir, 'ready', now, now);
+            INSERT INTO projects (id, name, video_path, platform, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(projectId, sessionName, recordingDir, 'web', 'ready', now, now);
 
           // Copy screenshots to project frames directory
           const framesDir = join(DATA_DIR, 'projects', projectId, 'frames');
@@ -7704,7 +9104,13 @@ app.post('/api/recorder/stop', async (c) => {
 
             sqlite.prepare(`
               UPDATE projects SET thumbnail_path = ?, frame_count = ?, updated_at = ? WHERE id = ?
-            `).run(thumbnailPath, frameCount, now, projectId);
+            `).run(faviconCoverPath || thumbnailPath, frameCount, now, projectId);
+          }
+
+          if (faviconCoverPath && !thumbnailPath) {
+            sqlite.prepare(`
+              UPDATE projects SET thumbnail_path = ?, updated_at = ? WHERE id = ?
+            `).run(faviconCoverPath, now, projectId);
           }
 
           // Trigger OCR if we have screenshots
@@ -8159,6 +9565,11 @@ app.post('/api/recorder/recordings/:id/create-project', async (c) => {
 
     const sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
     const sessionName = sessionData?.name || sessionData?.session?.name || `Recording ${id}`;
+    const recordingUrl = getRecordingSessionFinalUrl(sessionData);
+    const faviconCoverPath = await createWebFaviconCover({
+      pageUrl: recordingUrl,
+      outputDir: recordingDir,
+    });
 
     // Create project in database
     const sqlite = getSqlite();
@@ -8166,12 +9577,13 @@ app.post('/api/recorder/recordings/:id/create-project', async (c) => {
     const now = Date.now();
 
     sqlite.prepare(`
-      INSERT INTO projects (id, name, video_path, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO projects (id, name, video_path, platform, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       projectId,
       sessionName,
       recordingDir,
+      'web',
       'ready',
       now,
       now
@@ -8218,7 +9630,13 @@ app.post('/api/recorder/recordings/:id/create-project', async (c) => {
       // Update project with thumbnail and frame count
       sqlite.prepare(`
         UPDATE projects SET thumbnail_path = ?, frame_count = ?, updated_at = ? WHERE id = ?
-      `).run(thumbnailPath, frameCount, now, projectId);
+      `).run(faviconCoverPath || thumbnailPath, frameCount, now, projectId);
+    }
+
+    if (faviconCoverPath && !thumbnailPath) {
+      sqlite.prepare(`
+        UPDATE projects SET thumbnail_path = ?, updated_at = ? WHERE id = ?
+      `).run(faviconCoverPath, now, projectId);
     }
 
     // Trigger OCR analysis if we have screenshots
@@ -8325,14 +9743,22 @@ async function captureAndBroadcastScreen(): Promise<void> {
  */
 function getIOSForegroundAppId(deviceId: string): string | null {
   try {
-    // Try to get the foreground app via launchctl list
+    // Try to infer the frontmost app from all UIKitApplication entries.
     const output = execSync(
-      `xcrun simctl spawn "${deviceId}" launchctl list 2>/dev/null | grep UIKitApplication | head -1`,
+      `xcrun simctl spawn "${deviceId}" launchctl list 2>/dev/null | grep UIKitApplication`,
       { encoding: 'utf8', timeout: 3000 }
     );
-    // Parse bundle ID from output like: "12345  0  UIKitApplication:com.apple.mobilesafari[0x123]"
-    const match = output.match(/UIKitApplication:([^\[\s]+)/);
-    return match ? match[1].trim() : null;
+    const matches = [...output.matchAll(/UIKitApplication:([^\[\s]+)/g)]
+      .map((match) => match[1]?.trim())
+      .filter((value): value is string => !!value);
+
+    for (const bundleId of matches) {
+      if (!isIgnoredMobileAppId(bundleId)) {
+        return bundleId;
+      }
+    }
+
+    return matches[0] || null;
   } catch {
     return null;
   }
@@ -8358,6 +9784,14 @@ function getAndroidForegroundAppId(deviceId: string): string | null {
   } catch {
     return null;
   }
+}
+
+function getForegroundAppIdForPlatform(platform: 'ios' | 'android', deviceId: string): string | null {
+  const detected = platform === 'ios'
+    ? getIOSForegroundAppId(deviceId)
+    : getAndroidForegroundAppId(deviceId);
+
+  return isIgnoredMobileAppId(detected) ? null : detected;
 }
 
 /**
@@ -8555,12 +9989,474 @@ app.get('/api/live-stream/status', async (c) => {
 });
 
 // ============================================================================
+// REMOTION TEMPLATES
+// ============================================================================
+
+// Get template status
+app.get('/api/templates/status', async (c) => {
+  const installed = isTemplatesInstalled();
+  const templates = getAvailableTemplates();
+  return c.json({
+    available: installed,
+    templates: templates.map(t => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      resolution: `${t.width}x${t.height}`,
+      fps: t.fps,
+    })),
+  });
+});
+
+// Assemble template props for a project
+app.post('/api/templates/props', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId, templateId } = body;
+
+    if (!projectId || !templateId) {
+      return c.json({ error: 'projectId and templateId are required' }, 400);
+    }
+
+    const db = getDatabase();
+    const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
+    if (!project) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const props = assembleTemplateProps(project);
+    if (!props) {
+      return c.json({ error: 'Project has no video to render' }, 400);
+    }
+
+    return c.json({ props });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Get all captured network routes for route checklist
+app.get('/api/projects/:id/network-routes', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const db = getDatabase();
+    const project = db.select().from(projects).where(eq(projects.id, id)).get();
+    if (!project) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const networkEntries = loadProjectNetworkData(project);
+    if (!networkEntries || networkEntries.length === 0) {
+      return c.json({ routes: [] });
+    }
+
+    // Group by METHOD /pathname
+    const groups = new Map<string, any[]>();
+    for (const entry of networkEntries) {
+      let pathname = (entry as any).pathname || '/';
+      if (!pathname && entry.url) {
+        try { pathname = new URL(entry.url).pathname; } catch { pathname = entry.url; }
+      }
+      const method = (entry.method || 'GET').toUpperCase();
+      const key = `${method} ${pathname}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(entry);
+    }
+
+    // Load current terminalTabs to mark selected
+    const editedContent = loadEditedTemplateContent(id);
+    const currentLabels = new Set((editedContent?.terminalTabs || []).map((t: any) => t.label));
+
+    // Sort by count desc
+    const routes = [...groups.entries()]
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([key, entries]) => {
+        const [method, ...routeParts] = key.split(' ');
+        const route = routeParts.join(' ');
+        return {
+          label: key,
+          method,
+          route,
+          count: entries.length,
+          selected: currentLabels.has(key),
+          content: JSON.stringify(
+            entries.slice(0, 5).map((e: any) => ({
+              status: e.status,
+              durationMs: e.durationMs,
+              url: e.pathname || e.url,
+            })),
+            null,
+            2
+          ),
+        };
+      });
+
+    return c.json({ routes });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Update editable terminal content for a project
+app.put('/api/projects/:id/template-content', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { title, titleLines, terminalTabs, showcaseMode } = body;
+
+    const db = getDatabase();
+    const project = db.select().from(projects).where(eq(projects.id, id)).get();
+    if (!project) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const projectDir = join(PROJECTS_DIR, id);
+    if (!existsSync(projectDir)) {
+      mkdirSync(projectDir, { recursive: true });
+    }
+    const contentPath = join(projectDir, 'template-content.json');
+    writeFileSync(contentPath, JSON.stringify({
+      title,
+      titleLines,
+      terminalTabs,
+      showcaseMode,
+      updatedAt: new Date().toISOString(),
+    }));
+
+    return c.json({ success: true, message: 'Template content saved' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Start template render
+app.post('/api/templates/render', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId, templateId } = body;
+
+    if (!projectId || !templateId) {
+      return c.json({ error: 'projectId and templateId are required' }, 400);
+    }
+
+    if (!isTemplatesInstalled()) {
+      return c.json({ error: 'Templates not installed' }, 400);
+    }
+
+    const db = getDatabase();
+    const project = db.select().from(projects).where(eq(projects.id, projectId)).get();
+    if (!project) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const props = assembleTemplateProps(project);
+    if (!props) {
+      return c.json({ error: 'Project has no video to render' }, 400);
+    }
+
+    const job = await startRender(projectId, templateId as TemplateId, props, (progress) => {
+      broadcastToClients({
+        type: 'templateRenderProgress',
+        data: { projectId, templateId, progress },
+      });
+    });
+
+    // Broadcast completion when done
+    const checkCompletion = setInterval(() => {
+      const currentJob = getRenderJob(job.id);
+      if (currentJob && (currentJob.status === 'done' || currentJob.status === 'error')) {
+        clearInterval(checkCompletion);
+        broadcastToClients({
+          type: 'templateRenderComplete',
+          data: {
+            projectId,
+            templateId,
+            status: currentJob.status,
+            outputPath: currentJob.outputPath,
+            error: currentJob.error,
+          },
+        });
+      }
+    }, 1000);
+
+    return c.json({ jobId: job.id, status: job.status });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Get render job status
+app.get('/api/templates/render/:jobId', async (c) => {
+  const jobId = c.req.param('jobId');
+  const job = getRenderJob(jobId);
+  if (!job) {
+    return c.json({ error: 'Render job not found' }, 404);
+  }
+  return c.json({
+    status: job.status,
+    progress: job.progress,
+    outputPath: job.outputPath,
+    error: job.error,
+  });
+});
+
+// Serve template bundle static files (for @remotion/player iframe)
+app.get('/api/templates/player/*', async (c) => {
+  const bundlePath = getBundlePath();
+  if (!bundlePath) {
+    return c.json({ error: 'Templates not installed' }, 404);
+  }
+
+  const requestedPath = c.req.path.replace('/api/templates/player/', '');
+  const filePath = join(bundlePath, requestedPath || 'index.html');
+
+  if (!existsSync(filePath)) {
+    return c.json({ error: 'File not found' }, 404);
+  }
+
+  const content = readFileSync(filePath);
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  const contentTypes: Record<string, string> = {
+    html: 'text/html',
+    js: 'application/javascript',
+    css: 'text/css',
+    json: 'application/json',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    svg: 'image/svg+xml',
+    woff2: 'font/woff2',
+    woff: 'font/woff',
+    mp4: 'video/mp4',
+  };
+  const contentType = contentTypes[ext || ''] || 'application/octet-stream';
+
+  return new Response(content, {
+    headers: { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' },
+  });
+});
+
+// Template preference (favorite template)
+app.put('/api/settings/template-preference', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { favoriteTemplate } = body;
+
+    const db = getDatabase();
+    const sqlite = getSqlite();
+
+    // Use settings table for template preference
+    sqlite.exec(`INSERT OR REPLACE INTO settings (key, value) VALUES ('favoriteTemplate', '${favoriteTemplate || ''}')`);
+
+    return c.json({ success: true, favoriteTemplate });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get('/api/settings/template-preference', async (c) => {
+  try {
+    const sqlite = getSqlite();
+    const row = sqlite.prepare(`SELECT value FROM settings WHERE key = 'favoriteTemplate'`).get() as any;
+    return c.json({
+      favoriteTemplate: row?.value || null,
+    });
+  } catch {
+    return c.json({ favoriteTemplate: null });
+  }
+});
+
+/**
+ * Assemble TemplateProps from a project record
+ */
+function assembleTemplateProps(project: any): TemplateProps | null {
+  const resolvedVideoPath = resolveVideoPath(project.videoPath);
+  if (!resolvedVideoPath || !existsSync(resolvedVideoPath)) {
+    return null;
+  }
+
+  try {
+    if (statSync(resolvedVideoPath).isDirectory()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  // Extract first sentence from aiSummary for title
+  const defaultTitle = extractFirstSentence(project.aiSummary || project.name || 'App Recording');
+  const subtitle = project.name || undefined;
+
+  // Try to load edited template content first
+  const editedContent = loadEditedTemplateContent(project.id);
+
+  let title = defaultTitle;
+  let titleLines: string[] | undefined;
+  let terminalTabs: TerminalTab[] = [];
+  let hasNetworkData = false;
+  let showcaseMode: 'artistic' | 'terminal' | undefined;
+
+  if (editedContent) {
+    title = editedContent.title || defaultTitle;
+    titleLines = editedContent.titleLines;
+    terminalTabs = editedContent.terminalTabs || [];
+    hasNetworkData = terminalTabs.length > 0;
+    showcaseMode = editedContent.showcaseMode;
+  } else {
+    // Try to load network data from session.json
+    const networkEntries = loadProjectNetworkData(project);
+
+    if (networkEntries && networkEntries.length > 0) {
+      hasNetworkData = true;
+      terminalTabs = groupNetworkIntoTabs(networkEntries);
+    }
+    // No fallback — if no network data, terminalTabs stays empty
+  }
+
+  // Get video duration (approximate from project data or default)
+  const videoDuration = project.duration || 10;
+
+  // Determine platform
+  const platform = (project.platform === 'ios' || project.platform === 'android' || project.platform === 'web')
+    ? project.platform
+    : 'web';
+
+  // Use full HTTP URL so Remotion's headless browser can fetch the video
+  const videoUrl = `http://localhost:${currentServerPort}/api/file?path=${encodeURIComponent(resolvedVideoPath)}`;
+
+  return {
+    videoUrl,
+    videoDuration,
+    platform,
+    title,
+    titleLines,
+    subtitle,
+    terminalTabs,
+    hasNetworkData,
+    showcaseMode,
+  };
+}
+
+function extractFirstSentence(text: string): string {
+  if (!text) return 'App Recording';
+  // Match first sentence ending with . ! or ?
+  const match = text.match(/^[^.!?]*[.!?]/);
+  if (match) return match[0].trim();
+  // If no sentence terminator, take first 80 chars
+  return text.substring(0, 80).trim();
+}
+
+function groupNetworkIntoTabs(entries: CapturedNetworkEntry[]): TerminalTab[] {
+  const groups = new Map<string, CapturedNetworkEntry[]>();
+
+  for (const entry of entries) {
+    // Build route key from method + pathname
+    let pathname = entry.pathname || '/';
+    if (!pathname && entry.url) {
+      try { pathname = new URL(entry.url).pathname; } catch { pathname = entry.url; }
+    }
+    const method = (entry.method || 'GET').toUpperCase();
+    const key = `${method} ${pathname}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key)!.push(entry);
+  }
+
+  // Sort by count descending, take top 8
+  const sorted = [...groups.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 8);
+
+  return sorted.map(([key, groupEntries]) => {
+    const [method, ...routeParts] = key.split(' ');
+    const route = routeParts.join(' ');
+    const maxContentChars = 300;
+    const fullContent = JSON.stringify(
+      groupEntries.map((e) => ({
+        status: e.status,
+        durationMs: e.durationMs,
+        responseSize: (e as any).responseSize || undefined,
+        url: e.pathname || e.url,
+      })),
+      null,
+      2
+    );
+    // Truncate content to fit within typewriter timing
+    const content = fullContent.length > maxContentChars
+      ? fullContent.slice(0, maxContentChars) + '\n  ...\n]'
+      : fullContent;
+    return { label: key, method, route, content };
+  });
+}
+
+function loadEditedTemplateContent(projectId: string): { title?: string; titleLines?: string[]; terminalTabs?: TerminalTab[]; showcaseMode?: 'artistic' | 'terminal' } | null {
+  const contentPath = join(PROJECTS_DIR, projectId, 'template-content.json');
+  if (!existsSync(contentPath)) return null;
+  try {
+    const raw = readFileSync(contentPath, 'utf-8');
+    const data = JSON.parse(raw);
+    return {
+      title: data.title,
+      titleLines: data.titleLines,
+      terminalTabs: data.terminalTabs,
+      showcaseMode: data.showcaseMode,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function loadProjectNetworkData(project: any): CapturedNetworkEntry[] | null {
+  // Source 1: session.json networkEntries for recordings with either legacy directory videoPath
+  // or a direct file path.
+  const recordingDir = resolveRecordingBaseDir(project.videoPath);
+  if (recordingDir) {
+    const sessionPath = join(recordingDir, 'session.json');
+    if (existsSync(sessionPath)) {
+      try {
+        const session = JSON.parse(readFileSync(sessionPath, 'utf-8'));
+        if (session.networkEntries && Array.isArray(session.networkEntries) && session.networkEntries.length > 0) {
+          return session.networkEntries;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Source 2: ESVP network data (if available as JSON string in project)
+  try {
+    if ((project as any).esvpData) {
+      const esvpData = typeof (project as any).esvpData === 'string'
+        ? JSON.parse((project as any).esvpData)
+        : (project as any).esvpData;
+      if (esvpData?.network && Array.isArray(esvpData.network) && esvpData.network.length > 0) {
+        return esvpData.network;
+      }
+    }
+  } catch { /* ignore */ }
+
+  return null;
+}
+
+// ============================================================================
 // SERVER START
 // ============================================================================
 let serverInstance: any = null;
 let wss: WebSocketServer | null = null;
+let currentServerPort: number = 3847;
+
+export function getServerPort(): number {
+  return currentServerPort;
+}
 
 export async function startServer(port: number = 3847): Promise<void> {
+  currentServerPort = port;
   // Initialize database
   getDatabase();
 

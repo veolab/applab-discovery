@@ -8,6 +8,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import open from 'open';
 import { APP_VERSION } from './core/appVersion.js';
+import { buildAppLabNetworkProfile } from './core/integrations/esvp-network-profile.js';
 
 const program = new Command();
 
@@ -18,6 +19,536 @@ program
   .name('discoverylab')
   .description('AI-powered app testing & evidence generator - Claude Code Plugin')
   .version(APP_VERSION);
+
+function printCliOutput(value: unknown): void {
+  if (typeof value === 'string') {
+    console.log(value);
+    return;
+  }
+  console.log(JSON.stringify(value, null, 2));
+}
+
+function failCli(message: string): never {
+  throw new Error(message);
+}
+
+async function readJsonSource(json?: string, filePath?: string, label = 'payload'): Promise<any> {
+  if (json && filePath) {
+    failCli(`Use either --json or --file for ${label}, not both.`);
+  }
+
+  if (json) {
+    try {
+      return JSON.parse(json);
+    } catch (error) {
+      failCli(`Invalid ${label} JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (filePath) {
+    const { readFile } = await import('node:fs/promises');
+    const { resolve } = await import('node:path');
+    const raw = await readFile(resolve(process.cwd(), filePath), 'utf8');
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+
+  return null;
+}
+
+async function withESVPCli(action: () => Promise<unknown>): Promise<void> {
+  try {
+    const result = await action();
+    printCliOutput(result);
+  } catch (error) {
+    console.error(chalk.red(`  ESVP command failed: ${error instanceof Error ? error.message : String(error)}`));
+    process.exit(1);
+  }
+}
+
+async function getESVPBaseResult(serverUrl?: string): Promise<{ serverUrl: string; connectionMode: 'remote' | 'local' }> {
+  const { getESVPConnection } = await import('./core/integrations/esvp.js');
+  const connection = await getESVPConnection(serverUrl);
+  return {
+    serverUrl: connection.serverUrl,
+    connectionMode: connection.mode,
+  };
+}
+
+function executorToPlatform(executor?: string): 'ios' | 'android' | undefined {
+  if (executor === 'ios-sim' || executor === 'maestro-ios') return 'ios';
+  if (executor === 'adb') return 'android';
+  return undefined;
+}
+
+const esvp = program
+  .command('esvp')
+  .description('Access the public ESVP protocol and runtime from the CLI');
+
+esvp
+  .command('status')
+  .description('Check the configured ESVP server health')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (options) => {
+    await withESVPCli(async () => {
+      const { getESVPHealth } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        health: await getESVPHealth(options.server),
+      };
+    });
+  });
+
+esvp
+  .command('devices')
+  .description('List ESVP-visible devices')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('-p, --platform <platform>', 'adb | ios-sim | maestro-ios | all', 'all')
+  .action(async (options) => {
+    await withESVPCli(async () => {
+      const { listESVPDevices } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        devices: await listESVPDevices(options.platform, options.server),
+      };
+    });
+  });
+
+esvp
+  .command('sessions')
+  .description('List public ESVP sessions')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (options) => {
+    await withESVPCli(async () => {
+      const { listESVPSessions } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await listESVPSessions(options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('create')
+  .description('Create a new ESVP session')
+  .requiredOption('-e, --executor <executor>', 'fake | adb | ios-sim | maestro-ios')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('-d, --device-id <id>', 'Device or simulator ID')
+  .option('--meta-json <json>', 'Session metadata as JSON')
+  .option('--meta-file <path>', 'Path to session metadata JSON')
+  .option('--crash-clip-json <json>', 'Crash clip config as JSON')
+  .option('--crash-clip-file <path>', 'Path to crash clip config JSON')
+  .option('--with-network', 'Auto-configure the default App Lab external-proxy profile after creating the session')
+  .action(async (options) => {
+    await withESVPCli(async () => {
+      const { createESVPSession, configureESVPNetwork } = await import('./core/integrations/esvp.js');
+      const meta = await readJsonSource(options.metaJson, options.metaFile, 'meta');
+      const crashClip = await readJsonSource(options.crashClipJson, options.crashClipFile, 'crash clip');
+      const createResult = await createESVPSession(
+        {
+          executor: options.executor,
+          ...(options.deviceId ? { deviceId: options.deviceId } : {}),
+          ...(meta ? { meta } : {}),
+          ...(crashClip ? { crash_clip: crashClip } : {}),
+        },
+        options.server
+      );
+
+      let networkConfigured = null;
+      if (options.withNetwork) {
+        const sessionId = String(createResult?.session?.id || createResult?.id || '');
+        if (sessionId) {
+          networkConfigured = await configureESVPNetwork(
+            sessionId,
+            buildAppLabNetworkProfile(
+              {
+                enabled: true,
+                mode: 'external-proxy',
+                profile: 'applab-standard-capture',
+                label: 'App Lab Standard Capture',
+              },
+              {
+                platform: executorToPlatform(options.executor),
+                deviceId: options.deviceId,
+              }
+            ) || {},
+            options.server
+          ).catch((err: Error) => ({ error: err.message }));
+        }
+      }
+
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...createResult,
+        ...(networkConfigured ? { networkConfigured } : {}),
+      };
+    });
+  });
+
+esvp
+  .command('get <sessionId>')
+  .description('Get a public ESVP session summary')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { getESVPSession } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await getESVPSession(sessionId, options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('inspect <sessionId>')
+  .description('Inspect a session and optionally load transcript and artifacts')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('--transcript', 'Include transcript')
+  .option('--artifacts', 'Include artifacts')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { inspectESVPSession } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await inspectESVPSession(
+          sessionId,
+          {
+            includeTranscript: options.transcript === true,
+            includeArtifacts: options.artifacts === true,
+          },
+          options.server
+        )),
+      };
+    });
+  });
+
+esvp
+  .command('transcript <sessionId>')
+  .description('Fetch the canonical session transcript')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { getESVPTranscript } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        sessionId,
+        transcript: (await getESVPTranscript(sessionId, options.server))?.events || [],
+      };
+    });
+  });
+
+esvp
+  .command('artifacts <sessionId>')
+  .description('List session artifacts')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { listESVPArtifacts } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        sessionId,
+        artifacts: (await listESVPArtifacts(sessionId, options.server))?.artifacts || [],
+      };
+    });
+  });
+
+esvp
+  .command('artifact <sessionId> <artifactPath>')
+  .description('Read a public artifact payload')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, artifactPath, options) => {
+    await withESVPCli(async () => {
+      const { getESVPArtifactContent } = await import('./core/integrations/esvp.js');
+      return await getESVPArtifactContent(sessionId, artifactPath, options.server);
+    });
+  });
+
+esvp
+  .command('actions <sessionId>')
+  .description('Run public ESVP actions inside a session')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('--actions-json <json>', 'JSON array of ESVP actions')
+  .option('--actions-file <path>', 'Path to a JSON file with ESVP actions')
+  .option('--finish', 'Finish the session after actions')
+  .option('--capture-logcat', 'Capture logcat on finish when supported')
+  .option('--checkpoint-after-each', 'Set checkpointAfter on every action')
+  .option('--with-network', 'Auto-configure the default App Lab external-proxy profile before running actions if not already configured')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { runESVPActions, getESVPSessionNetwork, configureESVPNetwork } = await import('./core/integrations/esvp.js');
+      const actions = await readJsonSource(options.actionsJson, options.actionsFile, 'actions');
+      if (!Array.isArray(actions) || actions.length === 0) {
+        failCli('Provide --actions-json or --actions-file with a non-empty array of ESVP actions.');
+      }
+
+      let networkConfigured = null;
+      if (options.withNetwork) {
+        const networkState = await getESVPSessionNetwork(sessionId, options.server).catch(() => null);
+        const hasActiveProfile = networkState?.network?.active_profile || networkState?.network?.effective_profile;
+        if (!hasActiveProfile) {
+          networkConfigured = await configureESVPNetwork(
+            sessionId,
+            buildAppLabNetworkProfile(
+              {
+                enabled: true,
+                mode: 'external-proxy',
+                profile: 'applab-standard-capture',
+                label: 'App Lab Standard Capture',
+              },
+              {
+                platform: executorToPlatform(typeof networkState?.session?.executor === 'string' ? networkState.session.executor : undefined),
+                deviceId: typeof networkState?.session?.device_id === 'string' ? networkState.session.device_id : undefined,
+              }
+            ) || {},
+            options.server
+          ).catch((err: Error) => ({ error: err.message }));
+        }
+      }
+
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(networkConfigured ? { networkConfigured } : {}),
+        ...(await runESVPActions(
+          sessionId,
+          {
+            actions,
+            finish: options.finish === true,
+            captureLogcat: options.captureLogcat === true,
+            checkpointAfterEach: options.checkpointAfterEach === true,
+          },
+          options.server
+        )),
+      };
+    });
+  });
+
+esvp
+  .command('checkpoint <sessionId>')
+  .description('Capture an ESVP checkpoint')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('-l, --label <label>', 'Checkpoint label')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { captureESVPCheckpoint } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await captureESVPCheckpoint(
+          sessionId,
+          {
+            ...(options.label ? { label: options.label } : {}),
+          },
+          options.server
+        )),
+      };
+    });
+  });
+
+esvp
+  .command('finish <sessionId>')
+  .description('Finish an ESVP session')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('--capture-logcat', 'Capture logcat on finish when supported')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { finishESVPSession } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await finishESVPSession(
+          sessionId,
+          {
+            captureLogcat: options.captureLogcat === true,
+          },
+          options.server
+        )),
+      };
+    });
+  });
+
+esvp
+  .command('preflight <sessionId>')
+  .description('Run preflight/bootstrap rules on an ESVP session')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('--policy <policy>', 'Preflight policy name (e.g. fresh_install)')
+  .option('--app-id <appId>', 'Target app ID')
+  .option('--json <json>', 'Preflight config as JSON string')
+  .option('--file <path>', 'Path to preflight config JSON file')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { runESVPPreflight } = await import('./core/integrations/esvp.js');
+      const fromSource = await readJsonSource(options.json, options.file, 'preflight config');
+      const config = {
+        ...(typeof fromSource === 'object' && fromSource ? fromSource : {}),
+        ...(options.policy ? { policy: options.policy } : {}),
+        ...(options.appId ? { appId: options.appId } : {}),
+      };
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await runESVPPreflight(sessionId, config, options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('replay-run <sessionId>')
+  .description('Replay a session to a new ESVP session')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('-e, --executor <executor>', 'fake | adb | ios-sim | maestro-ios')
+  .option('-d, --device-id <id>', 'Replay target device ID')
+  .option('--capture-logcat', 'Capture logcat on finish when supported')
+  .option('--meta-json <json>', 'Replay metadata as JSON')
+  .option('--meta-file <path>', 'Path to replay metadata JSON')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { replayESVPSession, getESVPReplayConsistency } = await import('./core/integrations/esvp.js');
+      const meta = await readJsonSource(options.metaJson, options.metaFile, 'replay meta');
+      const replay = await replayESVPSession(
+        sessionId,
+        {
+          ...(options.executor ? { executor: options.executor } : {}),
+          ...(options.deviceId ? { deviceId: options.deviceId } : {}),
+          ...(options.captureLogcat === true ? { captureLogcat: true } : {}),
+          ...(meta ? { meta } : {}),
+        },
+        options.server
+      );
+      const replaySessionId = replay?.replay_session?.id;
+      const replayConsistency = replaySessionId
+        ? (await getESVPReplayConsistency(replaySessionId, options.server)).replay_consistency
+        : null;
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...replay,
+        replayConsistency,
+      };
+    });
+  });
+
+esvp
+  .command('replay-validate <sessionId>')
+  .description('Validate whether a session supports public replay')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { validateESVPReplay } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await validateESVPReplay(sessionId, options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('replay-consistency <sessionId>')
+  .description('Inspect replay consistency for a replay session')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { getESVPReplayConsistency } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await getESVPReplayConsistency(sessionId, options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('network <sessionId>')
+  .description('Read the public network state for a session')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { getESVPSessionNetwork } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await getESVPSessionNetwork(sessionId, options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('network-configure <sessionId>')
+  .description('Apply a public ESVP network profile')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('--json <json>', 'Raw network profile JSON')
+  .option('--file <path>', 'Path to network profile JSON')
+  .option('--profile <name>', 'Profile name')
+  .option('--label <label>', 'Profile label')
+  .option('--connectivity <state>', 'online | offline | reset')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { configureESVPNetwork } = await import('./core/integrations/esvp.js');
+      const payload = (await readJsonSource(options.json, options.file, 'network profile')) || {};
+      const merged = {
+        ...(typeof payload === 'object' && payload ? payload : {}),
+        ...(options.profile ? { profile: options.profile } : {}),
+        ...(options.label ? { label: options.label } : {}),
+        ...(options.connectivity ? { connectivity: options.connectivity } : {}),
+      };
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await configureESVPNetwork(sessionId, merged, options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('network-clear <sessionId>')
+  .description('Clear the active ESVP network profile')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { clearESVPNetwork } = await import('./core/integrations/esvp.js');
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await clearESVPNetwork(sessionId, options.server)),
+      };
+    });
+  });
+
+esvp
+  .command('trace-attach <sessionId>')
+  .description('Attach a public network trace artifact to a session')
+  .requiredOption('--trace-kind <kind>', 'Trace kind, e.g. http_trace or har')
+  .option('-s, --server <url>', 'ESVP base URL')
+  .option('--json <json>', 'Trace payload JSON')
+  .option('--file <path>', 'Path to trace payload JSON/text')
+  .option('--label <label>', 'Trace label')
+  .option('--source <source>', 'Trace source')
+  .option('--request-id <id>', 'Correlated request ID')
+  .option('--method <method>', 'HTTP method')
+  .option('--url <url>', 'Request URL')
+  .option('--status-code <code>', 'HTTP status code')
+  .option('--format <format>', 'Payload format label')
+  .action(async (sessionId, options) => {
+    await withESVPCli(async () => {
+      const { attachESVPNetworkTrace } = await import('./core/integrations/esvp.js');
+      const payload = await readJsonSource(options.json, options.file, 'trace payload');
+      if (payload == null) {
+        failCli('Provide --json or --file with the trace payload to attach.');
+      }
+      return {
+        ...(await getESVPBaseResult(options.server)),
+        ...(await attachESVPNetworkTrace(
+          sessionId,
+          {
+            trace_kind: options.traceKind,
+            ...(options.label ? { label: options.label } : {}),
+            ...(options.source ? { source: options.source } : {}),
+            ...(options.requestId ? { request_id: options.requestId } : {}),
+            ...(options.method ? { method: options.method } : {}),
+            ...(options.url ? { url: options.url } : {}),
+            ...(options.statusCode ? { status_code: Number(options.statusCode) } : {}),
+            ...(options.format ? { format: options.format } : {}),
+            payload,
+          },
+          options.server
+        )),
+      };
+    });
+  });
 
 // ============================================================================
 // SERVE COMMAND
@@ -195,7 +726,19 @@ program
 
       // Import and start MCP server
       const { mcpServer } = await import('./mcp/server.js');
-      const { uiTools, projectTools, setupTools, captureTools, analyzeTools, canvasTools, exportTools, testingTools, integrationTools } = await import('./mcp/tools/index.js');
+      const {
+        uiTools,
+        projectTools,
+        setupTools,
+        captureTools,
+        analyzeTools,
+        canvasTools,
+        exportTools,
+        testingTools,
+        integrationTools,
+        taskHubTools,
+        esvpTools,
+      } = await import('./mcp/tools/index.js');
 
       // Register all tools
       mcpServer.registerTools([
@@ -208,6 +751,8 @@ program
         ...exportTools,
         ...testingTools,
         ...integrationTools,
+        ...taskHubTools,
+        ...esvpTools,
       ]);
 
       // Start STDIO transport

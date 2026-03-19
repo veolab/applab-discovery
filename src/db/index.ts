@@ -18,12 +18,13 @@ export const DB_PATH = join(DATA_DIR, 'data.db');
 export const PROJECTS_DIR = join(DATA_DIR, 'projects');
 export const EXPORTS_DIR = join(DATA_DIR, 'exports');
 export const FRAMES_DIR = join(DATA_DIR, 'frames');
+export const TEMPLATES_DIR = join(DATA_DIR, 'templates');
 
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
 function ensureDirectories(): void {
-  const dirs = [DATA_DIR, PROJECTS_DIR, EXPORTS_DIR, FRAMES_DIR];
+  const dirs = [DATA_DIR, PROJECTS_DIR, EXPORTS_DIR, FRAMES_DIR, TEMPLATES_DIR];
   for (const dir of dirs) {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });

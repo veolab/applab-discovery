@@ -9,7 +9,20 @@
 
 import { getDatabase } from './db/index.js';
 import { mcpServer } from './mcp/server.js';
-import { uiTools, projectTools, setupTools, captureTools, analyzeTools, canvasTools, exportTools, testingTools, integrationTools, taskHubTools } from './mcp/tools/index.js';
+import {
+  uiTools,
+  projectTools,
+  setupTools,
+  captureTools,
+  analyzeTools,
+  canvasTools,
+  exportTools,
+  testingTools,
+  integrationTools,
+  taskHubTools,
+  esvpTools,
+  templateTools,
+} from './mcp/tools/index.js';
 
 // ============================================================================
 // MCP SERVER STARTUP
@@ -31,6 +44,8 @@ async function main() {
       ...testingTools,
       ...integrationTools,
       ...taskHubTools,
+      ...esvpTools,
+      ...templateTools,
     ]);
 
     // Start STDIO transport for MCP
@@ -53,6 +68,7 @@ export { startServer, stopServer } from './web/server.js';
 
 // WebSocket Protocol (Clawdbot-inspired typed protocol)
 export * from './core/protocol/index.js';
+export * from './core/integrations/esvp.js';
 
 // Skills System (SKILL.md discovery and loading)
 export * from './core/skills/index.js';
