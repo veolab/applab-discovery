@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,6 +10,7 @@ const RUNTIME_ROOT = join(PROJECT_ROOT, 'runtime');
 const WORKSPACE_MANIFEST = join(RUNTIME_ROOT, 'Cargo.toml');
 const CRATE_MANIFEST = join(RUNTIME_ROOT, 'crates', 'esvp-host-runtime', 'Cargo.toml');
 const DIST_RUNTIME_ROOT = join(PROJECT_ROOT, 'dist', 'runtime', 'esvp-host-runtime');
+const DIST_TEMPLATES_DIR = join(PROJECT_ROOT, 'dist', 'templates');
 const OPTIONS = parseArgs(process.argv.slice(2));
 const BEST_EFFORT = OPTIONS.bestEffort;
 const TARGET = OPTIONS.target || resolveHostTargetTriple();
@@ -17,6 +19,8 @@ const BINARY_NAME = resolveBinaryName(TARGET);
 main();
 
 function main() {
+  syncTemplateBundle();
+
   if (!existsSync(WORKSPACE_MANIFEST) || !existsSync(CRATE_MANIFEST)) {
     exitWithMessage('ESVP host runtime sources were not found in ./runtime.', 1);
   }
@@ -80,6 +84,56 @@ function main() {
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
   console.log(`[esvp-host-runtime] bundled ${TARGET} -> ${destinationBinary}`);
+}
+
+function syncTemplateBundle() {
+  const sourceDir = resolveTemplateSourceDir();
+  if (!sourceDir) {
+    console.warn('[templates] No template bundle found. Skipping dist/templates sync.');
+    console.warn('[templates] Expected DISCOVERYLAB_TEMPLATE_SOURCE_DIR or ~/.discoverylab/templates with manifest.json + bundle/.');
+    return;
+  }
+
+  rmSync(DIST_TEMPLATES_DIR, { recursive: true, force: true });
+  mkdirSync(DIST_TEMPLATES_DIR, { recursive: true });
+  cpSync(sourceDir, DIST_TEMPLATES_DIR, { recursive: true });
+
+  const templateIds = loadTemplateIds(DIST_TEMPLATES_DIR);
+  console.log(
+    `[templates] synced ${templateIds.length} template${templateIds.length === 1 ? '' : 's'} from ${sourceDir} -> ${DIST_TEMPLATES_DIR}`
+  );
+}
+
+function resolveTemplateSourceDir() {
+  const sourceEnv = process.env.DISCOVERYLAB_TEMPLATE_SOURCE_DIR?.trim();
+  const candidates = [
+    sourceEnv || null,
+    join(homedir(), '.discoverylab', 'templates'),
+    join(PROJECT_ROOT, 'vendor', 'templates'),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && hasTemplateBundle(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function hasTemplateBundle(dir) {
+  return existsSync(join(dir, 'manifest.json')) && existsSync(join(dir, 'bundle'));
+}
+
+function loadTemplateIds(dir) {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
+    return Array.isArray(manifest?.templates)
+      ? manifest.templates.map((template) => template?.id).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function readManifest(manifestPath) {

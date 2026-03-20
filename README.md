@@ -117,6 +117,13 @@ npm run build:host-runtime
 
 Regular `npm run build` attempts this step in best-effort mode so the JS build still succeeds on machines without Rust, but distributable builds that need local capture should include the runtime binary.
 
+Video templates are also staged automatically during `npm run build`. DiscoveryLab will copy templates from:
+
+- `DISCOVERYLAB_TEMPLATE_SOURCE_DIR` if set
+- otherwise `~/.discoverylab/templates`
+
+into `dist/templates`, so npm packages and fresh installs keep the template toggle icons and Remotion renders working without a second manual copy step.
+
 For a local distributable package that already contains the bundled runtime for the current host, run:
 
 ```bash
