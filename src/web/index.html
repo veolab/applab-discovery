@@ -24,6 +24,47 @@
             --error: #ef4444;
         }
 
+        /* Minimalist switch */
+        .mini-switch {
+            position: relative;
+            width: 34px;
+            height: 18px;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+        .mini-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+            position: absolute;
+        }
+        .mini-switch .slider {
+            position: absolute;
+            inset: 0;
+            background: var(--border-hover, #3a3a3a);
+            border-radius: 9px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .mini-switch .slider::before {
+            content: '';
+            position: absolute;
+            left: 2px;
+            top: 2px;
+            width: 14px;
+            height: 14px;
+            background: var(--text-muted, #555);
+            border-radius: 50%;
+            transition: transform 0.2s, background 0.2s;
+        }
+        .mini-switch input:checked + .slider {
+            background: var(--accent);
+        }
+        .mini-switch input:checked + .slider::before {
+            transform: translateX(16px);
+            background: #fff;
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -6807,11 +6848,14 @@
 
                         <!-- Record Button -->
                         <div id="captureMobileControls">
-                            <label for="captureProxyOptInToggle" style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); cursor: pointer;">
-                                <input type="checkbox" id="captureProxyOptInToggle" style="width: 16px; height: 16px; accent-color: var(--accent); margin-top: 2px;">
+                            <label for="captureProxyOptInToggle" style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); cursor: pointer;">
                                 <div style="flex: 1; min-width: 0;">
                                     <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">Enable App Lab network capture</div>
                                     <div id="captureProxyOptInStatus" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.5;">Optional. When off, App Lab will not open a local proxy on this machine.</div>
+                                </div>
+                                <div class="mini-switch">
+                                    <input type="checkbox" id="captureProxyOptInToggle">
+                                    <span class="slider"></span>
                                 </div>
                             </label>
                             <button id="startCaptureMobileBtn" class="btn btn-primary" onclick="startCaptureMobile()" style="width: 100%;">
@@ -13758,11 +13802,14 @@
                             <div id="mobileRecordingControls" style="margin-top: 12px; border-top: 1px solid var(--border-subtle); padding-top: 12px;">
                                 <!-- State 1: Start Button -->
                                 <div id="mobileRecordingStart">
-                                    <label for="testingProxyOptInToggle" style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); cursor: pointer;">
-                                        <input type="checkbox" id="testingProxyOptInToggle" style="width: 16px; height: 16px; accent-color: var(--accent); margin-top: 2px;">
+                                    <label for="testingProxyOptInToggle" style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); cursor: pointer;">
                                         <div style="flex: 1; min-width: 0;">
                                             <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">Enable App Lab network capture</div>
                                             <div id="testingProxyOptInStatus" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.5;">Optional. When off, App Lab will not open a local proxy on this machine.</div>
+                                        </div>
+                                        <div class="mini-switch">
+                                            <input type="checkbox" id="testingProxyOptInToggle">
+                                            <span class="slider"></span>
                                         </div>
                                     </label>
                                     <div style="display: flex; gap: 8px;">
@@ -16732,6 +16779,10 @@
                         : null;
         }
 
+        function canReplayProjectWithESVP(project) {
+            return !!getProjectESVPSourceSessionId(project) && project?.esvp?.validation?.supported !== false;
+        }
+
         function getESVPProxyState(value) {
             const captureProxy = value?.captureProxy && typeof value.captureProxy === 'object'
                 ? value.captureProxy
@@ -16853,6 +16904,14 @@
                                 </svg>
                                 ${primaryLabel}
                             </button>
+                            ${canReplayProjectWithESVP(project) ? `
+                                <button class="btn btn-secondary" onclick="replayCurrentProjectWithESVP()" title="Replay the canonical ESVP source session for this recording">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 6px;">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    Replay via ESVP
+                                </button>
+                            ` : ''}
                             ${captureRunning ? `
                                 <button class="btn btn-secondary" onclick="stopCurrentProjectESVPNetworkCapture()">
                                     Stop Network Capture
@@ -18053,6 +18112,62 @@
             await validateMobileRecordingWithESVP(currentProject.id, 'analysis');
         }
 
+        async function replayMobileRecordingWithESVP(recordingId, source = 'modal') {
+            try {
+                const sessionResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}`);
+                const sessionData = await sessionResponse.json();
+                if (!sessionResponse.ok || !sessionData.session) {
+                    throw new Error(sessionData.error || 'Recording not found');
+                }
+
+                const recording = sessionData.session;
+                const sourceSessionId = getProjectESVPSourceSessionId(recording);
+                if (!sourceSessionId) {
+                    throw new Error('Run Validate with ESVP first to create a canonical source session.');
+                }
+                if (recording?.esvp?.validation?.supported === false) {
+                    throw new Error('This recording is not supported by ESVP replay yet.');
+                }
+
+                showToast(`Running ESVP replay for ${sourceSessionId}...`, 'info', 5000);
+                const response = await fetch(`/api/testing/mobile/recordings/${recordingId}/esvp/replay`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || 'ESVP replay failed');
+                }
+
+                const replaySessionId = result.replaySessionId || result?.replay?.replay_session?.id || 'unknown-session';
+                const verdict = typeof result?.replayConsistency?.verdict === 'string'
+                    ? ` • ${result.replayConsistency.verdict}`
+                    : '';
+                showToast(`ESVP replay complete • ${replaySessionId}${verdict}`, 'success', 7000);
+
+                if (source === 'analysis') {
+                    await refreshCurrentProjectAfterESVPMutation();
+                    return;
+                }
+
+                if (source === 'modal') {
+                    closeMobileRecordingModal();
+                    setTimeout(() => viewMobileRecording(recordingId), 220);
+                }
+            } catch (error) {
+                showToast(`ESVP replay failed: ${error.message || 'Unknown error'}`, 'error', 7000);
+            }
+        }
+
+        async function replayCurrentProjectWithESVP() {
+            if (!currentProject?.id || !isESVPEligibleMobileProject(currentProject)) {
+                showToast('Current project is not a mobile testing recording', 'error');
+                return;
+            }
+            await replayMobileRecordingWithESVP(currentProject.id, 'analysis');
+        }
+
         async function refreshCurrentProjectAfterESVPMutation() {
             if (!currentProject?.id) return;
             const refreshed = await fetchProjectById(currentProject.id);
@@ -18330,6 +18445,7 @@
             const mins = Math.floor(duration / 60);
             const secs = duration % 60;
             const actionsCount = data.actions?.length || data.actionsCount || 0;
+            const canReplayViaESVP = canReplayProjectWithESVP(data);
 
             // Get screenshots from actions (screenshots are stored as screenshotPath in each action)
             const screenshots = data.screenshots || (data.actions || [])
@@ -18429,6 +18545,14 @@
                                 </svg>
                                 Replay Test
                             </button>
+                            ${canReplayViaESVP ? `
+                                <button class="btn btn-secondary" onclick="replayMobileRecordingWithESVP('${id}', 'modal')" style="flex: 1; min-width: 120px;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 6px;">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    Replay via ESVP
+                                </button>
+                            ` : ''}
                             <button class="btn btn-secondary" onclick="validateMobileRecordingWithESVP('${id}', 'modal')" style="flex: 1; min-width: 120px; border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.08); color: var(--accent-hover);">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 6px;">
                                     <path d="M9 12l2 2 4-4"/>

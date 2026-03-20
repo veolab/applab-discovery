@@ -151,6 +151,11 @@ Available MCP tools:
 - `dlab.esvp.session.network`
 - `dlab.esvp.network.configure`
 - `dlab.esvp.network.trace.attach`
+- `dlab.project.esvp.current`
+- `dlab.project.esvp.validate`
+- `dlab.project.esvp.replay`
+- `dlab.project.esvp.sync_network`
+- `dlab.project.esvp.app_trace_bootstrap`
 
 CLI surface:
 
@@ -178,6 +183,7 @@ Mobile recording bridge:
 
 - App Lab mobile recordings can now sync `network_trace` artifacts from ESVP into the same `networkEntries` / segmented route tabs already used by web recordings.
 - When ESVP traces include headers and request/response previews, the Analysis view now exposes a request inspector with segmented tabs for `Overview`, `Request`, `Response`, and `Headers`.
+- Local MCP development can point `.mcp.json` at `node dist/index.js` so LLMs use the current branch build instead of `@latest`.
 - App Lab exposes server routes for this bridge:
   - `POST /api/testing/mobile/recordings/:id/esvp/validate`
   - `POST /api/testing/mobile/recordings/:id/esvp/sync-network`

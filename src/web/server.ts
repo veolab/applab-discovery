@@ -56,8 +56,11 @@ import {
   attachESVPNetworkTrace,
   configureESVPNetwork,
   createESVPSession,
+  getESVPReplayConsistency,
   inspectESVPSession,
+  replayESVPSession,
   runESVPActions,
+  validateESVPReplay,
 } from '../core/integrations/esvp.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -4060,17 +4063,43 @@ function resolveProjectESVPSessionId(esvp: Record<string, unknown> | null): stri
     ? esvp.network as Record<string, unknown>
     : null;
 
-  const directId = typeof esvp.currentSessionId === 'string' ? esvp.currentSessionId.trim() : '';
   const validationId = typeof validation?.sourceSessionId === 'string' ? validation.sourceSessionId.trim() : '';
   const networkId = typeof network?.sourceSessionId === 'string' ? network.sourceSessionId.trim() : '';
+  const directId = typeof esvp.currentSessionId === 'string' ? esvp.currentSessionId.trim() : '';
 
-  return directId || validationId || networkId || null;
+  return validationId || networkId || directId || null;
 }
 
 function resolveProjectESVPServerUrl(esvp: Record<string, unknown> | null): string | undefined {
   if (!esvp || typeof esvp.serverUrl !== 'string') return undefined;
   const serverUrl = esvp.serverUrl.trim();
   return serverUrl || undefined;
+}
+
+function isESVPReplayValidationSupported(result: Record<string, unknown> | null): boolean {
+  if (!result) return true;
+  if (result.supported === false) return false;
+  if (result.replaySupported === false) return false;
+  if (result.canReplay === false) return false;
+  if (result.ok === false) return false;
+  const httpStatus = typeof result.http_status === 'number' ? result.http_status : null;
+  if (httpStatus === 409 || httpStatus === 422) return false;
+  return true;
+}
+
+function getESVPReplayValidationReason(result: Record<string, unknown> | null): string | null {
+  if (!result) return null;
+  const candidates = [
+    result.reason,
+    result.error,
+    result.message,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
 }
 
 app.post('/api/export', async (c) => {
@@ -6281,6 +6310,102 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
       success: true,
       autoSyncedNetwork: autoSynced,
       ...result,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/testing/mobile/recordings/:id/esvp/replay', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json().catch(() => ({}));
+    const session = await readMobileRecordingSessionData(id);
+    const esvp = session?.esvp && typeof session.esvp === 'object'
+      ? session.esvp as Record<string, unknown>
+      : null;
+    const requestedServerUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
+    const serverUrl = requestedServerUrl || resolveProjectESVPServerUrl(esvp);
+    const sourceSessionId = resolveProjectESVPSessionId(esvp);
+
+    if (!sourceSessionId) {
+      return c.json({
+        error: 'No ESVP source session is attached to this recording yet. Run Validate with ESVP first.',
+      }, 400);
+    }
+
+    const replayValidation = await validateESVPReplay(sourceSessionId, serverUrl);
+    if (!isESVPReplayValidationSupported(replayValidation && typeof replayValidation === 'object' ? replayValidation as Record<string, unknown> : null)) {
+      const reason = getESVPReplayValidationReason(
+        replayValidation && typeof replayValidation === 'object' ? replayValidation as Record<string, unknown> : null
+      ) || 'This ESVP session does not support canonical replay.';
+      return c.json({
+        error: reason,
+        sourceSessionId,
+        replayValidation,
+      }, 409);
+    }
+
+    const executor = resolveRecordingExecutor(session);
+    const shouldCaptureLogcat = typeof body?.captureLogcat === 'boolean'
+      ? body.captureLogcat
+      : executor === 'adb';
+    const replay = await replayESVPSession(
+      sourceSessionId,
+      {
+        executor,
+        deviceId: String(session.deviceId || ''),
+        captureLogcat: shouldCaptureLogcat,
+        meta: {
+          source: 'applab-discovery-project-replay',
+          recording_id: String(session.id || id),
+          recording_name: String(session.name || `Recording ${id}`),
+          recording_platform: session.platform === 'ios' ? 'ios' : 'android',
+          recording_device_name: typeof session.deviceName === 'string' ? session.deviceName : null,
+        },
+      },
+      serverUrl
+    );
+    const replaySessionId = String(replay?.replay_session?.id || replay?.id || '');
+    const replayConsistencyEnvelope = replaySessionId
+      ? await getESVPReplayConsistency(replaySessionId, serverUrl).catch(() => null)
+      : null;
+    const replayConsistency = replayConsistencyEnvelope?.replay_consistency || null;
+
+    const existingValidation = esvp?.validation && typeof esvp.validation === 'object'
+      ? esvp.validation as Record<string, unknown>
+      : {};
+    session.esvp = {
+      ...(esvp || {}),
+      currentSessionId: sourceSessionId,
+      serverUrl: serverUrl || (typeof esvp?.serverUrl === 'string' ? esvp.serverUrl : null),
+      executor,
+      validation: {
+        ...existingValidation,
+        supported: existingValidation.supported !== false,
+        sourceSessionId: typeof existingValidation.sourceSessionId === 'string' && existingValidation.sourceSessionId
+          ? existingValidation.sourceSessionId
+          : sourceSessionId,
+        replaySessionId: replaySessionId || null,
+        checkpointComparison: replay?.checkpoint_comparison || existingValidation.checkpointComparison || null,
+        replayConsistency,
+        replayValidation,
+        replayedAt: new Date().toISOString(),
+      },
+    };
+
+    await writeMobileRecordingSessionData(id, session);
+    await touchProjectUpdatedAt(id).catch(() => {});
+
+    return c.json({
+      success: true,
+      sourceSessionId,
+      replaySessionId: replaySessionId || null,
+      replayValidation,
+      replayConsistency,
+      checkpointComparison: replay?.checkpoint_comparison || null,
+      replay,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';

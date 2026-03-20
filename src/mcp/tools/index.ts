@@ -115,6 +115,11 @@ export {
   esvpSessionNetworkTool,
   esvpNetworkConfigureTool,
   esvpNetworkTraceAttachTool,
+  projectESVPCurrentTool,
+  projectESVPValidateTool,
+  projectESVPReplayTool,
+  projectESVPSyncNetworkTool,
+  projectESVPAppTraceBootstrapTool,
 } from './esvp.js';
 export {
   templateListTool,

@@ -1,6 +1,6 @@
 {
   "discoverylab": {
-    "command": "npx",
-    "args": ["-y", "@veolab/discoverylab@latest", "mcp"]
+    "command": "node",
+    "args": ["dist/index.js"]
   }
 }

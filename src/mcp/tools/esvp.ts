@@ -7,7 +7,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import type { MCPTool } from '../server.js';
 import { createJsonResult, createErrorResult } from '../server.js';
@@ -39,6 +39,7 @@ import {
 } from '../../core/integrations/esvp.js';
 import { buildAppLabNetworkProfile } from '../../core/integrations/esvp-network-profile.js';
 import { listAllEmulators } from '../../core/capture/emulator.js';
+import { PROJECTS_DIR } from '../../db/index.js';
 
 const jsonObjectSchema = z.record(z.string(), z.any());
 
@@ -62,6 +63,185 @@ const proxySchema = z.object({
   protocol: z.string().optional(),
   bypass: z.array(z.string()).optional(),
 });
+
+const projectRecordingSchema = z.object({
+  recordingId: z.string().min(1).describe('Mobile recording / project ID inside ~/.discoverylab/projects/maestro-recordings'),
+});
+
+const projectValidationProfileIdSchema = z.enum([
+  'standard',
+  'app-http-trace',
+  'mitm-simulator',
+  'inject-503',
+  'timeout',
+  'delay-1200',
+]);
+
+const projectValidationNetworkSchema = z.object({
+  enabled: z.boolean().optional(),
+  mode: z.enum(['managed-proxy', 'external-proxy', 'external-mitm', 'app-http-trace']).optional(),
+  profile: z.string().optional(),
+  label: z.string().optional(),
+  connectivity: z.enum(['online', 'offline', 'reset']).optional(),
+  proxy: jsonObjectSchema.optional(),
+  capture: jsonObjectSchema.optional(),
+  faults: jsonObjectSchema.optional(),
+}).nullable();
+
+function getMobileRecordingDir(recordingId: string): string {
+  return join(PROJECTS_DIR, 'maestro-recordings', recordingId);
+}
+
+function getMobileRecordingSessionPath(recordingId: string): string {
+  return join(getMobileRecordingDir(recordingId), 'session.json');
+}
+
+async function readMobileRecordingSession(recordingId: string): Promise<any> {
+  const sessionPath = getMobileRecordingSessionPath(recordingId);
+  const raw = await readFile(sessionPath, 'utf8').catch(() => null);
+  if (!raw) {
+    throw new Error(`Recording not found: ${recordingId}`);
+  }
+  return JSON.parse(raw);
+}
+
+function resolveProjectRecordingESVPState(session: any): Record<string, unknown> | null {
+  return session?.esvp && typeof session.esvp === 'object'
+    ? session.esvp as Record<string, unknown>
+    : null;
+}
+
+function resolveProjectRecordingESVPSourceSessionId(session: any): string | null {
+  const esvp = resolveProjectRecordingESVPState(session);
+  if (!esvp) return null;
+  const validation = esvp.validation && typeof esvp.validation === 'object'
+    ? esvp.validation as Record<string, unknown>
+    : null;
+  const network = esvp.network && typeof esvp.network === 'object'
+    ? esvp.network as Record<string, unknown>
+    : null;
+  const validationId = typeof validation?.sourceSessionId === 'string' ? validation.sourceSessionId.trim() : '';
+  const networkId = typeof network?.sourceSessionId === 'string' ? network.sourceSessionId.trim() : '';
+  const directId = typeof esvp.currentSessionId === 'string' ? esvp.currentSessionId.trim() : '';
+  return validationId || networkId || directId || null;
+}
+
+function resolveProjectRecordingReplaySessionId(session: any): string | null {
+  const esvp = resolveProjectRecordingESVPState(session);
+  const validation = esvp?.validation && typeof esvp.validation === 'object'
+    ? esvp.validation as Record<string, unknown>
+    : null;
+  const replayId = typeof validation?.replaySessionId === 'string' ? validation.replaySessionId.trim() : '';
+  return replayId || null;
+}
+
+function resolveProjectRecordingESVPServerUrl(session: any): string | undefined {
+  const esvp = resolveProjectRecordingESVPState(session);
+  if (!esvp || typeof esvp.serverUrl !== 'string') return undefined;
+  const serverUrl = esvp.serverUrl.trim();
+  return serverUrl || undefined;
+}
+
+function resolveAppLabBaseUrl(appLabUrl?: string): string {
+  const raw = String(appLabUrl || process.env.DISCOVERYLAB_APP_URL || 'http://127.0.0.1:3847').trim();
+  return raw.replace(/\/+$/, '');
+}
+
+async function callAppLabJson(
+  path: string,
+  init: RequestInit = {},
+  appLabUrl?: string
+): Promise<{ appLabUrl: string; payload: any }> {
+  const baseUrl = resolveAppLabBaseUrl(appLabUrl);
+  const targetUrl = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+  const response = await fetch(targetUrl, init).catch((error) => {
+    throw new Error(`Failed to reach App Lab at ${baseUrl}. Start the local App Lab server before using project-scoped ESVP tools. ${error instanceof Error ? error.message : String(error)}`);
+  });
+
+  const text = await response.text();
+  let payload: any = null;
+  if (text.trim()) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { raw: text };
+    }
+  }
+
+  if (!response.ok) {
+    const message =
+      payload?.error ||
+      payload?.message ||
+      `App Lab request failed (${response.status} ${response.statusText})`;
+    throw new Error(String(message));
+  }
+
+  return {
+    appLabUrl: baseUrl,
+    payload,
+  };
+}
+
+function buildProjectValidationNetwork(profileId?: z.infer<typeof projectValidationProfileIdSchema>, network?: z.infer<typeof projectValidationNetworkSchema>) {
+  if (network) return network;
+  switch (profileId) {
+    case 'app-http-trace':
+      return {
+        enabled: true,
+        profile: 'applab-app-http-trace',
+        label: 'App Lab App HTTP Trace',
+        mode: 'app-http-trace',
+      };
+    case 'mitm-simulator':
+      return {
+        enabled: true,
+        profile: 'applab-mitm-beta',
+        label: 'App Lab MITM Beta',
+        mode: 'external-mitm',
+      };
+    case 'inject-503':
+      return {
+        enabled: true,
+        profile: 'applab-inject-503',
+        label: 'App Lab Inject 503',
+        mode: 'managed-proxy',
+        faults: {
+          status_code: 503,
+          body_patch: {
+            error: 'Injected by ESVP',
+          },
+        },
+      };
+    case 'timeout':
+      return {
+        enabled: true,
+        profile: 'applab-timeout',
+        label: 'App Lab Timeout',
+        mode: 'managed-proxy',
+        faults: {
+          timeout: true,
+        },
+      };
+    case 'delay-1200':
+      return {
+        enabled: true,
+        profile: 'applab-delay-1200',
+        label: 'App Lab Delay 1200ms',
+        mode: 'managed-proxy',
+        faults: {
+          delay_ms: 1200,
+        },
+      };
+    case 'standard':
+    default:
+      return {
+        enabled: true,
+        profile: 'applab-standard',
+        label: 'App Lab Standard Capture',
+        mode: 'external-proxy',
+      };
+  }
+}
 
 function resolveDefaultDeviceId(executor: ESVPExecutor): string | undefined {
   if (executor === 'fake') return undefined;
@@ -688,6 +868,215 @@ export const esvpSessionPreflightTool: MCPTool = {
   },
 };
 
+export const projectESVPCurrentTool: MCPTool = {
+  name: 'dlab.project.esvp.current',
+  description: 'Read the current ESVP state stored for an App Lab mobile recording/project without requiring the web UI.',
+  inputSchema: projectRecordingSchema,
+  handler: async (params) => {
+    try {
+      const session = await readMobileRecordingSession(params.recordingId);
+      const esvp = resolveProjectRecordingESVPState(session);
+      const validation = esvp?.validation && typeof esvp.validation === 'object'
+        ? esvp.validation as Record<string, unknown>
+        : null;
+      const network = esvp?.network && typeof esvp.network === 'object'
+        ? esvp.network as Record<string, unknown>
+        : null;
+
+      return createJsonResult({
+        recordingId: params.recordingId,
+        recordingDir: getMobileRecordingDir(params.recordingId),
+        sessionPath: getMobileRecordingSessionPath(params.recordingId),
+        recording: {
+          id: String(session.id || params.recordingId),
+          name: String(session.name || `Recording ${params.recordingId}`),
+          platform: session.platform === 'ios' ? 'ios' : 'android',
+          deviceId: typeof session.deviceId === 'string' ? session.deviceId : null,
+          deviceName: typeof session.deviceName === 'string' ? session.deviceName : null,
+          appId: typeof session.appId === 'string' ? session.appId : null,
+          actionsCount: Array.isArray(session.actions) ? session.actions.length : 0,
+        },
+        esvp: {
+          serverUrl: resolveProjectRecordingESVPServerUrl(session) || null,
+          connectionMode: typeof esvp?.connectionMode === 'string' ? esvp.connectionMode : null,
+          executor: typeof esvp?.executor === 'string' ? esvp.executor : null,
+          currentSessionId: typeof esvp?.currentSessionId === 'string' ? esvp.currentSessionId : null,
+          sourceSessionId: resolveProjectRecordingESVPSourceSessionId(session),
+          replaySessionId: resolveProjectRecordingReplaySessionId(session),
+          validationSupported: validation?.supported === false ? false : validation ? true : null,
+          validatedAt: typeof validation?.validatedAt === 'string' ? validation.validatedAt : null,
+          replayedAt: typeof validation?.replayedAt === 'string' ? validation.replayedAt : null,
+          replayConsistency: validation?.replayConsistency || null,
+          checkpointComparison: validation?.checkpointComparison || null,
+          network: {
+            entryCount: Number.isFinite(Number(network?.entryCount)) ? Number(network?.entryCount) : 0,
+            traceCount: Number.isFinite(Number(network?.traceCount)) ? Number(network?.traceCount) : 0,
+            traceKinds: Array.isArray(network?.traceKinds) ? network.traceKinds : [],
+            captureStatus: typeof network?.captureStatus === 'string' ? network.captureStatus : null,
+            networkSupported: typeof network?.networkSupported === 'boolean' ? network.networkSupported : null,
+            activeProfile: network?.activeProfile || null,
+            effectiveProfile: network?.effectiveProfile || null,
+            captureProxy: network?.captureProxy || null,
+            appTraceCollector: network?.appTraceCollector || null,
+            managedProxy: network?.managedProxy || null,
+            syncedAt: typeof network?.syncedAt === 'string' ? network.syncedAt : null,
+          },
+        },
+      });
+    } catch (error) {
+      return createErrorResult(error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
+export const projectESVPValidateTool: MCPTool = {
+  name: 'dlab.project.esvp.validate',
+  description: 'Run the App Lab ESVP validation flow for a mobile recording/project. Requires the local App Lab server to be running.',
+  inputSchema: projectRecordingSchema.extend({
+    appLabUrl: z.string().url().optional().describe('App Lab server base URL, defaults to http://127.0.0.1:3847'),
+    serverUrl: z.string().url().optional().describe('Optional ESVP control-plane base URL'),
+    replay: z.boolean().optional().describe('Run replay after source validation'),
+    captureLogcat: z.boolean().optional(),
+    profileId: projectValidationProfileIdSchema.optional().describe('Convenience network profile shortcut'),
+    network: projectValidationNetworkSchema.optional().describe('Explicit network profile payload. Overrides profileId. Pass null to validate without network capture.'),
+  }),
+  handler: async (params) => {
+    try {
+      const network = params.network === null
+        ? null
+        : buildProjectValidationNetwork(params.profileId, params.network);
+      const result = await callAppLabJson(
+        `/api/testing/mobile/recordings/${encodeURIComponent(params.recordingId)}/esvp/validate`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            ...(params.serverUrl ? { serverUrl: params.serverUrl } : {}),
+            ...(params.captureLogcat !== undefined ? { captureLogcat: params.captureLogcat } : {}),
+            ...(params.replay !== undefined ? { replay: params.replay } : {}),
+            ...(network ? { network } : {}),
+          }),
+        },
+        params.appLabUrl
+      );
+
+      return createJsonResult({
+        appLabUrl: result.appLabUrl,
+        recordingId: params.recordingId,
+        result: result.payload,
+      });
+    } catch (error) {
+      return createErrorResult(error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
+export const projectESVPReplayTool: MCPTool = {
+  name: 'dlab.project.esvp.replay',
+  description: 'Replay the canonical ESVP source session already attached to a mobile recording/project. Requires the local App Lab server to be running.',
+  inputSchema: projectRecordingSchema.extend({
+    appLabUrl: z.string().url().optional().describe('App Lab server base URL, defaults to http://127.0.0.1:3847'),
+    serverUrl: z.string().url().optional().describe('Optional ESVP control-plane base URL'),
+    captureLogcat: z.boolean().optional(),
+  }),
+  handler: async (params) => {
+    try {
+      const result = await callAppLabJson(
+        `/api/testing/mobile/recordings/${encodeURIComponent(params.recordingId)}/esvp/replay`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            ...(params.serverUrl ? { serverUrl: params.serverUrl } : {}),
+            ...(params.captureLogcat !== undefined ? { captureLogcat: params.captureLogcat } : {}),
+          }),
+        },
+        params.appLabUrl
+      );
+
+      return createJsonResult({
+        appLabUrl: result.appLabUrl,
+        recordingId: params.recordingId,
+        result: result.payload,
+      });
+    } catch (error) {
+      return createErrorResult(error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
+export const projectESVPSyncNetworkTool: MCPTool = {
+  name: 'dlab.project.esvp.sync_network',
+  description: 'Sync the latest attached ESVP network trace into an App Lab mobile recording/project. Requires the local App Lab server to be running.',
+  inputSchema: projectRecordingSchema.extend({
+    appLabUrl: z.string().url().optional().describe('App Lab server base URL, defaults to http://127.0.0.1:3847'),
+    serverUrl: z.string().url().optional().describe('Optional ESVP control-plane base URL'),
+    sessionId: z.string().optional().describe('Optional ESVP session ID override'),
+  }),
+  handler: async (params) => {
+    try {
+      const result = await callAppLabJson(
+        `/api/testing/mobile/recordings/${encodeURIComponent(params.recordingId)}/esvp/sync-network`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            ...(params.serverUrl ? { serverUrl: params.serverUrl } : {}),
+            ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+          }),
+        },
+        params.appLabUrl
+      );
+
+      return createJsonResult({
+        appLabUrl: result.appLabUrl,
+        recordingId: params.recordingId,
+        result: result.payload,
+      });
+    } catch (error) {
+      return createErrorResult(error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
+export const projectESVPAppTraceBootstrapTool: MCPTool = {
+  name: 'dlab.project.esvp.app_trace_bootstrap',
+  description: 'Fetch the active local app_http_trace bootstrap config for an App Lab mobile recording/project. Requires the local App Lab server to be running when a collector is active.',
+  inputSchema: projectRecordingSchema.extend({
+    appLabUrl: z.string().url().optional().describe('App Lab server base URL, defaults to http://127.0.0.1:3847'),
+    appId: z.string().optional().describe('Optional app ID override when multiple collectors are active'),
+  }),
+  handler: async (params) => {
+    try {
+      const session = await readMobileRecordingSession(params.recordingId);
+      const collector = session?.esvp?.network?.appTraceCollector || null;
+      const searchParams = new URLSearchParams();
+      if (params.recordingId) searchParams.set('recordingId', params.recordingId);
+      if (params.appId) searchParams.set('appId', params.appId);
+      const path = `/api/testing/mobile/app-http-trace/bootstrap?${searchParams.toString()}`;
+
+      try {
+        const result = await callAppLabJson(path, { method: 'GET' }, params.appLabUrl);
+        return createJsonResult({
+          appLabUrl: result.appLabUrl,
+          recordingId: params.recordingId,
+          result: result.payload,
+        });
+      } catch (error) {
+        return createJsonResult({
+          appLabUrl: resolveAppLabBaseUrl(params.appLabUrl),
+          recordingId: params.recordingId,
+          activeCollector: collector,
+          bootstrap: null,
+          warning: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } catch (error) {
+      return createErrorResult(error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
 export const esvpTools: MCPTool[] = [
   esvpStatusTool,
   esvpDevicesTool,
@@ -707,4 +1096,9 @@ export const esvpTools: MCPTool[] = [
   esvpSessionNetworkTool,
   esvpNetworkConfigureTool,
   esvpNetworkTraceAttachTool,
+  projectESVPCurrentTool,
+  projectESVPValidateTool,
+  projectESVPReplayTool,
+  projectESVPSyncNetworkTool,
+  projectESVPAppTraceBootstrapTool,
 ];

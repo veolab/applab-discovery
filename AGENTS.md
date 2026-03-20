@@ -145,6 +145,16 @@ These tools treat AppLab Discovery as an open-source client of a shared ESVP con
 | `dlab.esvp.network.configure` | Apply or clear a public network profile |
 | `dlab.esvp.network.trace.attach` | Attach a public network trace artifact |
 
+Project-scoped mobile recording helpers (`dlab.project.esvp.*`):
+
+| Tool | Description |
+|------|-------------|
+| `dlab.project.esvp.current` | Read the ESVP state stored for a specific App Lab mobile recording |
+| `dlab.project.esvp.validate` | Run the App Lab ESVP validation flow for a recording |
+| `dlab.project.esvp.replay` | Replay the canonical ESVP source session attached to a recording |
+| `dlab.project.esvp.sync_network` | Sync the latest attached ESVP network trace into a recording |
+| `dlab.project.esvp.app_trace_bootstrap` | Fetch the active local `app_http_trace` bootstrap config for a recording |
+
 Mobile recording bridge:
 
 - `POST /api/testing/mobile/recordings/:id/esvp/validate`
