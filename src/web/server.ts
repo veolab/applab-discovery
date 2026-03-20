@@ -4102,6 +4102,61 @@ function getESVPReplayValidationReason(result: Record<string, unknown> | null): 
   return null;
 }
 
+function normalizeESVPReplayValidationReason(
+  result: Record<string, unknown> | null,
+  fallbackExecutor?: string | null,
+): string | null {
+  const rawReason = getESVPReplayValidationReason(result);
+  if (!rawReason) return null;
+
+  const currentExecutorMatch = rawReason.match(/(?:executor atual|current executor)\s*=\s*([^) ,]+)/i);
+  const currentExecutor = currentExecutorMatch?.[1] || fallbackExecutor || null;
+
+  if (
+    /(replay determin[ií]stico|deterministic replay)/i.test(rawReason) &&
+    /executor\s*=\s*fake/i.test(rawReason)
+  ) {
+    return `Deterministic replay is currently available only for executor=fake${currentExecutor ? ` (current executor=${currentExecutor})` : ''}.`;
+  }
+
+  if (/nenhuma sess[aã]o esvp associada/i.test(rawReason)) {
+    return 'No attached ESVP session was found.';
+  }
+
+  return rawReason;
+}
+
+function getStoredRecordingNetworkEntries(session: any): CapturedNetworkEntry[] {
+  return Array.isArray(session?.networkEntries)
+    ? session.networkEntries.filter((entry: unknown) => entry && typeof entry === 'object') as CapturedNetworkEntry[]
+    : [];
+}
+
+function hasMeaningfulESVPNetworkSnapshot(input: {
+  networkEntries?: CapturedNetworkEntry[];
+  traceKinds?: string[];
+  networkState?: any;
+  networkProfileApplied?: unknown;
+  managedProxy?: unknown;
+  captureProxy?: unknown;
+  appTraceCollector?: unknown;
+}): boolean {
+  const traceCount = Number(input.networkState?.trace_count || 0);
+  return (
+    (Array.isArray(input.networkEntries) && input.networkEntries.length > 0) ||
+    (Array.isArray(input.traceKinds) && input.traceKinds.length > 0) ||
+    traceCount > 0 ||
+    !!input.networkState?.configured_at ||
+    !!input.networkState?.active_profile ||
+    !!input.networkState?.effective_profile ||
+    !!input.networkState?.managed_proxy ||
+    !!input.networkProfileApplied ||
+    !!input.managedProxy ||
+    !!input.captureProxy ||
+    !!input.appTraceCollector
+  );
+}
+
 app.post('/api/export', async (c) => {
   try {
     const body = await c.req.json();
@@ -6179,6 +6234,18 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
     const captureLogcat = typeof body?.captureLogcat === 'boolean' ? body.captureLogcat : undefined;
     const replay = typeof body?.replay === 'boolean' ? body.replay : undefined;
     const session = await readMobileRecordingSessionData(id);
+    const existingNetworkEntries = getStoredRecordingNetworkEntries(session);
+    const existingNetworkCapture =
+      session.networkCapture && typeof session.networkCapture === 'object'
+        ? session.networkCapture
+        : null;
+    const existingESVP = session.esvp && typeof session.esvp === 'object'
+      ? session.esvp as Record<string, unknown>
+      : {};
+    const existingESVPNetwork =
+      existingESVP.network && typeof existingESVP.network === 'object'
+        ? existingESVP.network as Record<string, unknown>
+        : null;
     const translatedSessionActions = Array.isArray(session.actions) ? session.actions : [];
     const shouldRehydrateActionsFromYaml =
       typeof session.flowPath === 'string' &&
@@ -6226,8 +6293,18 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
       }
     );
 
+    const shouldPersistFreshNetwork = hasMeaningfulESVPNetworkSnapshot({
+      networkEntries: result.networkEntries,
+      traceKinds: result.traceKinds,
+      networkState: result.networkState,
+      networkProfileApplied: result.networkProfileApplied,
+      managedProxy: result.managedProxy,
+      captureProxy: result.captureProxy,
+      appTraceCollector: result.appTraceCollector,
+    });
+
     session.esvp = {
-      ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
+      ...existingESVP,
       currentSessionId: result.sourceSessionId || null,
       connectionMode: result.connectionMode,
       serverUrl: result.serverUrl,
@@ -6246,28 +6323,39 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
         networkProfileApplied: result.networkProfileApplied || null,
         validatedAt: new Date().toISOString(),
       },
-      network: {
-        sourceSessionId: result.sourceSessionId || null,
-        networkSupported: typeof result.networkState?.supported === 'boolean' ? result.networkState.supported : null,
-        traceKinds: result.traceKinds,
-        traceCount: Number.isFinite(result.networkState?.trace_count) ? Number(result.networkState?.trace_count) : result.traceKinds.length,
-        syncedAt: new Date().toISOString(),
-        entryCount: result.networkEntries.length,
-        managedProxy: result.managedProxy || null,
-        captureProxy: result.captureProxy || null,
-        appTraceCollector: result.appTraceCollector || null,
-        activeProfile: result.networkState?.active_profile || null,
-        effectiveProfile: result.networkState?.effective_profile || null,
-        configuredAt: result.networkState?.configured_at || null,
-        clearedAt: result.networkState?.cleared_at || null,
-        lastError: result.networkState?.last_error || null,
-      },
+      ...(shouldPersistFreshNetwork
+        ? {
+            network: {
+              ...(existingESVPNetwork || {}),
+              sourceSessionId: result.sourceSessionId || existingESVPNetwork?.sourceSessionId || null,
+              networkSupported: typeof result.networkState?.supported === 'boolean'
+                ? result.networkState.supported
+                : existingESVPNetwork?.networkSupported ?? null,
+              traceKinds: result.traceKinds,
+              traceCount: Number.isFinite(result.networkState?.trace_count)
+                ? Number(result.networkState?.trace_count)
+                : result.traceKinds.length,
+              syncedAt: new Date().toISOString(),
+              entryCount: result.networkEntries.length > 0 ? result.networkEntries.length : existingNetworkEntries.length,
+              managedProxy: result.managedProxy || null,
+              captureProxy: result.captureProxy || null,
+              appTraceCollector: result.appTraceCollector || null,
+              activeProfile: result.networkState?.active_profile || existingESVPNetwork?.activeProfile || null,
+              effectiveProfile: result.networkState?.effective_profile || existingESVPNetwork?.effectiveProfile || null,
+              configuredAt: result.networkState?.configured_at || existingESVPNetwork?.configuredAt || null,
+              clearedAt: result.networkState?.cleared_at || existingESVPNetwork?.clearedAt || null,
+              lastError: result.networkState?.last_error || existingESVPNetwork?.lastError || null,
+            },
+          }
+        : existingESVPNetwork
+          ? { network: existingESVPNetwork }
+          : {}),
     };
 
     if (result.networkEntries.length > 0) {
       session.networkEntries = result.networkEntries;
       session.networkCapture = result.networkCapture;
-    } else if (!session.networkCapture && result.supported) {
+    } else if (!existingNetworkCapture && result.supported) {
       session.networkCapture = result.networkCapture;
     }
 
@@ -6287,7 +6375,9 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
           session.networkEntries = deferred.networkEntries;
           session.networkCapture = deferred.networkCapture;
           session.esvp.network = {
-            ...session.esvp.network,
+            ...((session.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object')
+              ? session.esvp.network
+              : existingESVPNetwork || {}),
             traceKinds: deferred.traceKinds,
             traceCount: Number.isFinite(result.networkState?.trace_count) ? Number(result.networkState?.trace_count) : deferred.traceKinds.length,
             entryCount: deferred.networkEntries.length,
@@ -6337,8 +6427,9 @@ app.post('/api/testing/mobile/recordings/:id/esvp/replay', async (c) => {
 
     const replayValidation = await validateESVPReplay(sourceSessionId, serverUrl);
     if (!isESVPReplayValidationSupported(replayValidation && typeof replayValidation === 'object' ? replayValidation as Record<string, unknown> : null)) {
-      const reason = getESVPReplayValidationReason(
-        replayValidation && typeof replayValidation === 'object' ? replayValidation as Record<string, unknown> : null
+      const reason = normalizeESVPReplayValidationReason(
+        replayValidation && typeof replayValidation === 'object' ? replayValidation as Record<string, unknown> : null,
+        resolveRecordingExecutor(session),
       ) || 'This ESVP session does not support canonical replay.';
       return c.json({
         error: reason,
@@ -6856,6 +6947,15 @@ app.post('/api/testing/mobile/recordings/:id/esvp/sync-network', async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
     const session = await readMobileRecordingSessionData(id);
+    const existingNetworkEntries = getStoredRecordingNetworkEntries(session);
+    const existingNetworkCapture =
+      session.networkCapture && typeof session.networkCapture === 'object'
+        ? session.networkCapture
+        : null;
+    const existingESVPNetwork =
+      session?.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object'
+        ? session.esvp.network as Record<string, unknown>
+        : null;
     const preferredSessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
     const validation = session?.esvp && typeof session.esvp === 'object' ? session.esvp.validation : null;
     const sessionId =
@@ -6864,35 +6964,50 @@ app.post('/api/testing/mobile/recordings/:id/esvp/sync-network', async (c) => {
       (session?.esvp && typeof session.esvp.currentSessionId === 'string' ? session.esvp.currentSessionId : '');
 
     if (!sessionId) {
-      return c.json({ error: 'Nenhuma sessão ESVP associada encontrada para sincronizar rede.' }, 400);
+      return c.json({ error: 'No attached ESVP session was found for network sync.' }, 400);
     }
 
     const networkData = await collectESVPSessionNetworkData(sessionId, serverUrl);
-    session.networkEntries = networkData.networkEntries;
-    session.networkCapture = networkData.networkCapture;
+    const shouldPersistFreshNetwork = hasMeaningfulESVPNetworkSnapshot({
+      networkEntries: networkData.networkEntries,
+      traceKinds: networkData.traceKinds,
+      networkState: networkData.networkState,
+    });
+    if (networkData.networkEntries.length > 0) {
+      session.networkEntries = networkData.networkEntries;
+      session.networkCapture = networkData.networkCapture;
+    } else if (!existingNetworkCapture) {
+      session.networkCapture = networkData.networkCapture;
+    }
     session.esvp = {
       ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
-      network: {
-        ...(session?.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object'
-          ? session.esvp.network
+      ...(shouldPersistFreshNetwork
+        ? {
+            network: {
+              ...(existingESVPNetwork || {}),
+              sourceSessionId: sessionId,
+              networkSupported: typeof networkData.networkState?.supported === 'boolean'
+                ? networkData.networkState.supported
+                : existingESVPNetwork?.networkSupported ?? null,
+              traceKinds: networkData.traceKinds,
+              traceCount: Number.isFinite(networkData.networkState?.trace_count)
+                ? Number(networkData.networkState?.trace_count)
+                : networkData.traceKinds.length,
+              syncedAt: new Date().toISOString(),
+              entryCount: networkData.networkEntries.length > 0 ? networkData.networkEntries.length : existingNetworkEntries.length,
+              managedProxy: networkData.networkState?.managed_proxy ?? existingESVPNetwork?.managedProxy ?? null,
+              captureProxy: existingESVPNetwork?.captureProxy || null,
+              appTraceCollector: existingESVPNetwork?.appTraceCollector || null,
+              activeProfile: resolvePersistedNetworkProfile(networkData.networkState, existingESVPNetwork),
+              effectiveProfile: resolvePersistedNetworkProfile(networkData.networkState, existingESVPNetwork),
+              configuredAt: networkData.networkState?.configured_at || existingESVPNetwork?.configuredAt || null,
+              clearedAt: networkData.networkState?.cleared_at || existingESVPNetwork?.clearedAt || null,
+              lastError: networkData.networkState?.last_error || existingESVPNetwork?.lastError || null,
+            },
+          }
+        : existingESVPNetwork
+          ? { network: existingESVPNetwork }
           : {}),
-        sourceSessionId: sessionId,
-        networkSupported: typeof networkData.networkState?.supported === 'boolean' ? networkData.networkState.supported : null,
-        traceKinds: networkData.traceKinds,
-        traceCount: Number.isFinite(networkData.networkState?.trace_count)
-          ? Number(networkData.networkState?.trace_count)
-          : networkData.traceKinds.length,
-        syncedAt: new Date().toISOString(),
-        entryCount: networkData.networkEntries.length,
-        managedProxy: networkData.networkState?.managed_proxy ?? session?.esvp?.network?.managedProxy ?? null,
-        captureProxy: session?.esvp?.network?.captureProxy || null,
-        appTraceCollector: session?.esvp?.network?.appTraceCollector || null,
-        activeProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
-        effectiveProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
-        configuredAt: networkData.networkState?.configured_at || session?.esvp?.network?.configuredAt || null,
-        clearedAt: networkData.networkState?.cleared_at || session?.esvp?.network?.clearedAt || null,
-        lastError: networkData.networkState?.last_error || session?.esvp?.network?.lastError || null,
-      },
     };
 
     await writeMobileRecordingSessionData(id, session);
@@ -6901,8 +7016,8 @@ app.post('/api/testing/mobile/recordings/:id/esvp/sync-network', async (c) => {
     return c.json({
       success: true,
       sessionId,
-      networkEntries: networkData.networkEntries,
-      networkCapture: networkData.networkCapture,
+      networkEntries: networkData.networkEntries.length > 0 ? networkData.networkEntries : existingNetworkEntries,
+      networkCapture: networkData.networkEntries.length > 0 ? networkData.networkCapture : (existingNetworkCapture || networkData.networkCapture),
       traceKinds: networkData.traceKinds,
       appTraceCollector: session.esvp?.network?.appTraceCollector || null,
     });

@@ -8,7 +8,7 @@ import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { EXPORTS_DIR } from '../../db/index.js';
 import { getBundlePath, getTemplate } from './loader.js';
-import type { TemplateProps, TemplateId, RenderJob } from './types.js';
+import type { TemplateProps, TemplateId, RenderJob, TerminalTab } from './types.js';
 
 // In-memory render job tracking
 const renderJobs = new Map<string, RenderJob>();
@@ -28,6 +28,166 @@ function getOutputDir(projectId: string): string {
     mkdirSync(dir, { recursive: true });
   }
   return dir;
+}
+
+type TemplateRenderOptimizationProfile = {
+  maxTabs: number;
+  maxCharsPerTab: number;
+  maxLinesPerTab: number;
+  maxJsonItemsPerTab: number;
+  maxTotalChars: number;
+};
+
+function getLineCount(text: string): number {
+  return String(text || '').replace(/\r\n/g, '\n').split('\n').length;
+}
+
+function shouldPreserveTerminalTabContent(
+  tab: TerminalTab,
+  profile: TemplateRenderOptimizationProfile
+): boolean {
+  return tab.content.length <= profile.maxCharsPerTab && getLineCount(tab.content) <= profile.maxLinesPerTab;
+}
+
+function clampTextForTerminalRender(text: string, profile: TemplateRenderOptimizationProfile): string {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').replace(/\t/g, '  ');
+  const rawLines = normalized.split('\n').map((line) => line.replace(/\s+$/g, ''));
+  const truncatedByLines = rawLines.length > profile.maxLinesPerTab;
+  const visibleLines = truncatedByLines
+    ? rawLines.slice(0, profile.maxLinesPerTab - 1)
+    : rawLines.slice(0, profile.maxLinesPerTab);
+  if (truncatedByLines) {
+    const hiddenLines = Math.max(1, rawLines.length - visibleLines.length);
+    visibleLines.push(`... +${hiddenLines} more lines`);
+  }
+
+  let output = visibleLines.join('\n').trim();
+  if (output.length > profile.maxCharsPerTab) {
+    output = `${output.slice(0, Math.max(0, profile.maxCharsPerTab - 12)).trimEnd()}\n...`;
+  }
+
+  return output || '// no terminal content';
+}
+
+function formatCompactBytes(value: unknown): string {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)}MB`;
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)}KB`;
+  return `${Math.round(bytes)}B`;
+}
+
+function compactTerminalJsonContent(
+  tab: TerminalTab,
+  profile: TemplateRenderOptimizationProfile
+): string | null {
+  try {
+    const parsed = JSON.parse(tab.content);
+    if (!Array.isArray(parsed)) return null;
+
+    const lines = parsed
+      .slice(0, profile.maxJsonItemsPerTab)
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const record = item as Record<string, unknown>;
+        const status = record.status ?? '...';
+        const duration = Number.isFinite(Number(record.durationMs)) ? `${Math.round(Number(record.durationMs))}ms` : '';
+        const size = formatCompactBytes(record.responseSize);
+        const rawUrl = typeof record.url === 'string' ? record.url : '';
+        let displayUrl = rawUrl || tab.route || tab.label;
+        try {
+          const parsedUrl = new URL(rawUrl);
+          displayUrl = parsedUrl.pathname || `${parsedUrl.origin}${parsedUrl.pathname}`;
+        } catch {}
+        return [status, duration, size, displayUrl].filter(Boolean).join(' ');
+      })
+      .filter((line): line is string => !!line);
+
+    if (parsed.length > lines.length) {
+      lines.push(`... +${parsed.length - lines.length} more requests`);
+    }
+
+    return clampTextForTerminalRender(lines.join('\n'), profile);
+  } catch {
+    return null;
+  }
+}
+
+function getTemplateRenderOptimizationProfile(
+  templateId: TemplateId,
+  props: TemplateProps,
+  realVideoDuration: number | null
+): TemplateRenderOptimizationProfile {
+  const totalChars = Array.isArray(props.terminalTabs)
+    ? props.terminalTabs.reduce((sum, tab) => sum + String(tab?.content || '').length, 0)
+    : 0;
+  const tabCount = Array.isArray(props.terminalTabs) ? props.terminalTabs.length : 0;
+  const isLongVideo = (realVideoDuration || props.videoDuration || 0) >= 30;
+  const isHeavyTerminal = totalChars >= 1600 || tabCount >= 6;
+  const showcaseAggressive = templateId === 'showcase';
+
+  if (isLongVideo || isHeavyTerminal || showcaseAggressive) {
+    return {
+      maxTabs: showcaseAggressive ? 4 : 5,
+      maxCharsPerTab: showcaseAggressive ? 1_000 : isLongVideo ? 1_800 : 2_200,
+      maxLinesPerTab: showcaseAggressive ? 22 : 40,
+      maxJsonItemsPerTab: showcaseAggressive ? 6 : 12,
+      maxTotalChars: showcaseAggressive ? 3_500 : 7_000,
+    };
+  }
+
+  return {
+    maxTabs: 6,
+    maxCharsPerTab: 2_800,
+    maxLinesPerTab: 60,
+    maxJsonItemsPerTab: 16,
+    maxTotalChars: 10_000,
+  };
+}
+
+function optimizeTemplatePropsForRender(
+  templateId: TemplateId,
+  props: TemplateProps,
+  realVideoDuration: number | null
+): TemplateProps {
+  if (!Array.isArray(props.terminalTabs) || props.terminalTabs.length === 0) {
+    return { ...props };
+  }
+
+  const profile = getTemplateRenderOptimizationProfile(templateId, props, realVideoDuration);
+  const terminalTabs = props.terminalTabs
+    .slice(0, profile.maxTabs)
+    .map((tab) => {
+      if (shouldPreserveTerminalTabContent(tab, profile)) {
+        return { ...tab };
+      }
+      const compactJson = compactTerminalJsonContent(tab, profile);
+      return {
+        ...tab,
+        content: compactJson || clampTextForTerminalRender(tab.content, profile),
+      };
+    });
+
+  let totalChars = terminalTabs.reduce((sum, tab) => sum + tab.content.length, 0);
+  while (totalChars > profile.maxTotalChars && terminalTabs.length > 1) {
+    terminalTabs.pop();
+    totalChars = terminalTabs.reduce((sum, tab) => sum + tab.content.length, 0);
+  }
+
+  if (totalChars > profile.maxTotalChars && terminalTabs.length === 1) {
+    const [tab] = terminalTabs;
+    const compactJson = compactTerminalJsonContent(tab, profile);
+    terminalTabs[0] = {
+      ...tab,
+      content: compactJson || clampTextForTerminalRender(tab.content, profile),
+    };
+  }
+
+  return {
+    ...props,
+    terminalTabs,
+    hasNetworkData: terminalTabs.length > 0,
+  };
 }
 
 /**
@@ -66,7 +226,7 @@ export async function startRender(
   renderJobs.set(jobId, job);
 
   // Start rendering asynchronously
-  renderAsync(job, bundlePath, template.compositionId, props, onProgress).catch(err => {
+  renderAsync(job, bundlePath, templateId, template.compositionId, props, onProgress).catch(err => {
     job.status = 'error';
     job.error = err.message;
     job.completedAt = Date.now();
@@ -78,6 +238,7 @@ export async function startRender(
 async function renderAsync(
   job: RenderJob,
   bundlePath: string,
+  templateId: TemplateId,
   compositionId: string,
   props: TemplateProps,
   onProgress?: (progress: number) => void,
@@ -88,41 +249,28 @@ async function renderAsync(
     // Dynamic import to avoid failing if @remotion/renderer is not installed
     const { selectComposition, renderMedia } = await import('@remotion/renderer');
 
+    // Get real video duration via ffprobe
+    const realVideoDuration = getVideoDuration(props.videoUrl);
+    const optimizedProps = optimizeTemplatePropsForRender(templateId, props, realVideoDuration);
+
+    if (realVideoDuration && realVideoDuration > 0) {
+      optimizedProps.videoDuration = realVideoDuration;
+    }
+
     const composition = await selectComposition({
       serveUrl: bundlePath,
       id: compositionId,
-      inputProps: props as unknown as Record<string, unknown>,
+      inputProps: optimizedProps as unknown as Record<string, unknown>,
     });
 
-    // Calculate dynamic duration to fit the full source video
+    // Match render length to the source video only. Terminal content is compacted
+    // for render-time so long scripts do not inflate the full composition.
     const fps = composition.fps || 30;
     let durationOverride: number | undefined;
-
-    // Get real video duration via ffprobe
-    const realVideoDuration = getVideoDuration(props.videoUrl);
     if (realVideoDuration && realVideoDuration > 0) {
-      // Update props so templates know the real duration
-      props.videoDuration = realVideoDuration;
       const videoFrames = Math.ceil(realVideoDuration * fps);
-      // Ensure composition is long enough for the full video
       if (videoFrames > composition.durationInFrames) {
         durationOverride = videoFrames;
-      }
-    }
-
-    // Also account for terminal tabs typewriter animation
-    if (props.terminalTabs && props.terminalTabs.length > 0) {
-      const charFrames = 2;
-      const transitionFrames = 30;
-      const animationDelay = 190; // terminalAppearFrame(170) + 20 delay
-      const totalTypewriterFrames = props.terminalTabs.reduce(
-        (sum, tab) => sum + tab.content.length * charFrames + transitionFrames,
-        0
-      );
-      const tabMinFrames = totalTypewriterFrames + animationDelay;
-      const currentTarget = durationOverride || composition.durationInFrames;
-      if (tabMinFrames > currentTarget) {
-        durationOverride = tabMinFrames;
       }
     }
 
@@ -133,7 +281,7 @@ async function renderAsync(
       serveUrl: bundlePath,
       codec: 'h264',
       outputLocation: job.outputPath!,
-      inputProps: props as unknown as Record<string, unknown>,
+      inputProps: optimizedProps as unknown as Record<string, unknown>,
       onProgress: ({ progress }) => {
         job.progress = progress;
         onProgress?.(progress);

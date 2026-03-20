@@ -269,7 +269,7 @@ export async function validateMaestroRecordingWithESVP(
   if (translated.actions.length === 0) {
     return {
       supported: false,
-      reason: 'Nenhuma action compatível com o contrato público do ESVP foi encontrada nesta gravação Maestro.',
+      reason: 'No actions compatible with the public ESVP contract were found in this Maestro recording.',
       connectionMode: connection.mode,
       serverUrl: connection.serverUrl,
       executor,
@@ -466,7 +466,7 @@ async function runValidationSourceSession(
   );
   const sourceSessionId = String(created?.session?.id || created?.id || '');
   if (!sourceSessionId) {
-    throw new Error('Falha ao criar sessão ESVP para validação Maestro.');
+    throw new Error('Failed to create an ESVP session for Maestro validation.');
   }
 
   const appTraceMode = getRequestedAppLabCaptureMode(input.requestedNetworkProfile) === 'app-http-trace';
@@ -1022,7 +1022,7 @@ export function translateMaestroActionsToESVP(
               }
             : null,
           action,
-          'launch sem appId'
+          'launch is missing an appId'
         );
         break;
       }
@@ -1061,7 +1061,7 @@ export function translateMaestroActionsToESVP(
             action
           );
         } else {
-          pushTranslated(null, action, 'tap sem coordenadas ou selector traduzível para ESVP');
+          pushTranslated(null, action, 'tap is missing coordinates or a selector that can be translated to ESVP');
         }
         break;
       }
@@ -1102,7 +1102,7 @@ export function translateMaestroActionsToESVP(
             action
           );
         } else {
-          pushTranslated(null, action, 'swipe/scroll sem coordenadas ou direction');
+          pushTranslated(null, action, 'swipe/scroll is missing coordinates or direction');
         }
         break;
       }
@@ -1119,7 +1119,7 @@ export function translateMaestroActionsToESVP(
               }
             : null,
           action,
-          'input sem text'
+          'input is missing text'
         );
         break;
       }
@@ -1158,7 +1158,7 @@ export function translateMaestroActionsToESVP(
               }
             : null,
           action,
-          'pressKey sem key'
+          'pressKey is missing a key value'
         );
         break;
       }
@@ -1180,7 +1180,7 @@ export function translateMaestroActionsToESVP(
       }
 
       default:
-        pushTranslated(null, action, `tipo "${action.type}" ainda não é suportado pelo adapter ESVP`);
+        pushTranslated(null, action, `action type "${action.type}" is not supported by the ESVP adapter yet`);
         break;
     }
   }
