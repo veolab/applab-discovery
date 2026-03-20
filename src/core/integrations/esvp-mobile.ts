@@ -28,6 +28,11 @@ import {
   finalizeLocalCaptureProxySession,
   type LocalCaptureProxyState,
 } from './local-network-proxy.js';
+import {
+  finalizeLocalAppHttpTraceCollector,
+  startLocalAppHttpTraceCollector,
+  type LocalAppHttpTraceCollectorState,
+} from './local-app-http-trace.js';
 
 type MobilePlatform = 'ios' | 'android';
 
@@ -60,6 +65,7 @@ export interface ESVPMobileValidationResult {
   networkState?: ESVPSessionNetworkState | null;
   managedProxy?: ESVPManagedProxyState | null;
   captureProxy?: LocalCaptureProxyState | null;
+  appTraceCollector?: LocalAppHttpTraceCollectorState | null;
   networkProfileApplied?: Record<string, unknown> | null;
   bootstrap?: {
     applied: boolean;
@@ -84,7 +90,7 @@ export interface ESVPMobileValidationResult {
 
 export interface ESVPMobileNetworkProfileInput {
   enabled?: boolean;
-  mode?: 'managed-proxy' | 'external-proxy';
+  mode?: 'managed-proxy' | 'external-proxy' | 'external-mitm' | 'app-http-trace';
   profile?: string;
   label?: string;
   connectivity?: 'online' | 'offline' | 'reset';
@@ -98,6 +104,7 @@ export interface ESVPMobileValidationOptions {
   network?: ESVPMobileNetworkProfileInput | null;
   captureLogcat?: boolean;
   replay?: boolean;
+  appTraceServerPort?: number;
   bootstrapScreenshotPath?: string;
   recoveryVisionProvider?: ActionDetectorProvider | ActionDetectorProvider[];
   allowAppLabOwnedProxyAutostart?: boolean;
@@ -292,6 +299,7 @@ export async function validateMaestroRecordingWithESVP(
       requestedNetworkProfile,
       captureLogcat: shouldCaptureLogcat,
       serverUrl: options.serverUrl,
+      appTraceServerPort: options.appTraceServerPort,
       metaSource: 'applab-discovery-maestro-validation',
       allowAppLabOwnedProxyAutostart: options.allowAppLabOwnedProxyAutostart,
     }
@@ -315,6 +323,7 @@ export async function validateMaestroRecordingWithESVP(
           requestedNetworkProfile,
           captureLogcat: shouldCaptureLogcat,
           serverUrl: options.serverUrl,
+          appTraceServerPort: options.appTraceServerPort,
           metaSource: 'applab-discovery-maestro-validation-recovered',
           extraMeta: {
             recovery_strategy: recoveryPlan.strategy,
@@ -407,6 +416,7 @@ export async function validateMaestroRecordingWithESVP(
     networkState,
     managedProxy: networkState?.managed_proxy || null,
     captureProxy: execution.captureProxy || null,
+    appTraceCollector: execution.appTraceCollector || null,
     networkProfileApplied: isObject(execution.networkConfigResult?.applied)
       ? (execution.networkConfigResult?.applied as Record<string, unknown>)
       : null,
@@ -424,6 +434,7 @@ async function runValidationSourceSession(
     requestedNetworkProfile: Record<string, unknown> | null;
     captureLogcat: boolean;
     serverUrl?: string;
+    appTraceServerPort?: number;
     metaSource: string;
     extraMeta?: Record<string, unknown>;
     allowAppLabOwnedProxyAutostart?: boolean;
@@ -433,6 +444,7 @@ async function runValidationSourceSession(
   run: any;
   networkConfigResult: Record<string, unknown> | null;
   captureProxy: LocalCaptureProxyState | null;
+  appTraceCollector: LocalAppHttpTraceCollectorState | null;
   cleanupError: string | null;
   clearedAt: string | null;
 }> {
@@ -457,27 +469,46 @@ async function runValidationSourceSession(
     throw new Error('Falha ao criar sessão ESVP para validação Maestro.');
   }
 
-  const preparedNetworkProfile = await ensureLocalCaptureProxyProfile({
-    sessionId: sourceSessionId,
-    profile: input.requestedNetworkProfile,
-    platform: recording.platform,
-    deviceId: recording.deviceId,
-    allowAppLabOwnedProxy: input.allowAppLabOwnedProxyAutostart,
-    lifecycle: {
-      executor: input.executor,
-      deviceId: recording.deviceId,
-      serverUrl: input.serverUrl,
-      captureLogcat: input.captureLogcat,
-      cleanupMeta: {
-        recording_id: recording.id,
-        recording_name: recording.name,
-        recording_platform: recording.platform,
-      },
-    },
-  });
+  const appTraceMode = getRequestedAppLabCaptureMode(input.requestedNetworkProfile) === 'app-http-trace';
+  const preparedNetworkProfile = appTraceMode
+    ? {
+        profile: input.requestedNetworkProfile,
+        captureProxy: null,
+        usesExternalProxy: false,
+        appLabOwnedProxy: false,
+      }
+    : await ensureLocalCaptureProxyProfile({
+        sessionId: sourceSessionId,
+        profile: input.requestedNetworkProfile,
+        platform: recording.platform,
+        deviceId: recording.deviceId,
+        allowAppLabOwnedProxy: input.allowAppLabOwnedProxyAutostart,
+        lifecycle: {
+          executor: input.executor,
+          deviceId: recording.deviceId,
+          serverUrl: input.serverUrl,
+          captureLogcat: input.captureLogcat,
+          cleanupMeta: {
+            recording_id: recording.id,
+            recording_name: recording.name,
+            recording_platform: recording.platform,
+          },
+        },
+      });
+
+  const appTraceCollector = appTraceMode
+    ? startLocalAppHttpTraceCollector({
+        sessionId: sourceSessionId,
+        recordingId: recording.id,
+        appId: input.appId || recording.appId,
+        platform: recording.platform,
+        deviceId: recording.deviceId,
+        serverPort: input.appTraceServerPort || 3847,
+      })
+    : null;
 
   let networkConfigResult: Record<string, unknown> | null = null;
-  if (preparedNetworkProfile.profile) {
+  if (preparedNetworkProfile.profile && !appTraceMode) {
     networkConfigResult = await configureESVPNetwork(
       sourceSessionId,
       preparedNetworkProfile.profile,
@@ -503,19 +534,26 @@ async function runValidationSourceSession(
     runError = error;
   }
 
-  const finalization = await finalizeLocalCaptureProxySession({
-    sourceSessionId,
-    executor: input.executor,
-    deviceId: recording.deviceId,
-    serverUrl: input.serverUrl,
-    captureLogcat: input.captureLogcat,
-    clearNetwork: Boolean(preparedNetworkProfile.profile),
-    cleanupMeta: {
-      recording_id: recording.id,
-      recording_name: recording.name,
-      recording_platform: recording.platform,
-    },
-  });
+  const finalization = appTraceMode
+    ? await finalizeLocalAppHttpTraceCollector({
+        sourceSessionId,
+        serverUrl: input.serverUrl,
+      })
+    : await finalizeLocalCaptureProxySession({
+        sourceSessionId,
+        executor: input.executor,
+        deviceId: recording.deviceId,
+        serverUrl: input.serverUrl,
+        captureLogcat: input.captureLogcat,
+        clearNetwork: Boolean(preparedNetworkProfile.profile),
+        cleanupMeta: {
+          recording_id: recording.id,
+          recording_name: recording.name,
+          recording_platform: recording.platform,
+        },
+      });
+  const finalizationCollector = 'collector' in finalization ? finalization.collector || null : null;
+  const finalizationClearedAt = 'clearedAt' in finalization ? finalization.clearedAt : null;
 
   if (runError) {
     throw runError;
@@ -526,8 +564,9 @@ async function runValidationSourceSession(
     run,
     networkConfigResult,
     captureProxy: preparedNetworkProfile.captureProxy,
+    appTraceCollector: finalizationCollector || appTraceCollector,
     cleanupError: finalization.errors[0] || null,
-    clearedAt: finalization.clearedAt,
+    clearedAt: finalizationClearedAt,
   };
 }
 
@@ -918,6 +957,14 @@ function normalizeRequestedNetworkProfile(
   return buildAppLabNetworkProfile(input, context);
 }
 
+function getRequestedAppLabCaptureMode(profile: Record<string, unknown> | null): string {
+  if (!profile || !isObject(profile.capture)) return '';
+  const capture = profile.capture as Record<string, unknown>;
+  const applabMode = typeof capture.applabMode === 'string' ? capture.applabMode.trim().toLowerCase() : '';
+  if (applabMode) return applabMode;
+  return typeof capture.mode === 'string' ? capture.mode.trim().toLowerCase() : '';
+}
+
 function extractNetworkStateFromConfig(config: Record<string, unknown> | null): ESVPSessionNetworkState | null {
   if (!isObject(config?.network)) return null;
   return config.network as ESVPSessionNetworkState;
@@ -1203,12 +1250,17 @@ function normalizeNetworkPayloadToEntries(
     artifactMeta: Record<string, unknown>;
   }
 ): CapturedNetworkEntry[] {
-  const payloadRecord = isObject(payload) ? (payload as Record<string, unknown>) : null;
-  const payloadLog = payloadRecord && isObject(payloadRecord.log)
-    ? (payloadRecord.log as Record<string, unknown>)
-    : null;
-  if (context.traceKind === 'har' && payloadLog && Array.isArray(payloadLog.entries)) {
-    return normalizeHarEntries(payloadLog.entries as any[], context);
+  const payloadRecord = parseEmbeddedObject(payload);
+  const nestedPayloadRecord = payloadRecord ? parseEmbeddedObject(payloadRecord.payload) : null;
+  const payloadLog = payloadRecord ? parseEmbeddedObject(payloadRecord.log) : null;
+  const nestedPayloadLog = nestedPayloadRecord ? parseEmbeddedObject(nestedPayloadRecord.log) : null;
+  if (context.traceKind === 'har') {
+    if (payloadLog && Array.isArray(payloadLog.entries)) {
+      return normalizeHarEntries(payloadLog.entries as any[], context);
+    }
+    if (nestedPayloadLog && Array.isArray(nestedPayloadLog.entries)) {
+      return normalizeHarEntries(nestedPayloadLog.entries as any[], context);
+    }
   }
 
   const candidates = extractTraceCandidates(payload);
@@ -1312,8 +1364,16 @@ function normalizeHttpTraceCandidate(
   ) ?? Date.now();
   const finishedAt = durationMs != null ? startedAt + durationMs : firstTimestamp(candidate.finishedAt, candidate.finished_at) ?? null;
 
-  const requestHeaders = headerObject(request.headers);
-  const responseHeaders = headerObject(response?.headers);
+  const requestHeaders = mergeHeaderObjects(
+    candidate.requestHeaders,
+    candidate.request_headers,
+    request.headers
+  );
+  const responseHeaders = mergeHeaderObjects(
+    candidate.responseHeaders,
+    candidate.response_headers,
+    response?.headers
+  );
   const requestBodyPreview = firstString(
     candidate.requestBodyPreview,
     candidate.request_body_preview,
@@ -1333,10 +1393,13 @@ function normalizeHttpTraceCandidate(
     request.body_bytes
   );
   const responseSize = firstNumber(
+    candidate.responseBodyBytes,
+    candidate.response_body_bytes,
     candidate.responseSize,
     candidate.response_size,
     response?.size,
     response?.bodyBytes,
+    response?.body_bytes,
     response?.contentLength,
     responseHeaders['content-length']
   );
@@ -1385,12 +1448,23 @@ function normalizeHttpTraceCandidate(
 
 function extractTraceCandidates(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
-  if (!isObject(payload)) return [];
+  const payloadRecord = parseEmbeddedObject(payload);
+  if (!payloadRecord) return [];
 
-  if (Array.isArray(payload.entries)) return payload.entries;
-  if (Array.isArray(payload.requests)) return payload.requests;
-  if (Array.isArray(payload.events)) return payload.events;
-  if (Array.isArray(payload.items)) return payload.items;
+  const nestedCandidates = [
+    payloadRecord,
+    parseEmbeddedObject(payloadRecord.payload),
+    parseEmbeddedObject(payloadRecord.data),
+    parseEmbeddedObject(payloadRecord.trace),
+    parseEmbeddedObject(payloadRecord.result),
+  ].filter(Boolean) as Array<Record<string, unknown>>;
+
+  for (const candidate of nestedCandidates) {
+    if (Array.isArray(candidate.entries)) return candidate.entries;
+    if (Array.isArray(candidate.requests)) return candidate.requests;
+    if (Array.isArray(candidate.events)) return candidate.events;
+    if (Array.isArray(candidate.items)) return candidate.items;
+  }
 
   return [payload];
 }
@@ -1463,6 +1537,17 @@ function headerObject(value: unknown): Record<string, string> {
   }, {});
 }
 
+function mergeHeaderObjects(...values: unknown[]): Record<string, string> {
+  return values.reduce<Record<string, string>>((acc, value) => {
+    const headers = headerObject(value);
+    if (!headers || Object.keys(headers).length === 0) return acc;
+    return {
+      ...acc,
+      ...headers,
+    };
+  }, {});
+}
+
 function firstString(...values: unknown[]): string | null {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
@@ -1495,6 +1580,18 @@ function numberOrNull(value: unknown): number | null {
   if (value == null || value === '') return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function parseEmbeddedObject(value: unknown): Record<string, unknown> | null {
+  if (isObject(value)) return value;
+  if (typeof value !== 'string') return null;
+
+  try {
+    const parsed = JSON.parse(value);
+    return isObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function isObject(value: unknown): value is Record<string, any> {

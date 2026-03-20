@@ -45,6 +45,9 @@ discoverylab install   # configures Claude Code MCP
 discoverylab serve     # opens web UI
 ```
 
+`applab serve` works as an alias — both `discoverylab` and `applab` are interchangeable.
+`serve` and `server` are also interchangeable.
+
 ## Features
 
 | Feature | Description |
@@ -105,6 +108,29 @@ To force remote mode, set the control-plane URL:
 ```bash
 export ESVP_BASE_URL=http://your-esvp-host:8787
 ```
+
+Local `external-proxy` capture is now backed by a bundled host runtime. To ship the binary inside `dist/runtime/esvp-host-runtime/`, run:
+
+```bash
+npm run build:host-runtime
+```
+
+Regular `npm run build` attempts this step in best-effort mode so the JS build still succeeds on machines without Rust, but distributable builds that need local capture should include the runtime binary.
+
+For a local distributable package that already contains the bundled runtime for the current host, run:
+
+```bash
+npm run pack:local
+```
+
+That produces the npm tarball with `dist/runtime/esvp-host-runtime/...` embedded, so the installed end-user package only needs `discoverylab serve` or `discoverylab server`.
+
+Development vs packaged usage:
+
+- local development can use `bun run dev`; when a bundled runtime is not present, App Lab falls back to `cargo run` if Rust is installed
+- packaged/npm releases should be built with `npm run pack:local` or `npm publish`, which require the host runtime and embed it so end users only need `discoverylab serve` or `discoverylab server`
+- the bundled runtime is currently host-target specific, so cross-platform distribution still needs a build matrix that produces binaries for each target you want to ship
+- because App Lab is open source, the bundled runtime is intentionally limited to the local proxy/capture commodity path; it does not embed private Entropy Lab managed-proxy or protocol internals
 
 Available MCP tools:
 

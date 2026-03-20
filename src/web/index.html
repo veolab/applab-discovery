@@ -6807,6 +6807,13 @@
 
                         <!-- Record Button -->
                         <div id="captureMobileControls">
+                            <label for="captureProxyOptInToggle" style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); cursor: pointer;">
+                                <input type="checkbox" id="captureProxyOptInToggle" style="width: 16px; height: 16px; accent-color: var(--accent); margin-top: 2px;">
+                                <div style="flex: 1; min-width: 0;">
+                                    <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">Enable App Lab network capture</div>
+                                    <div id="captureProxyOptInStatus" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.5;">Optional. When off, App Lab will not open a local proxy on this machine.</div>
+                                </div>
+                            </label>
                             <button id="startCaptureMobileBtn" class="btn btn-primary" onclick="startCaptureMobile()" style="width: 100%;">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 6px;">
                                     <circle cx="12" cy="12" r="8" fill="#ef4444"/>
@@ -8580,7 +8587,6 @@
 
         function closeAllModals() {
             shortcutsModal.classList.remove('active');
-            esvpInfoModal.classList.remove('active');
             settingsModal.classList.remove('active');
         }
 
@@ -8730,6 +8736,10 @@
 
         let currentProxySafetySettings = null;
 
+        function isAppLabNetworkCaptureOptedIn() {
+            return currentProxySafetySettings?.localProxyOptInEnabled === true;
+        }
+
         function updateProxySafetySettingsUI(settings) {
             currentProxySafetySettings = settings || null;
             const checkbox = document.getElementById('proxyEmergencyLockEnabled');
@@ -8738,10 +8748,26 @@
             const activeProxyCount = Number(settings?.activeProxyCount || 0);
             const activeProxies = Array.isArray(settings?.activeProxies) ? settings.activeProxies : [];
             const autoDisableTimeoutMs = Number.isFinite(settings?.autoDisableTimeoutMs) ? Number(settings.autoDisableTimeoutMs) : null;
+            const localProxyOptInEnabled = settings?.localProxyOptInEnabled === true;
 
             if (checkbox) {
                 checkbox.checked = settings?.emergencyLockEnabled === true;
             }
+            ['captureProxyOptInToggle', 'testingProxyOptInToggle'].forEach((id) => {
+                const toggle = document.getElementById(id);
+                if (toggle) toggle.checked = localProxyOptInEnabled;
+            });
+            ['captureProxyOptInStatus', 'testingProxyOptInStatus'].forEach((id) => {
+                const status = document.getElementById(id);
+                if (!status) return;
+                if (localProxyOptInEnabled) {
+                    status.textContent = activeProxyCount > 0
+                        ? `Enabled. ${activeProxyCount} App Lab prox${activeProxyCount === 1 ? 'y is' : 'ies are'} active right now and will auto-clean up when the run ends or the server stops.`
+                        : 'Enabled. App Lab may open a temporary local proxy during ESVP network capture and will auto-clean it up.';
+                } else {
+                    status.textContent = 'Optional. When off, App Lab validation runs without local network capture and no App Lab-owned proxy is started.';
+                }
+            });
             if (statusEl) {
                 const parts = [];
                 parts.push(settings?.emergencyLockEnabled === true ? 'Emergency lock is ON.' : 'Emergency lock is OFF.');
@@ -8773,6 +8799,9 @@
                     ? `Disable Active Proxy Now (${activeProxyCount})`
                     : 'Disable Active Proxy Now';
             }
+            if (currentView === 'analysis' && currentProject?.id && isESVPEligibleMobileProject(currentProject)) {
+                Promise.resolve().then(() => updateAnalysisTab()).catch(() => {});
+            }
         }
 
         async function loadProxySafetySettings() {
@@ -8788,6 +8817,7 @@
                 console.error('Failed to load proxy safety settings:', e);
                 updateProxySafetySettingsUI({
                     emergencyLockEnabled: false,
+                    localProxyOptInEnabled: false,
                     activeProxyCount: 0,
                     activeProxies: [],
                     autoDisableOnServerShutdown: true,
@@ -8801,15 +8831,24 @@
             }
         }
 
-        async function saveProxySafetySettings(options = {}) {
-            const { silent = false } = options;
+        async function saveProxySafetySettings(overrides = {}, options = {}) {
+            const { silent = false, changeType = 'emergency-lock' } = options;
             const checkbox = document.getElementById('proxyEmergencyLockEnabled');
-            const emergencyLockEnabled = checkbox?.checked === true;
+            const captureToggle = document.getElementById('captureProxyOptInToggle');
+            const testingToggle = document.getElementById('testingProxyOptInToggle');
+            const emergencyLockEnabled =
+                typeof overrides?.emergencyLockEnabled === 'boolean'
+                    ? overrides.emergencyLockEnabled
+                    : checkbox?.checked === true;
+            const localProxyOptInEnabled =
+                typeof overrides?.localProxyOptInEnabled === 'boolean'
+                    ? overrides.localProxyOptInEnabled
+                    : captureToggle?.checked === true || testingToggle?.checked === true;
             try {
                 const response = await fetch('/api/settings/network-proxy', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ emergencyLockEnabled })
+                    body: JSON.stringify({ emergencyLockEnabled, localProxyOptInEnabled })
                 });
                 const data = await response.json();
                 if (!response.ok) {
@@ -8821,9 +8860,19 @@
                     await refreshCurrentProjectAfterESVPMutation().catch(() => {});
                 }
                 if (!silent) {
-                    const lockState = emergencyLockEnabled ? 'enabled' : 'disabled';
                     const suffix = finalized > 0 ? ` • ${finalized} active session${finalized === 1 ? '' : 's'} cleaned up` : '';
-                    showToast(`App Lab proxy emergency lock ${lockState}${suffix}`, 'success', 5000);
+                    if (changeType === 'opt-in') {
+                        showToast(
+                            localProxyOptInEnabled
+                                ? 'App Lab network capture enabled'
+                                : `App Lab network capture disabled${suffix}`,
+                            'success',
+                            5000
+                        );
+                    } else {
+                        const lockState = emergencyLockEnabled ? 'enabled' : 'disabled';
+                        showToast(`App Lab proxy emergency lock ${lockState}${suffix}`, 'success', 5000);
+                    }
                 }
                 return true;
             } catch (e) {
@@ -9332,7 +9381,17 @@
             persistCaptureSettingsFromForm({ silent: true });
         });
         document.getElementById('proxyEmergencyLockEnabled')?.addEventListener('change', () => {
-            void saveProxySafetySettings({ silent: false });
+            void saveProxySafetySettings({}, { silent: false, changeType: 'emergency-lock' });
+        });
+        ['captureProxyOptInToggle', 'testingProxyOptInToggle'].forEach((id) => {
+            document.getElementById(id)?.addEventListener('change', (event) => {
+                const enabled = event?.target?.checked === true;
+                ['captureProxyOptInToggle', 'testingProxyOptInToggle'].forEach((toggleId) => {
+                    const toggle = document.getElementById(toggleId);
+                    if (toggle) toggle.checked = enabled;
+                });
+                void saveProxySafetySettings({ localProxyOptInEnabled: enabled }, { silent: false, changeType: 'opt-in' });
+            });
         });
         document.getElementById('customExportPath')?.addEventListener('change', () => {
             persistCaptureSettingsFromForm({ silent: true });
@@ -13699,6 +13758,13 @@
                             <div id="mobileRecordingControls" style="margin-top: 12px; border-top: 1px solid var(--border-subtle); padding-top: 12px;">
                                 <!-- State 1: Start Button -->
                                 <div id="mobileRecordingStart">
+                                    <label for="testingProxyOptInToggle" style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); cursor: pointer;">
+                                        <input type="checkbox" id="testingProxyOptInToggle" style="width: 16px; height: 16px; accent-color: var(--accent); margin-top: 2px;">
+                                        <div style="flex: 1; min-width: 0;">
+                                            <div style="font-size: 12px; font-weight: 600; color: var(--text-primary);">Enable App Lab network capture</div>
+                                            <div id="testingProxyOptInStatus" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.5;">Optional. When off, App Lab will not open a local proxy on this machine.</div>
+                                        </div>
+                                    </label>
                                     <div style="display: flex; gap: 8px;">
                                         <button id="startMobileRecordingBtn" class="btn btn-primary" onclick="startMobileRecording()" style="flex: 1;">
                                             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 6px;">
@@ -14503,6 +14569,7 @@
                 const el = document.getElementById('footerVersion');
                 if (el && data.version) el.textContent = 'v' + data.version;
             }).catch(() => {});
+            void loadProxySafetySettings().catch(() => null);
 
             // Auto-check dependencies on first load — open Settings if critical deps missing
             fetch('/api/setup/status').then(r => r.json()).then(data => {
@@ -16111,12 +16178,155 @@
         const projectNetworkRouteSelection = {};
         const projectNetworkRequestSelection = {};
         const projectNetworkInspectorTabSelection = {};
+        const projectNetworkFilterSelection = {};
+
+        const MOBILE_SYSTEM_BACKGROUND_HOST_PATTERNS = [
+            /(^|\.)icloud\.com$/i,
+            /^gdmf\.apple\.com$/i,
+            /^configuration\.ls\.apple\.com$/i,
+            /^xp\.apple\.com$/i,
+            /(^|\.)sandbox\.itunes\.apple\.com$/i,
+            /(^|\.)sandbox\.apple\.com$/i,
+            /(^|\.)mzstatic\.com$/i,
+        ];
+        const MOBILE_DEVELOPER_BACKGROUND_HOST_PATTERNS = [
+            /^main\.vscode-cdn\.net$/i,
+            /^default\.exp-tas\.com$/i,
+            /(^|\.)chatgpt\.com$/i,
+            /(^|\.)openai\.com$/i,
+            /(^|\.)figma\.com$/i,
+            /(^|\.)modal\.com$/i,
+        ];
 
         function getProjectNetworkEntries(project) {
             if (!project) return [];
             return Array.isArray(project.networkEntries)
                 ? project.networkEntries.filter(entry => entry && typeof entry === 'object')
                 : parseJsonMaybe(project.networkEntries, []);
+        }
+
+        function isProjectMobileExternalProxyCapture(project) {
+            if (!isMobileProject(project)) return false;
+            const network = project?.esvp && typeof project.esvp === 'object' && project.esvp.network && typeof project.esvp.network === 'object'
+                ? project.esvp.network
+                : null;
+            const captureMode = typeof network?.captureProxy?.captureMode === 'string'
+                ? network.captureProxy.captureMode
+                : typeof network?.effectiveProfile?.capture?.mode === 'string'
+                ? network.effectiveProfile.capture.mode
+                : typeof network?.activeProfile?.capture?.mode === 'string'
+                    ? network.activeProfile.capture.mode
+                    : '';
+            return captureMode === 'external-proxy' || captureMode === 'external-mitm' || captureMode === 'app-http-trace';
+        }
+
+        function getProjectNetworkFilterMode(project) {
+            if (!project?.id) return 'all';
+            if (projectNetworkFilterSelection[project.id]) {
+                return projectNetworkFilterSelection[project.id];
+            }
+            return isProjectMobileExternalProxyCapture(project) ? 'focused' : 'all';
+        }
+
+        function getProjectNetworkEntryUserAgent(entry) {
+            const requestHeaders = entry?.requestHeaders && typeof entry.requestHeaders === 'object'
+                ? entry.requestHeaders
+                : null;
+            const userAgent = requestHeaders?.['user-agent'] || requestHeaders?.['User-Agent'];
+            return typeof userAgent === 'string' ? userAgent : '';
+        }
+
+        function buildProjectNetworkFilterContext(entries) {
+            const decryptedHosts = new Set();
+            for (const entry of entries || []) {
+                if (!entry || typeof entry !== 'object' || isProjectNetworkTunnelEntry(entry)) continue;
+                const hostname = String(entry.hostname || '').trim().toLowerCase();
+                if (hostname) decryptedHosts.add(hostname);
+            }
+            return { decryptedHosts };
+        }
+
+        function isDesktopNetworkUserAgent(userAgent) {
+            const value = typeof userAgent === 'string' ? userAgent : '';
+            if (/\b(electron|code\/|vscode|xcode|exp-tas)\b/i.test(value)) return true;
+            const hasDesktopOs = /\b(Macintosh|Windows NT|X11; Linux)\b/i.test(value);
+            const hasDesktopBrowser = /\b(Chrome\/|CriOS\/|Firefox\/|Safari\/)\b/i.test(value);
+            return hasDesktopOs && hasDesktopBrowser;
+        }
+
+        function classifyProjectNetworkEntry(project, entry, context) {
+            if (!isProjectMobileExternalProxyCapture(project)) {
+                return { include: true, reason: null };
+            }
+
+            const hostname = String(entry?.hostname || '').trim().toLowerCase();
+            const userAgent = getProjectNetworkEntryUserAgent(entry);
+            const failureText = String(entry?.failureText || '').trim().toLowerCase();
+
+            if (MOBILE_DEVELOPER_BACKGROUND_HOST_PATTERNS.some((pattern) => pattern.test(hostname))) {
+                return { include: false, reason: 'developer' };
+            }
+
+            if (MOBILE_SYSTEM_BACKGROUND_HOST_PATTERNS.some((pattern) => pattern.test(hostname))) {
+                return { include: false, reason: 'system' };
+            }
+
+            if (isDesktopNetworkUserAgent(userAgent)) {
+                return { include: false, reason: 'desktop' };
+            }
+
+            if (isProjectNetworkTunnelEntry(entry)) {
+                if (hostname && context?.decryptedHosts?.has(hostname)) {
+                    return { include: false, reason: 'tunnel' };
+                }
+                if (failureText.includes('certificateunknown') || failureText.includes('tls handshake eof')) {
+                    return { include: false, reason: 'tunnel' };
+                }
+            }
+
+            return { include: true, reason: null };
+        }
+
+        function filterProjectNetworkEntries(project, entries) {
+            const normalizedEntries = Array.isArray(entries) ? entries : [];
+            const mode = getProjectNetworkFilterMode(project);
+            if (mode !== 'focused') {
+                return {
+                    entries: normalizedEntries,
+                    hiddenCount: 0,
+                    hiddenReasons: {},
+                };
+            }
+
+            const visibleEntries = [];
+            const hiddenReasons = {};
+            const context = buildProjectNetworkFilterContext(normalizedEntries);
+
+            for (const entry of normalizedEntries) {
+                const classification = classifyProjectNetworkEntry(project, entry, context);
+                if (classification.include) {
+                    visibleEntries.push(entry);
+                    continue;
+                }
+                const reason = classification.reason || 'other';
+                hiddenReasons[reason] = (hiddenReasons[reason] || 0) + 1;
+            }
+
+            return {
+                entries: visibleEntries,
+                hiddenCount: normalizedEntries.length - visibleEntries.length,
+                hiddenReasons,
+            };
+        }
+
+        function buildProjectNetworkFilterSummary(hiddenReasons) {
+            if (!hiddenReasons || typeof hiddenReasons !== 'object') return '';
+            const parts = [];
+            if (hiddenReasons.system > 0) parts.push(`${hiddenReasons.system} system`);
+            if (hiddenReasons.desktop > 0) parts.push(`${hiddenReasons.desktop} desktop`);
+            if (hiddenReasons.developer > 0) parts.push(`${hiddenReasons.developer} dev-tool`);
+            if (hiddenReasons.tunnel > 0) parts.push(`${hiddenReasons.tunnel} tunnel`);
+            return parts.join(' • ');
         }
 
         function getProjectNetworkRequestKey(entry) {
@@ -16135,10 +16345,35 @@
                 .sort(([a], [b]) => a.localeCompare(b));
         }
 
-        function detectNetworkBodyFormat(contentType, bodyText) {
+        function isLikelyBinaryNetworkContentType(contentType) {
+            const normalizedType = typeof contentType === 'string'
+                ? contentType.toLowerCase().split(';')[0].trim()
+                : '';
+            if (!normalizedType) return false;
+            if (normalizedType.startsWith('text/')) return false;
+            if (normalizedType.includes('json') || normalizedType.includes('xml') || normalizedType.includes('javascript') || normalizedType.includes('graphql') || normalizedType.includes('x-www-form-urlencoded') || normalizedType.includes('yaml') || normalizedType.includes('csv')) {
+                return false;
+            }
+            return normalizedType.startsWith('image/')
+                || normalizedType.startsWith('audio/')
+                || normalizedType.startsWith('video/')
+                || normalizedType.includes('protobuf')
+                || normalizedType.includes('octet-stream')
+                || normalizedType.includes('grpc')
+                || normalizedType.includes('zip')
+                || normalizedType.includes('pdf')
+                || normalizedType.includes('font');
+        }
+
+        function detectNetworkBodyFormat(contentType, bodyText, byteCount) {
             const normalizedType = typeof contentType === 'string' ? contentType.toLowerCase() : '';
             const text = typeof bodyText === 'string' ? bodyText.trim() : '';
-            if (!text) return 'empty';
+            if (!text) {
+                if (typeof byteCount === 'number' && byteCount > 0) {
+                    return isLikelyBinaryNetworkContentType(contentType) ? 'binary' : 'captured';
+                }
+                return 'empty';
+            }
             if (normalizedType.includes('json')) return 'json';
             if (text.startsWith('{') || text.startsWith('[')) {
                 try {
@@ -16153,7 +16388,7 @@
 
         function formatNetworkBodyPreview(bodyText, contentType) {
             if (typeof bodyText !== 'string' || !bodyText.trim()) return '';
-            const format = detectNetworkBodyFormat(contentType, bodyText);
+            const format = detectNetworkBodyFormat(contentType, bodyText, null);
             if (format === 'json') {
                 try {
                     return JSON.stringify(JSON.parse(bodyText), null, 2);
@@ -16164,8 +16399,55 @@
             return bodyText;
         }
 
-        function renderNetworkBodyBlock(title, bodyText, contentType, byteCount) {
-            const hasBody = typeof bodyText === 'string' && bodyText.trim().length > 0;
+        function isProjectNetworkTunnelEntry(entry) {
+            return entry?.method === 'CONNECT' || entry?.resourceType === 'connect_tunnel';
+        }
+
+        function getProjectNetworkRouteDisplay(entry) {
+            if (isProjectNetworkTunnelEntry(entry)) {
+                return entry?.hostname || getProjectNetworkDisplayUrl(entry);
+            }
+            return entry?.pathname || '/';
+        }
+
+        function getProjectNetworkEmptyBodyMessage(entry, side) {
+            if (isProjectNetworkTunnelEntry(entry)) {
+                return `This is an HTTPS CONNECT tunnel. App Lab captured the tunnel metadata, but not the decrypted ${side} body.`;
+            }
+            const byteCount = side === 'request' ? entry?.requestBodyBytes : entry?.responseBodyBytes;
+            const contentType = side === 'request' ? entry?.requestContentType : entry?.responseContentType;
+            if (typeof byteCount === 'number' && byteCount > 0) {
+                return isLikelyBinaryNetworkContentType(contentType)
+                    ? `A ${side} body was captured, but it is binary (${contentType || 'unknown type'}) so App Lab is not rendering a text preview.`
+                    : `A ${side} body was captured, but App Lab could not render a readable text preview.`;
+            }
+            return `No ${side} body preview captured for this request.`;
+        }
+
+        function renderNetworkCopyButton(value, label) {
+            const text = typeof value === 'string' ? value : '';
+            if (!text.trim()) return '';
+            const encodedValue = encodeURIComponent(text);
+            return `
+                <button
+                    class="icon-btn"
+                    type="button"
+                    onclick="event.stopPropagation(); copyToClipboard(decodeURIComponent('${escapeAttr(encodedValue)}'))"
+                    aria-label="Copy ${escapeAttr(label)}"
+                    title="Copy ${escapeAttr(label)}"
+                    style="width: 28px; height: 28px; border-color: rgba(148, 163, 184, 0.22);"
+                >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                </button>
+            `;
+        }
+
+        function renderNetworkBodyBlock(title, bodyText, contentType, byteCount, entry, side) {
+            const formattedBody = formatNetworkBodyPreview(bodyText, contentType);
+            const hasBody = typeof formattedBody === 'string' && formattedBody.trim().length > 0;
             const formattedBytes = formatProjectNetworkBytes(byteCount);
             const noteParts = [];
             if (contentType) noteParts.push(contentType);
@@ -16173,10 +16455,13 @@
             noteParts.push('preview only');
             return `
                 <div class="network-inspector-block">
-                    <div class="network-inspector-block-header">${escapeHtml(title)}${noteParts.length ? ` • ${escapeHtml(noteParts.join(' • '))}` : ''}</div>
+                    <div class="network-inspector-block-header" style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                        <span>${escapeHtml(title)}${noteParts.length ? ` • ${escapeHtml(noteParts.join(' • '))}` : ''}</span>
+                        ${renderNetworkCopyButton(formattedBody, title)}
+                    </div>
                     ${hasBody
-                        ? `<pre class="network-code-block">${escapeHtml(formatNetworkBodyPreview(bodyText, contentType))}</pre>`
-                        : '<div class="network-empty-detail">No body preview captured for this request.</div>'}
+                        ? `<pre class="network-code-block">${escapeHtml(formattedBody)}</pre>`
+                        : `<div class="network-empty-detail">${escapeHtml(getProjectNetworkEmptyBodyMessage(entry, side))}</div>`}
                 </div>
             `;
         }
@@ -16205,8 +16490,8 @@
             const responseBodySize = formatProjectNetworkBytes(entry.responseBodyBytes);
             const requestHeaderCount = normalizeNetworkHeaders(entry.requestHeaders).length;
             const responseHeaderCount = normalizeNetworkHeaders(entry.responseHeaders).length;
-            const requestBodyFormat = detectNetworkBodyFormat(entry.requestContentType, entry.requestBodyPreview);
-            const responseBodyFormat = detectNetworkBodyFormat(entry.responseContentType, entry.responseBodyPreview);
+            const requestBodyFormat = detectNetworkBodyFormat(entry.requestContentType, entry.requestBodyPreview, entry.requestBodyBytes);
+            const responseBodyFormat = detectNetworkBodyFormat(entry.responseContentType, entry.responseBodyPreview, entry.responseBodyBytes);
 
             const tabButtons = [
                 ['overview', 'Overview'],
@@ -16227,7 +16512,10 @@
                 bodyHtml = `
                     <div class="network-inspector-grid">
                         <div class="network-inspector-stat">
-                            <div class="network-inspector-stat-label">Request URL</div>
+                            <div class="network-inspector-stat-label" style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                                <span>Request URL</span>
+                                ${renderNetworkCopyButton(getProjectNetworkDisplayUrl(entry), 'request URL')}
+                            </div>
                             <div class="network-inspector-stat-value">${escapeHtml(getProjectNetworkDisplayUrl(entry))}</div>
                         </div>
                         <div class="network-inspector-stat">
@@ -16251,17 +16539,18 @@
                             <div class="network-inspector-stat-value">${escapeHtml(responseBodyFormat === 'empty' ? 'Not captured' : `${responseBodyFormat.toUpperCase()}${responseBodySize ? ` • ${responseBodySize}` : ''}`)}</div>
                         </div>
                     </div>
+                    ${isProjectNetworkTunnelEntry(entry) ? '<div class="network-inspector-note">This entry is an HTTPS CONNECT tunnel. Host, timing, headers, and status were captured, but encrypted request and response bodies were not decrypted.</div>' : ''}
                     ${entry.failureText ? `<div class="network-inspector-note" style="color: #fca5a5;">${escapeHtml(entry.failureText)}</div>` : ''}
                 `;
             } else if (tab === 'request') {
                 bodyHtml = `
-                    <div class="network-inspector-note">Request previews come from the captured trace and may be truncated or redacted.</div>
-                    ${renderNetworkBodyBlock('Request Body', entry.requestBodyPreview, entry.requestContentType, entry.requestBodyBytes)}
+                    <div class="network-inspector-note">${isProjectNetworkTunnelEntry(entry) ? 'CONNECT tunnels only expose request metadata. There is no decrypted request payload to show here.' : 'Request previews come from the captured trace and may be truncated or redacted.'}</div>
+                    ${renderNetworkBodyBlock('Request Body', entry.requestBodyPreview, entry.requestContentType, entry.requestBodyBytes, entry, 'request')}
                 `;
             } else if (tab === 'response') {
                 bodyHtml = `
-                    <div class="network-inspector-note">Response previews come from the captured trace and may be truncated or redacted.</div>
-                    ${renderNetworkBodyBlock('Response Body', entry.responseBodyPreview, entry.responseContentType, entry.responseBodyBytes)}
+                    <div class="network-inspector-note">${isProjectNetworkTunnelEntry(entry) ? 'CONNECT tunnels only expose response metadata. There is no decrypted response payload to show here.' : 'Response previews come from the captured trace and may be truncated or redacted.'}</div>
+                    ${renderNetworkBodyBlock('Response Body', entry.responseBodyPreview, entry.responseContentType, entry.responseBodyBytes, entry, 'response')}
                 `;
             } else {
                 bodyHtml = `
@@ -16275,7 +16564,7 @@
                 <div class="network-request-inspector">
                     <div class="network-inspector-header">
                         <div class="network-inspector-title">
-                            <strong>${escapeHtml(`${entry.method || 'GET'} ${entry.pathname || '/'}`)}</strong>
+                            <strong>${escapeHtml(`${entry.method || 'GET'} ${getProjectNetworkRouteDisplay(entry)}`)}</strong>
                             <div class="network-inspector-subtitle">${escapeHtml(entry.hostname || 'unknown host')}</div>
                         </div>
                         <div class="network-request-badges">
@@ -16447,6 +16736,9 @@
             const captureProxy = value?.captureProxy && typeof value.captureProxy === 'object'
                 ? value.captureProxy
                 : null;
+            const appTraceCollector = value?.appTraceCollector && typeof value.appTraceCollector === 'object'
+                ? value.appTraceCollector
+                : null;
             const managedProxy = value?.managedProxy && typeof value.managedProxy === 'object'
                 ? value.managedProxy
                 : null;
@@ -16455,16 +16747,19 @@
                 : value?.activeProfile?.proxy && typeof value.activeProfile.proxy === 'object'
                     ? value.activeProfile.proxy
                     : null;
-            const captureMode = typeof value?.effectiveProfile?.capture?.mode === 'string'
+            const captureMode = typeof captureProxy?.captureMode === 'string'
+                ? captureProxy.captureMode
+                : typeof value?.effectiveProfile?.capture?.mode === 'string'
                 ? value.effectiveProfile.capture.mode
                 : typeof value?.activeProfile?.capture?.mode === 'string'
                     ? value.activeProfile.capture.mode
                     : '';
-            const host = captureProxy?.host || managedProxy?.host || effectiveProxy?.host || null;
-            const port = captureProxy?.port || managedProxy?.port || effectiveProxy?.port || null;
+            const host = captureProxy?.host || appTraceCollector?.host || managedProxy?.host || effectiveProxy?.host || null;
+            const port = captureProxy?.port || appTraceCollector?.port || managedProxy?.port || effectiveProxy?.port || null;
             return {
                 captureMode,
                 captureProxy,
+                appTraceCollector,
                 managedProxy,
                 host,
                 port
@@ -16476,12 +16771,32 @@
             if (proxyState.host && proxyState.port) {
                 return proxyState.captureMode === 'external-proxy'
                     ? `${proxyState.host}:${proxyState.port} (client-owned)`
+                    : proxyState.captureMode === 'external-mitm'
+                    ? `${proxyState.host}:${proxyState.port} (client-owned MITM)`
+                    : proxyState.captureMode === 'app-http-trace'
+                    ? `${proxyState.host}:${proxyState.port} (local app trace collector)`
                     : `${proxyState.host}:${proxyState.port}`;
             }
             if (proxyState.captureMode === 'external-proxy') {
                 return 'External / client-owned';
             }
+            if (proxyState.captureMode === 'external-mitm') {
+                return 'External MITM / client-owned';
+            }
+            if (proxyState.captureMode === 'app-http-trace') {
+                return 'Local app_http_trace collector';
+            }
             return fallback;
+        }
+
+        function getESVPMitmState(value) {
+            const captureProxy = value?.captureProxy && typeof value.captureProxy === 'object'
+                ? value.captureProxy
+                : null;
+            const mitm = captureProxy?.mitm && typeof captureProxy.mitm === 'object'
+                ? captureProxy.mitm
+                : null;
+            return mitm;
         }
 
         function renderProjectESVPSection(project) {
@@ -16501,14 +16816,22 @@
             const hasSyncableTrace = traceEntryCount > 0 || traceKinds.length > 0;
             const captureStatus = typeof network?.captureStatus === 'string' ? network.captureStatus : 'idle';
             const captureRunning = captureStatus === 'running' && typeof network?.activeCaptureSessionId === 'string' && network.activeCaptureSessionId;
+            const appTraceCollector = network?.appTraceCollector && typeof network.appTraceCollector === 'object'
+                ? network.appTraceCollector
+                : null;
+            const networkCaptureOptedIn = isAppLabNetworkCaptureOptedIn();
             const helperText = validationUnsupported
                 ? 'This recording is not supported by ESVP yet.'
+                : captureRunning && appTraceCollector
+                ? 'Local app_http_trace collection is active. Your instrumented app can fetch bootstrap config from the local App Lab server and post request batches directly.'
                 : captureRunning
                 ? 'Network capture is active for this project.'
+                : !networkCaptureOptedIn
+                ? 'App Lab local network capture is off. Validation still works, but App Lab will not open a local proxy unless you enable it from Capture or Testing.'
                 : sourceSessionId
                 ? 'An ESVP session is already attached to this project.'
                 : 'Use ESVP to validate or collect network traces for this recording.';
-            const primaryLabel = validationUnsupported ? 'Retry ESVP Validation' : 'Validate + Capture';
+            const primaryLabel = validationUnsupported ? 'Retry ESVP Validation' : networkCaptureOptedIn ? 'Validate + Capture' : 'Validate with ESVP';
 
             return `
                 <div class="analysis-section">
@@ -16555,11 +16878,13 @@
         }
 
         function renderProjectNetworkSection(project) {
-            const entries = getProjectNetworkEntries(project);
+            const rawEntries = getProjectNetworkEntries(project);
+            const filteredNetwork = filterProjectNetworkEntries(project, rawEntries);
+            const entries = filteredNetwork.entries;
             const networkCapture = project?.networkCapture && typeof project.networkCapture === 'object'
                 ? project.networkCapture
                 : null;
-            const shouldRender = project?.platform === 'web' || isMobileProject(project) || entries.length > 0 || networkCapture;
+            const shouldRender = project?.platform === 'web' || isMobileProject(project) || rawEntries.length > 0 || networkCapture;
 
             if (!shouldRender) return '';
 
@@ -16584,6 +16909,20 @@
                 if (typeof entry.status === 'number') return entry.status >= 400;
                 return !!entry.failureText;
             }).length;
+            const filterMode = getProjectNetworkFilterMode(project);
+            const focusedModeAvailable = isProjectMobileExternalProxyCapture(project);
+            const hiddenCount = filteredNetwork.hiddenCount || 0;
+            const hiddenSummary = buildProjectNetworkFilterSummary(filteredNetwork.hiddenReasons);
+            const filterControls = focusedModeAvailable ? `
+                <div style="display: inline-flex; gap: 6px; flex-wrap: wrap;">
+                    <button class="btn btn-secondary ${filterMode === 'focused' ? 'active' : ''}" onclick="selectProjectNetworkFilterMode('focused')" type="button">
+                        Focused Traffic
+                    </button>
+                    <button class="btn btn-secondary ${filterMode === 'all' ? 'active' : ''}" onclick="selectProjectNetworkFilterMode('all')" type="button">
+                        All Traffic
+                    </button>
+                </div>
+            ` : '';
 
             if (groups.length === 0) {
                 const sourceSessionId = getProjectESVPSourceSessionId(project);
@@ -16622,7 +16961,10 @@
                             diagnosticMessage = `ESVP session has ${count} captured request${count !== 1 ? 's' : ''}. Click 'Sync Network Trace' to pull them.`;
                             showSyncHint = true;
                         } else {
-                            if (captureMode === 'external-proxy') {
+                            if (captureMode === 'app-http-trace') {
+                                diagnosticMessage = 'Local app_http_trace is configured but no trace has been posted by the app yet.';
+                                diagnosticDetail = 'Use an instrumented test build that fetches bootstrap config from App Lab and posts request batches back to the local collector.';
+                            } else if (captureMode === 'external-proxy') {
                                 diagnosticMessage = 'External proxy capture is configured but no network_trace has been attached yet.';
                                 const proxyState = getESVPProxyState(esvpNetwork);
                                 diagnosticDetail = proxyState.host && proxyState.port
@@ -16642,11 +16984,20 @@
                     diagnosticMessage = `Browser sessions track ${escapeHtml(resourceTypes)} only.`;
                 }
 
+                if (rawEntries.length > 0 && filterMode === 'focused') {
+                    diagnosticMessage = hiddenCount > 0
+                        ? `Focused traffic hid ${hiddenCount} likely background request${hiddenCount !== 1 ? 's' : ''}${hiddenSummary ? ` (${hiddenSummary})` : ''}. Switch to "All Traffic" to inspect the raw trace.`
+                        : 'Focused traffic did not keep any request for this view. Switch to "All Traffic" to inspect the raw trace.';
+                }
+
                 return `
                     <div id="projectNetworkSection" class="analysis-section">
                         <div class="analysis-section-title">Network Traffic</div>
                         <div class="project-network-section project-network-empty">
-                            No network trace attached yet.
+                            ${filterControls ? `<div style="margin-bottom: 12px;">${filterControls}</div>` : ''}
+                            ${rawEntries.length > 0 && filterMode === 'focused'
+                                ? 'No focused traffic matched this trace.'
+                                : 'No network trace attached yet.'}
                             ${diagnosticMessage ? `<div class="network-section-note" style="margin-top: 10px; margin-bottom: 0;">${diagnosticMessage}</div>` : ''}
                             ${diagnosticDetail ? `<div class="network-section-note" style="margin-top: 6px; margin-bottom: 0; font-size: 11px; opacity: 0.7;">${diagnosticDetail}</div>` : ''}
                             ${showSyncHint && sourceSessionId ? `
@@ -16664,10 +17015,12 @@
             }
 
             const savedSelection = projectNetworkRouteSelection[project.id];
-            const selectedGroup = groups.find(group => group.key === savedSelection) || groups[0];
+            const preferredGroup = groups.find(group => group.requests.some(entry => !isProjectNetworkTunnelEntry(entry))) || groups[0];
+            const selectedGroup = groups.find(group => group.key === savedSelection) || preferredGroup;
             projectNetworkRouteSelection[project.id] = selectedGroup.key;
             const savedRequestKey = projectNetworkRequestSelection[project.id];
-            const selectedRequest = selectedGroup.requests.find(entry => getProjectNetworkRequestKey(entry) === savedRequestKey) || selectedGroup.requests[0] || null;
+            const preferredRequest = selectedGroup.requests.find(entry => !isProjectNetworkTunnelEntry(entry)) || selectedGroup.requests[0] || null;
+            const selectedRequest = selectedGroup.requests.find(entry => getProjectNetworkRequestKey(entry) === savedRequestKey) || preferredRequest;
             if (selectedRequest) {
                 projectNetworkRequestSelection[project.id] = getProjectNetworkRequestKey(selectedRequest);
             }
@@ -16677,7 +17030,7 @@
                     class="network-route-tab ${group.key === selectedGroup.key ? 'active' : ''}"
                     onclick="selectProjectNetworkRoute('${encodeURIComponent(group.key)}')"
                 >
-                    <div class="network-route-path">${escapeHtml(group.pathname)}</div>
+                    <div class="network-route-path">${escapeHtml(getProjectNetworkRouteDisplay(group.requests[0]))}</div>
                     <div class="network-route-meta">
                         <span>${escapeHtml(group.hostname)}</span>
                         <span>${group.count} req</span>
@@ -16735,10 +17088,13 @@
                             <span class="network-summary-pill">${entries.length} requests</span>
                             <span class="network-summary-pill">${groups.length} routes</span>
                             <span class="network-summary-pill">${errorCount} failures</span>
+                            ${hiddenCount > 0 ? `<span class="network-summary-pill">${hiddenCount} hidden</span>` : ''}
                         </div>
                         <div class="network-section-note">
                             ${captureNote}${escapeHtml(truncationNote)}
+                            ${filterMode === 'focused' && hiddenCount > 0 ? ` Focused traffic is hiding ${hiddenCount} likely background request${hiddenCount !== 1 ? 's' : ''}${hiddenSummary ? ` (${escapeHtml(hiddenSummary)})` : ''}.` : ''}
                         </div>
+                        ${filterControls ? `<div style="margin-bottom: 12px;">${filterControls}</div>` : ''}
                         <div class="network-route-tabs">${tabsHtml}</div>
                         <div class="network-request-list">${requestsHtml}</div>
                         ${inspectorHtml}
@@ -16751,11 +17107,12 @@
             if (!currentProject?.id) return;
             const nextRouteKey = decodeURIComponent(encodedRouteKey);
             projectNetworkRouteSelection[currentProject.id] = nextRouteKey;
-            const entries = getProjectNetworkEntries(currentProject);
-            const groups = buildProjectNetworkGroups(entries);
-            const nextGroup = groups.find(group => group.key === nextRouteKey) || groups[0];
+            const rawEntries = getProjectNetworkEntries(currentProject);
+            const groups = buildProjectNetworkGroups(filterProjectNetworkEntries(currentProject, rawEntries).entries);
+            const nextGroup = groups.find(group => group.key === nextRouteKey) || groups.find(group => group.requests.some(entry => !isProjectNetworkTunnelEntry(entry))) || groups[0];
             if (nextGroup?.requests?.length) {
-                projectNetworkRequestSelection[currentProject.id] = getProjectNetworkRequestKey(nextGroup.requests[0]);
+                const nextRequest = nextGroup.requests.find(entry => !isProjectNetworkTunnelEntry(entry)) || nextGroup.requests[0];
+                projectNetworkRequestSelection[currentProject.id] = getProjectNetworkRequestKey(nextRequest);
             } else {
                 delete projectNetworkRequestSelection[currentProject.id];
             }
@@ -16768,6 +17125,17 @@
         function selectProjectNetworkRequest(requestKey) {
             if (!currentProject?.id) return;
             projectNetworkRequestSelection[currentProject.id] = requestKey;
+            const section = document.getElementById('projectNetworkSection');
+            if (section) {
+                section.outerHTML = renderProjectNetworkSection(currentProject);
+            }
+        }
+
+        function selectProjectNetworkFilterMode(mode) {
+            if (!currentProject?.id) return;
+            projectNetworkFilterSelection[currentProject.id] = mode === 'focused' ? 'focused' : 'all';
+            delete projectNetworkRouteSelection[currentProject.id];
+            delete projectNetworkRequestSelection[currentProject.id];
             const section = document.getElementById('projectNetworkSection');
             if (section) {
                 section.outerHTML = renderProjectNetworkSection(currentProject);
@@ -17313,6 +17681,26 @@
                     ? 'No trace attached'
                     : 'network_trace';
             const proxyLabel = getESVPProxyLabel(network, validationUnsupported ? 'Unavailable' : 'Not configured');
+            const mitm = getESVPMitmState(network);
+            const mitmWarnings = Array.isArray(mitm?.warnings) ? mitm.warnings.filter(Boolean) : [];
+            const mitmErrors = Array.isArray(mitm?.errors) ? mitm.errors.filter(Boolean) : [];
+            const mitmInfo = mitm?.enabled ? `
+                <div style="margin-top: 12px; padding: 12px; border-radius: 10px; border: 1px solid rgba(148,163,184,0.18); background: rgba(15,23,42,0.35);">
+                    <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px;">MITM Runtime</div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+                        <div>
+                            <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em;">Certificate</div>
+                            <div style="font-size: 12px; color: var(--text-primary); margin-top: 4px;">${mitm.certificateInstalled === true ? 'Installed' : 'Not installed'}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em;">Install Method</div>
+                            <div style="font-size: 12px; color: var(--text-primary); margin-top: 4px;">${escapeHtml(String(mitm.certificateInstallMethod || 'Unknown'))}</div>
+                        </div>
+                    </div>
+                    ${mitmWarnings.length > 0 ? `<div style="font-size: 11px; color: var(--text-muted); line-height: 1.6; margin-top: 10px;">${mitmWarnings.map((warning) => escapeHtml(String(warning))).join('<br>')}</div>` : ''}
+                    ${mitmErrors.length > 0 ? `<div style="font-size: 11px; color: #fca5a5; line-height: 1.6; margin-top: 10px;">${mitmErrors.map((warning) => escapeHtml(String(warning))).join('<br>')}</div>` : ''}
+                </div>
+            ` : '';
             const traceSourceNote = entryCount > 0
                 ? `
                     <div style="font-size: 11px; color: var(--text-muted); margin-top: 10px; line-height: 1.5;">
@@ -17357,6 +17745,7 @@
                                 <div style="font-size: 12px; color: var(--text-primary); margin-top: 4px;">${escapeHtml(traceKinds)}</div>
                             </div>
                         </div>
+                        ${mitmInfo}
                         ${traceSourceNote}
                         ${reason}
                     </div>
@@ -17374,6 +17763,26 @@
                         profile: 'applab-standard',
                         label: 'App Lab Standard Capture',
                         mode: 'external-proxy'
+                    }
+                },
+                {
+                    id: 'app-http-trace',
+                    label: 'App HTTP Trace beta',
+                    description: 'Local app-owned trace collector. Requires an instrumented test build that fetches bootstrap config from App Lab and posts request batches back as app_http_trace.',
+                    network: {
+                        profile: 'applab-app-http-trace',
+                        label: 'App Lab App HTTP Trace',
+                        mode: 'app-http-trace'
+                    }
+                },
+                {
+                    id: 'mitm-simulator',
+                    label: 'MITM beta',
+                    description: 'Beta local MITM capture for Android Emulator and iOS Simulator. Installs the App Lab root CA and captures decrypted HTTPS when the app accepts it.',
+                    network: {
+                        profile: 'applab-mitm-beta',
+                        label: 'App Lab MITM Beta',
+                        mode: 'external-mitm'
                     }
                 },
                 {
@@ -17434,6 +17843,7 @@
 
         async function showESVPValidationDialog(recording) {
             const profiles = getESVPValidationProfiles();
+            const networkCaptureOptedIn = isAppLabNetworkCaptureOptedIn();
             let storedProfile = 'standard';
             let storedReplay = true;
             try {
@@ -17443,9 +17853,11 @@
 
             const defaultProfile = profiles.some((profile) => profile.id === storedProfile) ? storedProfile : 'standard';
             const platformLabel = recording?.platform === 'ios' ? 'iOS / maestro-ios' : 'Android / adb';
-            const note = recording?.platform === 'ios'
-                ? 'Replay runs through maestro-ios. App Lab local prefers external proxy; iOS Simulator can use 127.0.0.1 when the proxy runs on the same Mac.'
-                : 'App Lab local prefers external proxy. Android Emulator should use 10.0.2.2; physical devices need a host/LAN IP.';
+            const note = !networkCaptureOptedIn
+                ? 'App Lab local network capture is off. Validation will still run, but without local proxy/network trace capture. Enable it from the Capture or Testing start card if you want App Lab to open a temporary proxy on this machine.'
+                : recording?.platform === 'ios'
+                ? 'Replay runs through maestro-ios. Standard capture uses a local external proxy; the MITM beta also installs the App Lab root CA on iOS Simulator so HTTPS request and response bodies can be captured when the app does not pin certificates. App HTTP Trace beta requires an instrumented build that fetches bootstrap config from App Lab.'
+                : 'Standard capture uses a local external proxy. The MITM beta is limited to Android Emulator right now and needs the app to accept the App Lab root CA. App HTTP Trace beta requires an instrumented build that fetches bootstrap config from App Lab.';
 
             return new Promise((resolve) => {
                 const modal = document.createElement('div');
@@ -17471,22 +17883,24 @@
                                 <span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.04); color: var(--text-secondary); font-size: 11px;">${escapeHtml(recording?.name || 'Mobile recording')}</span>
                             </div>
                             <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5;">${escapeHtml(note)}</div>
-                            <div style="margin-bottom: 14px;">
-                                <div style="font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.08em;">Network profile</div>
-                                <select id="esvpValidationProfileSelect" class="form-select" style="width: 100%;">
-                                    ${profiles.map((profile) => `
-                                        <option value="${escapeAttr(profile.id)}" ${profile.id === defaultProfile ? 'selected' : ''}>${escapeHtml(profile.label)}</option>
-                                    `).join('')}
-                                </select>
-                                <div id="esvpValidationProfileDescription" style="font-size: 12px; color: var(--text-muted); margin-top: 8px;"></div>
-                            </div>
+                            ${networkCaptureOptedIn ? `
+                                <div style="margin-bottom: 14px;">
+                                    <div style="font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.08em;">Network profile</div>
+                                    <select id="esvpValidationProfileSelect" class="form-select" style="width: 100%;">
+                                        ${profiles.map((profile) => `
+                                            <option value="${escapeAttr(profile.id)}" ${profile.id === defaultProfile ? 'selected' : ''}>${escapeHtml(profile.label)}</option>
+                                        `).join('')}
+                                    </select>
+                                    <div id="esvpValidationProfileDescription" style="font-size: 12px; color: var(--text-muted); margin-top: 8px;"></div>
+                                </div>
+                            ` : ''}
                             <label style="display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-primary); cursor: pointer;">
                                 <input type="checkbox" id="esvpValidationReplayCheckbox" ${storedReplay ? 'checked' : ''} style="accent-color: var(--accent);">
                                 Run replay after the source session finishes
                             </label>
                             <div style="padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px;">
                                 <button class="btn btn-secondary" id="esvpValidationCancelBtn">Cancel</button>
-                                <button class="btn btn-primary" id="esvpValidationConfirmBtn">Validate with ESVP</button>
+                                <button class="btn btn-primary" id="esvpValidationConfirmBtn">${networkCaptureOptedIn ? 'Validate with ESVP' : 'Validate Without Network Capture'}</button>
                             </div>
                         </div>
                     </div>
@@ -17519,19 +17933,21 @@
                 closeBtn?.addEventListener('click', () => cleanup(null));
                 cancelBtn?.addEventListener('click', () => cleanup(null));
                 confirmBtn?.addEventListener('click', () => {
-                    const selected = profiles.find((profile) => profile.id === profileSelect.value) || profiles[0];
+                    const selected = networkCaptureOptedIn
+                        ? profiles.find((profile) => profile.id === profileSelect.value) || profiles[0]
+                        : null;
                     const replay = replayCheckbox?.checked === true;
                     try {
-                        localStorage.setItem(ESVP_VALIDATION_PROFILE_STORAGE_KEY, selected.id);
+                        if (selected?.id) localStorage.setItem(ESVP_VALIDATION_PROFILE_STORAGE_KEY, selected.id);
                         localStorage.setItem(ESVP_VALIDATION_REPLAY_STORAGE_KEY, replay ? 'true' : 'false');
                     } catch {}
                     cleanup({
-                        profileId: selected.id,
+                        profileId: selected?.id || null,
                         replay,
-                        network: {
+                        network: selected ? {
                             enabled: true,
                             ...selected.network
-                        }
+                        } : null
                     });
                 });
 
@@ -17541,8 +17957,10 @@
 
                 document.addEventListener('keydown', onKeyDown);
                 document.body.appendChild(modal);
-                syncDescription();
-                setTimeout(() => profileSelect?.focus(), 20);
+                if (networkCaptureOptedIn) {
+                    syncDescription();
+                }
+                setTimeout(() => (networkCaptureOptedIn ? profileSelect : replayCheckbox)?.focus(), 20);
             });
         }
 
@@ -17747,6 +18165,10 @@
                 showToast('Current project is not a mobile testing recording', 'error');
                 return;
             }
+            if (!isAppLabNetworkCaptureOptedIn()) {
+                showToast('Enable App Lab network capture above Start Recording or Record Session before starting local network capture.', 'warning', 7000);
+                return;
+            }
 
             try {
                 const sessionResponse = await fetch(`/api/testing/mobile/recordings/${currentProject.id}`);
@@ -17775,7 +18197,9 @@
                 await refreshCurrentProjectAfterESVPMutation();
                 const proxyState = getESVPProxyState(result);
                 const proxyLabel = proxyState.host && proxyState.port
-                    ? ` • proxy ${proxyState.host}:${proxyState.port}`
+                    ? proxyState.captureMode === 'app-http-trace'
+                        ? ` • collector ${proxyState.host}:${proxyState.port}`
+                        : ` • proxy ${proxyState.host}:${proxyState.port}`
                     : '';
                 showToast(`ESVP network capture started${proxyLabel}`, 'success', 6000);
             } catch (error) {
@@ -20170,6 +20594,23 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
         // =====================================================================
         // EXPORT
         // =====================================================================
+        function updateExportFormatHelp() {
+            const select = document.getElementById('exportFormat');
+            const help = document.getElementById('exportFormatHelp');
+            if (!select || !help) return;
+
+            const descriptions = {
+                png: 'Exports the current capture as PNG images.',
+                jpg: 'Exports the current capture as JPEG images.',
+                mp4: 'Exports the current capture as an MP4 video.',
+                gif: 'Exports the current capture as an animated GIF.',
+                applab: 'Packages everything App Lab has locally for this project: media, recording session, test script, network trace, OCR, app intelligence, Task Hub data, and prior export artifacts like grids.',
+                esvp: 'Packages the full local project plus the attached ESVP session snapshot when available, so you can share trace, scripts, media, OCR, and app intelligence together.',
+            };
+
+            help.textContent = descriptions[select.value] || '';
+        }
+
         function updateExportTab() {
             const container = document.getElementById('exportContent');
 
@@ -20211,24 +20652,30 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
 
                     <div class="form-group">
                         <label class="form-label">Format</label>
-                        <select class="form-select" id="exportFormat">
+                        <select class="form-select" id="exportFormat" onchange="updateExportFormatHelp()">
                             <option value="png">PNG Images</option>
                             <option value="jpg">JPG Images</option>
                             <option value="mp4">MP4 Video</option>
                             <option value="gif">Animated GIF</option>
+                            <option value="applab">.applab</option>
+                            <option value="esvp">.ESVP</option>
                         </select>
+                        <div id="exportFormatHelp" style="margin-top: 8px; font-size: 12px; color: var(--text-muted); line-height: 1.5;"></div>
                     </div>
 
                     <button class="btn btn-primary" onclick="exportProject()">Export</button>
                 </div>
             `;
+
+            updateExportFormatHelp();
         }
 
         async function exportProject() {
             if (!currentProject) return;
 
             const format = document.getElementById('exportFormat').value;
-            setStatus('Exporting...');
+            const isPackageExport = format === 'applab' || format === 'esvp';
+            setStatus(isPackageExport ? 'Packaging export...' : 'Exporting...');
 
             try {
                 const data = await apiCall('/export', {
@@ -20258,7 +20705,7 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     }
                 }
 
-                showToast('Export complete', 'success');
+                showToast(isPackageExport ? 'Package export complete' : 'Export complete', 'success');
                 setStatus('Ready');
             } catch {
                 showToast('Export failed', 'error');

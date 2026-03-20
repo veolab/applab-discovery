@@ -1,6 +1,3 @@
-import http from 'node:http';
-import https from 'node:https';
-import net from 'node:net';
 import { networkInterfaces } from 'node:os';
 import {
   attachESVPNetworkTrace,
@@ -9,6 +6,13 @@ import {
   finishESVPSession,
   type ESVPExecutor,
 } from './esvp.js';
+import {
+  drainHostRuntimeCaptureSession,
+  type HostRuntimeMitmState,
+  panicStopHostRuntime,
+  shutdownHostRuntime,
+  startHostRuntimeCaptureSession,
+} from './esvp-host-runtime.js';
 
 type MobilePlatform = 'ios' | 'android';
 
@@ -32,15 +36,16 @@ export type LocalCaptureProxyState = {
   url: string | null;
   startedAt: string | null;
   entryCount: number;
-  captureMode: 'external-proxy';
-  source: 'applab-external-proxy';
+  captureMode: 'external-proxy' | 'external-mitm';
+  source: 'applab-external-proxy' | 'applab-external-mitm';
+  mitm?: HostRuntimeMitmState | null;
 };
 
 type TracePayload = {
   trace_kind: 'http_trace';
   label: string;
   format: 'json';
-  source: 'applab-external-proxy';
+  source: 'applab-external-proxy' | 'applab-external-mitm';
   payload: {
     session_id: string;
     proxy_id: string;
@@ -48,7 +53,7 @@ type TracePayload = {
     entries: Array<Record<string, unknown>>;
   };
   artifactMeta: {
-    capture_mode: 'external-proxy';
+    capture_mode: 'external-proxy' | 'external-mitm';
     proxy_id: string;
     entry_count: number;
   };
@@ -64,7 +69,13 @@ export type LocalCaptureProxyFinalizationResult = {
   errors: string[];
 };
 
-const activeProxies = new Map<string, AppLabCaptureProxy>();
+type ActiveProxyRecord = {
+  sessionId: string;
+  captureProxy: LocalCaptureProxyState;
+  lifecycle: LocalCaptureProxyLifecycleConfig | null;
+};
+
+const activeProxies = new Map<string, ActiveProxyRecord>();
 const finalizationsInFlight = new Map<string, Promise<LocalCaptureProxyFinalizationResult>>();
 let cleanupRegistered = false;
 
@@ -91,7 +102,9 @@ export async function ensureLocalCaptureProxyProfile(input: {
     };
   }
 
-  const captureMode = String((profile.capture as Record<string, unknown> | undefined)?.mode || '').trim().toLowerCase();
+  const captureMode = String((profile.capture as Record<string, unknown> | undefined)?.mode || '')
+    .trim()
+    .toLowerCase();
   const usesExternalProxy = captureMode === 'external-proxy';
   if (!usesExternalProxy) {
     return {
@@ -112,15 +125,18 @@ export async function ensureLocalCaptureProxyProfile(input: {
   }
 
   if (input.allowAppLabOwnedProxy === false) {
-    throw new Error('App Lab proxy emergency lock is enabled. Unlock it in Settings or provide an explicit external proxy host/port.');
+    throw new Error(
+      'App Lab proxy emergency lock is enabled. Unlock it in Settings or provide an explicit external proxy host/port.'
+    );
   }
 
   const proxy = await startLocalCaptureProxy({
     sessionId: input.sessionId,
     platform: input.platform,
     deviceId: input.deviceId,
+    captureMode: resolveAppLabCaptureMode(profile),
+    lifecycle: input.lifecycle || null,
   });
-  proxy.configureLifecycle(input.lifecycle || null);
   profile.proxy = {
     host: proxy.host,
     port: proxy.port,
@@ -129,7 +145,7 @@ export async function ensureLocalCaptureProxyProfile(input: {
 
   return {
     profile,
-    captureProxy: proxy.publicState(),
+    captureProxy: proxy,
     usesExternalProxy,
     appLabOwnedProxy: true,
   };
@@ -139,8 +155,8 @@ export async function stopLocalCaptureProxy(sessionId: string): Promise<{
   captureProxy: LocalCaptureProxyState | null;
   trace: TracePayload | null;
 }> {
-  const proxy = activeProxies.get(sessionId) || null;
-  if (!proxy) {
+  const existing = activeProxies.get(sessionId) || null;
+  if (!existing) {
     return {
       captureProxy: null,
       trace: null,
@@ -148,16 +164,15 @@ export async function stopLocalCaptureProxy(sessionId: string): Promise<{
   }
 
   activeProxies.delete(sessionId);
-  await proxy.stop();
-
+  const drained = await drainHostRuntimeCaptureSession(sessionId).catch(() => null);
   return {
-    captureProxy: proxy.publicState({ active: false }),
-    trace: proxy.snapshotTrace(),
+    captureProxy: normalizeCaptureProxyState(drained?.captureProxy, existing.captureProxy, false),
+    trace: normalizeTracePayload(drained?.trace || null),
   };
 }
 
 export function listLocalCaptureProxyStates(): LocalCaptureProxyState[] {
-  return [...activeProxies.values()].map((proxy) => proxy.publicState());
+  return [...activeProxies.values()].map((record) => normalizeCaptureProxyState(record.captureProxy, null, true)).filter(Boolean) as LocalCaptureProxyState[];
 }
 
 export async function finalizeAllLocalCaptureProxySessions(input: {
@@ -170,20 +185,28 @@ export async function finalizeAllLocalCaptureProxySessions(input: {
     result: LocalCaptureProxyFinalizationResult;
   }>;
 }> {
-  const proxies = [...activeProxies.values()];
+  const sessionIds = [...activeProxies.keys()];
   const reason = normalizeOptionalString(input.reason) || 'manual-emergency-stop';
   const results = await Promise.all(
-    proxies.map(async (proxy) => {
+    sessionIds.map(async (sessionId) => {
       try {
         return {
-          sessionId: proxy.sessionId,
-          result: await proxy.finalizeWithReason(reason),
+          sessionId,
+          result: await finalizeLocalCaptureProxySession({
+            sourceSessionId: sessionId,
+            ...(activeProxies.get(sessionId)?.lifecycle || {}),
+            clearNetwork: true,
+            cleanupMeta: {
+              ...(activeProxies.get(sessionId)?.lifecycle?.cleanupMeta || {}),
+              finalize_reason: reason,
+            },
+          }),
         };
       } catch (error) {
         return {
-          sessionId: proxy.sessionId,
+          sessionId,
           result: {
-            captureProxy: proxy.publicState({ active: false }),
+            captureProxy: normalizeCaptureProxyState(activeProxies.get(sessionId)?.captureProxy || null, null, false),
             traceAttached: false,
             cleanupSessionId: null,
             clearResult: null,
@@ -196,7 +219,7 @@ export async function finalizeAllLocalCaptureProxySessions(input: {
     })
   );
   return {
-    total: proxies.length,
+    total: sessionIds.length,
     finalized: results.length,
     results,
   };
@@ -318,21 +341,41 @@ async function startLocalCaptureProxy(input: {
   sessionId: string;
   platform?: MobilePlatform | string | null;
   deviceId?: string | null;
-}): Promise<AppLabCaptureProxy> {
+  captureMode?: 'external-proxy' | 'external-mitm';
+  lifecycle?: LocalCaptureProxyLifecycleConfig | null;
+}): Promise<LocalCaptureProxyState> {
   const existing = activeProxies.get(input.sessionId);
-  if (existing) return existing;
+  if (existing) return existing.captureProxy;
 
   const advertiseHost = resolveAdvertiseHost(input);
   const bindHost = resolveBindHost(advertiseHost);
-  const proxy = new AppLabCaptureProxy({
+  const maxDurationMs = input.lifecycle?.maxDurationMs ?? readProxyMaxDurationMs();
+  const started = await startHostRuntimeCaptureSession({
     sessionId: input.sessionId,
-    bindHost,
     advertiseHost,
+    bindHost,
+    captureMode: input.captureMode || 'external-proxy',
+    maxDurationMs,
+    maxBodyCaptureBytes: 16384,
+    meta: {
+      platform: normalizeOptionalString(input.platform) || null,
+      deviceId: normalizeOptionalString(input.deviceId) || null,
+      source: 'applab-discovery',
+    },
   });
-  await proxy.start();
-  activeProxies.set(input.sessionId, proxy);
+  const captureProxy = normalizeCaptureProxyState(started.captureProxy, null, true);
+  if (!captureProxy) {
+    throw new Error('Host runtime did not return a capture proxy state.');
+  }
+  captureProxy.mitm = normalizeMitmState(started.mitm || null, null);
+
+  activeProxies.set(input.sessionId, {
+    sessionId: input.sessionId,
+    captureProxy,
+    lifecycle: input.lifecycle || null,
+  });
   registerCleanup();
-  return proxy;
+  return captureProxy;
 }
 
 function resolveAdvertiseHost(input: {
@@ -376,453 +419,115 @@ function registerCleanup() {
   if (cleanupRegistered) return;
   cleanupRegistered = true;
 
-  const cleanup = async () => {
-    const proxies = [...activeProxies.values()];
-    await Promise.allSettled(proxies.map((proxy) => proxy.finalizeOnProcessExit()));
+  const cleanup = async (reason: string) => {
+    const sessionIds = [...activeProxies.keys()];
+    await Promise.allSettled(
+      sessionIds.map((sessionId) => {
+        const lifecycle = activeProxies.get(sessionId)?.lifecycle || null;
+        if (lifecycle) {
+          return finalizeLocalCaptureProxySession({
+            sourceSessionId: sessionId,
+            executor: lifecycle.executor,
+            deviceId: lifecycle.deviceId,
+            serverUrl: lifecycle.serverUrl,
+            captureLogcat: lifecycle.captureLogcat,
+            clearNetwork: true,
+            cleanupMeta: {
+              ...(lifecycle.cleanupMeta || {}),
+              finalize_reason: reason,
+            },
+          });
+        }
+        return stopLocalCaptureProxy(sessionId).catch(() => null);
+      })
+    );
     activeProxies.clear();
+    await panicStopHostRuntime(reason).catch(() => null);
+    await shutdownHostRuntime().catch(() => null);
   };
 
   process.once('beforeExit', () => {
-    void cleanup();
+    void cleanup('process-exit');
   });
   process.once('SIGINT', () => {
-    void cleanup().finally(() => process.exit(0));
+    void cleanup('sigint').finally(() => process.exit(0));
   });
   process.once('SIGTERM', () => {
-    void cleanup().finally(() => process.exit(0));
+    void cleanup('sigterm').finally(() => process.exit(0));
   });
 }
 
-class AppLabCaptureProxy {
-  private readonly id: string;
-  readonly sessionId: string;
-  readonly bindHost: string;
-  readonly host: string;
-  private readonly entries: Array<Record<string, unknown>> = [];
-  private readonly maxBodyCaptureBytes: number;
-  private server: http.Server | null = null;
-  private startedAt: string | null = null;
-  port: number | null = null;
-  private sequence = 0;
-  private lifecycle: LocalCaptureProxyLifecycleConfig | null = null;
-  private autoFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
-
-  constructor(input: { sessionId: string; bindHost: string; advertiseHost: string; maxBodyCaptureBytes?: number }) {
-    this.id = `appproxy-${Math.random().toString(36).slice(2, 10)}`;
-    this.sessionId = String(input.sessionId);
-    this.bindHost = String(input.bindHost || '127.0.0.1');
-    this.host = String(input.advertiseHost || this.bindHost);
-    this.maxBodyCaptureBytes = clampInt(input.maxBodyCaptureBytes, 2048, 131072, 16384);
-  }
-
-  configureLifecycle(config: LocalCaptureProxyLifecycleConfig | null) {
-    if (!config) return;
-    this.lifecycle = {
-      ...this.lifecycle,
-      ...config,
-      maxDurationMs: config.maxDurationMs ?? this.lifecycle?.maxDurationMs ?? readProxyMaxDurationMs(),
-    };
-    this.scheduleAutoFinalize();
-  }
-
-  publicState(options: { active?: boolean } = {}): LocalCaptureProxyState {
-    return {
-      id: this.id,
-      sessionId: this.sessionId,
-      active: options.active === false ? false : Boolean(this.server),
-      bindHost: this.bindHost,
-      host: this.host,
-      port: this.port,
-      url: this.port ? `http://${this.host}:${this.port}` : null,
-      startedAt: this.startedAt,
-      entryCount: this.entries.length,
-      captureMode: 'external-proxy',
-      source: 'applab-external-proxy',
-    };
-  }
-
-  async start(): Promise<void> {
-    if (this.server) return;
-
-    this.server = http.createServer();
-    this.server.on('request', (req, res) => {
-      this.handleHttpRequest(req, res).catch((error) => {
-        if (!res.headersSent) {
-          res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+function normalizeCaptureProxyState(
+  value: unknown,
+  fallback: LocalCaptureProxyState | null,
+  active: boolean
+): LocalCaptureProxyState | null {
+  const record = isObjectRecord(value) ? value : null;
+  const host = normalizeOptionalString(record?.host) || fallback?.host || null;
+  const port = Number(record?.port ?? fallback?.port ?? NaN);
+  if (!host || !Number.isFinite(port) || port <= 0) {
+    return fallback
+      ? {
+          ...fallback,
+          active,
+          port: Number.isFinite(fallback.port) ? fallback.port : null,
         }
-        res.end(`AppLab proxy error: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    });
-    this.server.on('connect', (req, clientSocket, head) => {
-      this.handleConnectRequest(req, clientSocket as net.Socket, head).catch(() => {
-        try {
-          clientSocket.destroy();
-        } catch {
-          // ignore
-        }
-      });
-    });
-
-    await new Promise<void>((resolveListen, rejectListen) => {
-      const onError = (error: Error) => {
-        this.server?.off('listening', onListening);
-        rejectListen(error);
-      };
-      const onListening = () => {
-        this.server?.off('error', onError);
-        resolveListen();
-      };
-      this.server?.once('error', onError);
-      this.server?.once('listening', onListening);
-      this.server?.listen(0, this.bindHost);
-    });
-
-    const address = this.server.address();
-    this.port = address && typeof address === 'object' && 'port' in address ? Number(address.port) : null;
-    this.startedAt = new Date().toISOString();
-    this.scheduleAutoFinalize();
+      : null;
   }
-
-  async stop(): Promise<void> {
-    this.clearAutoFinalizeTimer();
-    if (!this.server) return;
-    const server = this.server;
-    this.server = null;
-    await new Promise<void>((resolveClose) => {
-      server.close(() => resolveClose());
-    });
-  }
-
-  snapshotTrace(): TracePayload | null {
-    if (this.entries.length === 0) return null;
-    return {
-      trace_kind: 'http_trace',
-      label: 'applab-external-proxy',
-      format: 'json',
-      source: 'applab-external-proxy',
-      payload: {
-        session_id: this.sessionId,
-        proxy_id: this.id,
-        generated_at: new Date().toISOString(),
-        entries: this.entries.map((entry) => JSON.parse(JSON.stringify(entry))),
-      },
-      artifactMeta: {
-        capture_mode: 'external-proxy',
-        proxy_id: this.id,
-        entry_count: this.entries.length,
-      },
-    };
-  }
-
-  async finalizeOnProcessExit(): Promise<void> {
-    await this.finalizeWithReason('process-exit').catch(() => null);
-  }
-
-  private clearAutoFinalizeTimer() {
-    if (!this.autoFinalizeTimer) return;
-    clearTimeout(this.autoFinalizeTimer);
-    this.autoFinalizeTimer = null;
-  }
-
-  private scheduleAutoFinalize() {
-    this.clearAutoFinalizeTimer();
-    if (!this.server) return;
-    const durationMs = this.lifecycle?.maxDurationMs ?? readProxyMaxDurationMs();
-    if (!durationMs || durationMs <= 0) return;
-    this.autoFinalizeTimer = setTimeout(() => {
-      this.autoFinalizeTimer = null;
-      void this.finalizeWithReason('max-duration-timeout').catch(() => null);
-    }, durationMs);
-    this.autoFinalizeTimer.unref?.();
-  }
-
-  async finalizeWithReason(reason: string): Promise<LocalCaptureProxyFinalizationResult> {
-    if (this.lifecycle) {
-      return finalizeLocalCaptureProxySession({
-        sourceSessionId: this.sessionId,
-        executor: this.lifecycle.executor,
-        deviceId: this.lifecycle.deviceId,
-        serverUrl: this.lifecycle.serverUrl,
-        captureLogcat: this.lifecycle.captureLogcat,
-        clearNetwork: true,
-        cleanupMeta: {
-          ...(this.lifecycle.cleanupMeta || {}),
-          finalize_reason: reason,
-        },
-      });
-    }
-
-    const stopped = await stopLocalCaptureProxy(this.sessionId);
-    return {
-      captureProxy: stopped.captureProxy,
-      traceAttached: false,
-      cleanupSessionId: null,
-      clearResult: null,
-      clearedAt: null,
-      finishResult: null,
-      errors: [],
-    };
-  }
-
-  private createBaseEntry(input: { kind: string; method: string; url: string; resourceType: string }): Record<string, unknown> {
-    this.sequence += 1;
-    return {
-      id: `${this.id}-${String(this.sequence).padStart(4, '0')}`,
-      kind: input.kind,
-      resourceType: input.resourceType,
-      method: String(input.method || 'GET').toUpperCase(),
-      url: input.url,
-      startedAt: Date.now(),
-      sessionId: this.sessionId,
-      proxyId: this.id,
-    };
-  }
-
-  private async handleHttpRequest(clientReq: http.IncomingMessage, clientRes: http.ServerResponse): Promise<void> {
-    const url = inferProxyRequestUrl(clientReq);
-    const targetUrl = new URL(url);
-    const transport = targetUrl.protocol === 'https:' ? https : http;
-    const entry = this.createBaseEntry({
-      kind: 'request',
-      method: clientReq.method || 'GET',
-      url,
-      resourceType: targetUrl.protocol === 'https:' ? 'https_request' : 'http_request',
-    });
-
-    await new Promise<void>((resolveRequest) => {
-      const requestCapture = createBodyCapture(this.maxBodyCaptureBytes);
-      let requestBytes = 0;
-      let finalized = false;
-      const finalize = (error?: unknown) => {
-        if (finalized) return;
-        finalized = true;
-        if (error) {
-          (entry as Record<string, unknown>).failureText = error instanceof Error ? error.message : String(error);
-          (entry as Record<string, unknown>).response = {
-            error: (entry as Record<string, unknown>).failureText,
-          };
-        }
-        if (!(entry as Record<string, unknown>).finishedAt) {
-          (entry as Record<string, unknown>).finishedAt = Date.now();
-          (entry as Record<string, unknown>).durationMs = Math.max(
-            0,
-            Number((entry as Record<string, unknown>).finishedAt) - Number((entry as Record<string, unknown>).startedAt)
-          );
-        }
-        this.entries.push(entry);
-        resolveRequest();
-      };
-
-      (entry as Record<string, unknown>).request = {
-        url,
-        method: String(clientReq.method || 'GET').toUpperCase(),
-        headers: redactHeaders(clientReq.headers),
-        startedAt: entry.startedAt,
-        bodyPreview: null,
-        bodyBytes: 0,
-      };
-
-      const upstreamReq = transport.request(
-        {
-          protocol: targetUrl.protocol,
-          hostname: targetUrl.hostname,
-          port: Number(targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80)),
-          method: String(clientReq.method || 'GET').toUpperCase(),
-          path: `${targetUrl.pathname}${targetUrl.search}`,
-          headers: filterHopByHopHeaders(clientReq.headers),
-        },
-        (upstreamRes) => {
-          const responseCapture = createBodyCapture(this.maxBodyCaptureBytes);
-          let responseBytes = 0;
-
-          clientRes.writeHead(upstreamRes.statusCode || 502, filterHopByHopHeaders(upstreamRes.headers));
-          upstreamRes.on('data', (chunk) => {
-            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            responseBytes += buffer.length;
-            responseCapture.add(buffer);
-            clientRes.write(buffer);
-          });
-          upstreamRes.on('end', () => {
-            (entry as Record<string, unknown>).status = upstreamRes.statusCode || null;
-            (entry as Record<string, unknown>).ok = typeof upstreamRes.statusCode === 'number' ? upstreamRes.statusCode < 400 : null;
-            (entry as Record<string, unknown>).response = {
-              status: upstreamRes.statusCode || null,
-              headers: redactHeaders(upstreamRes.headers),
-              durationMs: Math.max(0, Date.now() - Number(entry.startedAt)),
-              size: responseBytes,
-              contentType: headerValue(upstreamRes.headers['content-type']),
-              bodyPreview: responseCapture.preview(),
-            };
-            clientRes.end();
-            finalize();
-          });
-          upstreamRes.on('error', (error) => {
-            if (!clientRes.headersSent) {
-              clientRes.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-            }
-            clientRes.end(`AppLab upstream error: ${error instanceof Error ? error.message : String(error)}`);
-            finalize(error);
-          });
-        }
-      );
-
-      upstreamReq.on('error', (error) => {
-        if (!clientRes.headersSent) {
-          clientRes.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-        }
-        clientRes.end(`AppLab upstream error: ${error instanceof Error ? error.message : String(error)}`);
-        finalize(error);
-      });
-
-      clientReq.on('data', (chunk) => {
-        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        requestBytes += buffer.length;
-        requestCapture.add(buffer);
-        upstreamReq.write(buffer);
-      });
-      clientReq.on('end', () => {
-        (entry as Record<string, unknown>).request = {
-          ...(entry.request as Record<string, unknown>),
-          bodyPreview: requestCapture.preview(),
-          bodyBytes: requestBytes,
-        };
-        upstreamReq.end();
-      });
-      clientReq.on('error', (error) => {
-        upstreamReq.destroy(error);
-        finalize(error);
-      });
-    });
-  }
-
-  private async handleConnectRequest(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): Promise<void> {
-    const authority = String(req.url || '').trim();
-    const [hostname, portRaw] = authority.split(':');
-    const port = clampInt(portRaw, 1, 65535, 443);
-    const entry = this.createBaseEntry({
-      kind: 'connect',
-      method: 'CONNECT',
-      url: `https://${authority}`,
-      resourceType: 'connect_tunnel',
-    });
-    (entry as Record<string, unknown>).request = {
-      url: `https://${authority}`,
-      method: 'CONNECT',
-      headers: redactHeaders(req.headers),
-      startedAt: entry.startedAt,
-    };
-
-    const upstreamSocket = net.connect(port, hostname, () => {
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      if (head && head.length > 0) {
-        upstreamSocket.write(head);
-      }
-      upstreamSocket.pipe(clientSocket);
-      clientSocket.pipe(upstreamSocket);
-      (entry as Record<string, unknown>).status = 200;
-      (entry as Record<string, unknown>).ok = true;
-      (entry as Record<string, unknown>).response = {
-        status: 200,
-      };
-    });
-
-    let finalized = false;
-    const finalize = (error?: unknown) => {
-      if (finalized) return;
-      finalized = true;
-      (entry as Record<string, unknown>).finishedAt = Date.now();
-      (entry as Record<string, unknown>).durationMs = Math.max(
-        0,
-        Number((entry as Record<string, unknown>).finishedAt) - Number((entry as Record<string, unknown>).startedAt)
-      );
-      if (error) {
-        (entry as Record<string, unknown>).failureText = error instanceof Error ? error.message : String(error);
-        (entry as Record<string, unknown>).response = {
-          ...((entry.response as Record<string, unknown> | undefined) || {}),
-          error: (entry as Record<string, unknown>).failureText,
-        };
-      }
-      this.entries.push(entry);
-    };
-
-    upstreamSocket.on('error', (error) => {
-      finalize(error);
-      try {
-        clientSocket.destroy();
-      } catch {
-        // ignore
-      }
-    });
-    clientSocket.on('error', (error) => finalize(error));
-    upstreamSocket.on('close', () => finalize());
-    clientSocket.on('close', () => finalize());
-  }
-}
-
-function createBodyCapture(limitBytes: number) {
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
   return {
-    add(buffer: Buffer) {
-      totalBytes += buffer.length;
-      const remaining = limitBytes - chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      if (remaining <= 0) return;
-      chunks.push(buffer.subarray(0, Math.min(buffer.length, remaining)));
-    },
-    preview() {
-      if (chunks.length === 0) return null;
-      return Buffer.concat(chunks).toString('utf8').slice(0, 1024);
-    },
-    totalBytes() {
-      return totalBytes;
-    },
+    id: normalizeOptionalString(record?.id) || fallback?.id || `runtime-${Math.random().toString(36).slice(2, 10)}`,
+    sessionId: normalizeOptionalString(record?.sessionId) || fallback?.sessionId || '',
+    active,
+    bindHost: normalizeOptionalString(record?.bindHost) || fallback?.bindHost || host,
+    host,
+    port,
+    url: normalizeOptionalString(record?.url) || fallback?.url || `http://${host}:${port}`,
+    startedAt: normalizeOptionalString(record?.startedAt) || fallback?.startedAt || new Date().toISOString(),
+    entryCount: clampInt(record?.entryCount ?? fallback?.entryCount ?? 0, 0, Number.MAX_SAFE_INTEGER, 0),
+    captureMode: normalizeOptionalString(record?.captureMode) === 'external-mitm' || fallback?.captureMode === 'external-mitm'
+      ? 'external-mitm'
+      : 'external-proxy',
+    source: normalizeOptionalString(record?.source) === 'applab-external-mitm' || fallback?.source === 'applab-external-mitm'
+      ? 'applab-external-mitm'
+      : 'applab-external-proxy',
+    mitm: normalizeMitmState(record?.mitm, fallback?.mitm || null),
   };
 }
 
-function inferProxyRequestUrl(req: http.IncomingMessage): string {
-  const raw = String(req.url || '');
-  if (/^https?:\/\//i.test(raw)) return raw;
-  const host = headerValue(req.headers.host) || '127.0.0.1';
-  return `http://${host}${raw.startsWith('/') ? raw : `/${raw}`}`;
+function resolveAppLabCaptureMode(profile: Record<string, unknown>): 'external-proxy' | 'external-mitm' {
+  const capture = profile.capture;
+  if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return 'external-proxy';
+  const applabMode = String((capture as Record<string, unknown>).applabMode || '').trim().toLowerCase();
+  return applabMode === 'external-mitm' ? 'external-mitm' : 'external-proxy';
 }
 
-function filterHopByHopHeaders(headers: http.IncomingHttpHeaders): Record<string, string | string[]> {
-  const output: Record<string, string | string[]> = {};
-  for (const [key, value] of Object.entries(headers || {})) {
-    const lower = String(key).toLowerCase();
-    if (
-      lower === 'proxy-connection' ||
-      lower === 'connection' ||
-      lower === 'keep-alive' ||
-      lower === 'transfer-encoding' ||
-      lower === 'te' ||
-      lower === 'trailer' ||
-      lower === 'upgrade' ||
-      lower === 'proxy-authorization'
-    ) {
-      continue;
-    }
-    if (value !== undefined) output[key] = value;
-  }
-  return output;
+function normalizeTracePayload(value: unknown): TracePayload | null {
+  if (!isObjectRecord(value)) return null;
+  return value as TracePayload;
 }
 
-function redactHeaders(headers: http.IncomingHttpHeaders): Record<string, string | null> {
-  const output: Record<string, string | null> = {};
-  for (const [key, value] of Object.entries(headers || {})) {
-    const lower = String(key).toLowerCase();
-    if (lower === 'authorization' || lower === 'proxy-authorization' || lower === 'cookie' || lower === 'set-cookie') {
-      output[key] = '[redacted]';
-      continue;
-    }
-    output[key] = Array.isArray(value) ? value.join(', ') : value != null ? String(value) : null;
-  }
-  return output;
-}
-
-function headerValue(value: string | string[] | undefined): string | null {
-  if (Array.isArray(value)) return value[0] || null;
-  return value != null ? String(value) : null;
+function normalizeMitmState(
+  value: unknown,
+  fallback: HostRuntimeMitmState | null
+): HostRuntimeMitmState | null {
+  const record = isObjectRecord(value) ? value : null;
+  if (!record) return fallback || null;
+  return {
+    enabled: record.enabled === true || fallback?.enabled === true,
+    rootCertPath: normalizeOptionalString(record.rootCertPath) || fallback?.rootCertPath || null,
+    platform: normalizeOptionalString(record.platform) || fallback?.platform || null,
+    deviceId: normalizeOptionalString(record.deviceId) || fallback?.deviceId || null,
+    certificateInstalled: typeof record.certificateInstalled === 'boolean'
+      ? record.certificateInstalled
+      : fallback?.certificateInstalled,
+    certificateInstallMethod: normalizeOptionalString(record.certificateInstallMethod) || fallback?.certificateInstallMethod || null,
+    warnings: Array.isArray(record.warnings)
+      ? record.warnings.map((item) => String(item)).filter(Boolean)
+      : fallback?.warnings || [],
+    errors: Array.isArray(record.errors)
+      ? record.errors.map((item) => String(item)).filter(Boolean)
+      : fallback?.errors || [],
+  };
 }
 
 function normalizeOptionalString(value: unknown): string | null {
@@ -920,6 +625,6 @@ function safeErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
+function isObjectRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

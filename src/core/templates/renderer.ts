@@ -4,6 +4,7 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { EXPORTS_DIR } from '../../db/index.js';
 import { getBundlePath, getTemplate } from './loader.js';
@@ -93,8 +94,23 @@ async function renderAsync(
       inputProps: props as unknown as Record<string, unknown>,
     });
 
-    // Calculate dynamic duration based on terminal tabs content
+    // Calculate dynamic duration to fit the full source video
+    const fps = composition.fps || 30;
     let durationOverride: number | undefined;
+
+    // Get real video duration via ffprobe
+    const realVideoDuration = getVideoDuration(props.videoUrl);
+    if (realVideoDuration && realVideoDuration > 0) {
+      // Update props so templates know the real duration
+      props.videoDuration = realVideoDuration;
+      const videoFrames = Math.ceil(realVideoDuration * fps);
+      // Ensure composition is long enough for the full video
+      if (videoFrames > composition.durationInFrames) {
+        durationOverride = videoFrames;
+      }
+    }
+
+    // Also account for terminal tabs typewriter animation
     if (props.terminalTabs && props.terminalTabs.length > 0) {
       const charFrames = 2;
       const transitionFrames = 30;
@@ -103,9 +119,10 @@ async function renderAsync(
         (sum, tab) => sum + tab.content.length * charFrames + transitionFrames,
         0
       );
-      const minFrames = Math.max(composition.durationInFrames, totalTypewriterFrames + animationDelay);
-      if (minFrames > composition.durationInFrames) {
-        durationOverride = minFrames;
+      const tabMinFrames = totalTypewriterFrames + animationDelay;
+      const currentTarget = durationOverride || composition.durationInFrames;
+      if (tabMinFrames > currentTarget) {
+        durationOverride = tabMinFrames;
       }
     }
 
@@ -131,6 +148,37 @@ async function renderAsync(
     job.error = err.message;
     job.completedAt = Date.now();
     throw err;
+  }
+}
+
+/**
+ * Get video duration in seconds via ffprobe.
+ * Handles both file paths and localhost URLs (extracts path from query param).
+ */
+function getVideoDuration(videoUrl: string): number | null {
+  try {
+    let filePath = videoUrl;
+    // If it's a localhost URL like http://localhost:PORT/api/file?path=..., extract the path
+    if (videoUrl.startsWith('http')) {
+      const url = new URL(videoUrl);
+      const pathParam = url.searchParams.get('path');
+      if (pathParam) {
+        filePath = decodeURIComponent(pathParam);
+      } else {
+        return null;
+      }
+    }
+    if (!existsSync(filePath)) return null;
+
+    const output = execSync(
+      `ffprobe -v quiet -print_format json -show_format "${filePath}"`,
+      { encoding: 'utf-8', timeout: 10_000 }
+    );
+    const data = JSON.parse(output);
+    const duration = parseFloat(data.format?.duration || '0');
+    return duration > 0 ? duration : null;
+  } catch {
+    return null;
   }
 }
 

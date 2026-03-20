@@ -57,9 +57,12 @@ function readExternalProxyBypassFromEnv(): string[] | null {
   return normalized.length > 0 ? normalized : null;
 }
 
-export function normalizeAppLabNetworkMode(mode?: string | null): 'managed-proxy' | 'external-proxy' {
+export function normalizeAppLabNetworkMode(mode?: string | null): 'managed-proxy' | 'external-proxy' | 'external-mitm' | 'app-http-trace' {
   const normalized = String(mode || '').trim().toLowerCase();
-  return normalized === 'managed-proxy' ? 'managed-proxy' : 'external-proxy';
+  if (normalized === 'managed-proxy') return 'managed-proxy';
+  if (normalized === 'external-mitm') return 'external-mitm';
+  if (normalized === 'app-http-trace') return 'app-http-trace';
+  return 'external-proxy';
 }
 
 export function inferAppLabExternalProxyHost(input: {
@@ -120,7 +123,12 @@ export function buildAppLabNetworkProfile(
   const capture = {
     ...(isObject(input.capture) ? input.capture : {}),
     enabled: true,
-    mode: mode === 'managed-proxy' ? 'esvp-managed-proxy' : 'external-proxy',
+    mode: mode === 'managed-proxy'
+      ? 'esvp-managed-proxy'
+      : mode === 'app-http-trace'
+        ? 'app-http-trace'
+        : 'external-proxy',
+    ...(mode === 'external-mitm' ? { applabMode: 'external-mitm' } : {}),
   };
 
   const profile: Record<string, unknown> = {
@@ -131,7 +139,7 @@ export function buildAppLabNetworkProfile(
     capture,
   };
 
-  if (mode === 'managed-proxy') {
+  if (mode === 'managed-proxy' || mode === 'app-http-trace') {
     if (isObject(input.proxy)) {
       profile.proxy = input.proxy;
     }

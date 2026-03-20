@@ -12,11 +12,14 @@ import { buildAppLabNetworkProfile } from './core/integrations/esvp-network-prof
 
 const program = new Command();
 
+// Detect which binary name was used (discoverylab or applab)
+const binName = process.argv[1]?.replace(/.*[\\/]/, '').replace(/\.[^.]+$/, '') === 'applab' ? 'applab' : 'discoverylab';
+
 // ============================================================================
 // CLI CONFIGURATION
 // ============================================================================
 program
-  .name('discoverylab')
+  .name(binName)
   .description('AI-powered app testing & evidence generator - Claude Code Plugin')
   .version(APP_VERSION);
 
@@ -555,6 +558,7 @@ esvp
 // ============================================================================
 program
   .command('serve')
+  .alias('server')
   .description('Start the DiscoveryLab web UI server')
   .option('-p, --port <number>', 'Port to listen on', '3847')
   .option('-o, --open', 'Open browser automatically', false)

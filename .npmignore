@@ -1,5 +1,5 @@
 # Source code (dist/ is the published build)
-src/
+/src/
 
 # Development files
 tsconfig.json
@@ -11,10 +11,11 @@ SPEC.md
 ARCHITECTURE-ANALYSIS.md
 AGENTS.md
 CLAUDE.md
+/docs/
 
 # Git
-.git/
-.gitignore
+/.git/
+/.gitignore
 
 # IDE & OS
 .idea/
@@ -26,7 +27,7 @@ Thumbs.db
 *~
 
 # Claude Code local config
-.claude/
+/.claude/
 
 # Logs
 *.log
@@ -34,6 +35,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 logs/
+*.tgz
 
 # Test & Coverage
 coverage/
@@ -48,7 +50,9 @@ temp/
 ~/
 
 # Other
-models/
+/models/
+/runtime/
+/scripts/
 
 # Keep these (do NOT ignore):
 # - dist/           (built code)

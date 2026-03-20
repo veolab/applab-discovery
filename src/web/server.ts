@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
-import { readFileSync, existsSync, statSync, readdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, readdirSync, writeFileSync, mkdirSync, copyFileSync, cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { exec, execSync, spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
@@ -45,9 +45,18 @@ import {
   listLocalCaptureProxyStates,
 } from '../core/integrations/local-network-proxy.js';
 import {
+  finalizeLocalAppHttpTraceCollector,
+  getLocalAppHttpTraceBootstrap,
+  ingestLocalAppHttpTrace,
+  resolveLocalAppHttpTraceCollectorById,
+  startLocalAppHttpTraceCollector,
+  type LocalAppHttpTraceCollectorState,
+} from '../core/integrations/local-app-http-trace.js';
+import {
   attachESVPNetworkTrace,
   configureESVPNetwork,
   createESVPSession,
+  inspectESVPSession,
   runESVPActions,
 } from '../core/integrations/esvp.js';
 
@@ -169,6 +178,18 @@ function buildDefaultESVPNetworkProfile(session?: { platform?: string | null; de
       deviceId: session?.deviceId,
     }
   );
+}
+
+function resolveRequestedAppLabCaptureMode(profile?: Record<string, unknown> | null): string {
+  if (!profile || !profile.capture || typeof profile.capture !== 'object' || Array.isArray(profile.capture)) return '';
+  const capture = profile.capture as Record<string, unknown>;
+  if (typeof capture.applabMode === 'string' && capture.applabMode.trim()) {
+    return capture.applabMode.trim().toLowerCase();
+  }
+  if (typeof capture.mode === 'string' && capture.mode.trim()) {
+    return capture.mode.trim().toLowerCase();
+  }
+  return '';
 }
 
 function resolvePersistedNetworkProfile(
@@ -3905,6 +3926,153 @@ app.get('/api/grid/project-frames/:id', async (c) => {
 // ============================================================================
 // EXPORT API
 // ============================================================================
+function sanitizeProjectExportSlug(value: string): string {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'project';
+}
+
+function ensureExportParentDir(filePath: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+}
+
+function writeExportJson(filePath: string, data: unknown): void {
+  ensureExportParentDir(filePath);
+  writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function writeExportText(filePath: string, text: string): void {
+  ensureExportParentDir(filePath);
+  writeFileSync(filePath, text, 'utf8');
+}
+
+function copyPathIntoExportBundle(sourcePath: string | null | undefined, destinationPath: string): boolean {
+  if (!sourcePath || !existsSync(sourcePath)) return false;
+
+  ensureExportParentDir(destinationPath);
+  if (statSync(sourcePath).isDirectory()) {
+    cpSync(sourcePath, destinationPath, { recursive: true });
+  } else {
+    copyFileSync(sourcePath, destinationPath);
+  }
+
+  return true;
+}
+
+function looksLikeRecordingDirectory(dirPath: string | null | undefined): boolean {
+  if (!dirPath || !existsSync(dirPath)) return false;
+
+  try {
+    if (!statSync(dirPath).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+
+  return [
+    join(dirPath, 'session.json'),
+    join(dirPath, 'screenshots'),
+    join(dirPath, 'video'),
+    join(dirPath, 'test.yaml'),
+    join(dirPath, 'test.spec.ts'),
+  ].some((candidate) => existsSync(candidate));
+}
+
+function resolveProjectBundleRecordingDir(originalVideoPath: string | null, resolvedVideoPath: string | null): string | null {
+  const candidates = [
+    originalVideoPath,
+    resolveRecordingBaseDir(originalVideoPath),
+    resolveRecordingBaseDir(resolvedVideoPath),
+  ].filter((value, index, items): value is string => !!value && items.indexOf(value) === index);
+
+  for (const candidate of candidates) {
+    if (looksLikeRecordingDirectory(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function copyProjectExportArtifacts(sourceDir: string, destinationDir: string): number {
+  if (!existsSync(sourceDir) || !statSync(sourceDir).isDirectory()) {
+    return 0;
+  }
+
+  let copiedCount = 0;
+  for (const entry of readdirSync(sourceDir)) {
+    if (/\.(applab|esvp)$/i.test(entry)) continue;
+    if (copyPathIntoExportBundle(join(sourceDir, entry), join(destinationDir, entry))) {
+      copiedCount += 1;
+    }
+  }
+
+  return copiedCount;
+}
+
+async function runExportCommand(command: string, args: string[], cwd?: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let errorOutput = '';
+
+    child.stdout.on('data', () => {});
+    child.stderr.on('data', (chunk) => {
+      errorOutput += String(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(errorOutput.trim() || `${command} exited with code ${code ?? 'unknown'}`));
+    });
+  });
+}
+
+async function createProjectArchive(sourceDir: string, outputPath: string): Promise<void> {
+  ensureExportParentDir(outputPath);
+
+  if (process.platform === 'darwin') {
+    try {
+      await runExportCommand('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', sourceDir, outputPath]);
+      return;
+    } catch {
+      // Fall through to zip for environments without ditto.
+    }
+  }
+
+  await runExportCommand('zip', ['-qr', outputPath, basename(sourceDir)], dirname(sourceDir));
+}
+
+function resolveProjectESVPSessionId(esvp: Record<string, unknown> | null): string | null {
+  if (!esvp) return null;
+
+  const validation = esvp.validation && typeof esvp.validation === 'object'
+    ? esvp.validation as Record<string, unknown>
+    : null;
+  const network = esvp.network && typeof esvp.network === 'object'
+    ? esvp.network as Record<string, unknown>
+    : null;
+
+  const directId = typeof esvp.currentSessionId === 'string' ? esvp.currentSessionId.trim() : '';
+  const validationId = typeof validation?.sourceSessionId === 'string' ? validation.sourceSessionId.trim() : '';
+  const networkId = typeof network?.sourceSessionId === 'string' ? network.sourceSessionId.trim() : '';
+
+  return directId || validationId || networkId || null;
+}
+
+function resolveProjectESVPServerUrl(esvp: Record<string, unknown> | null): string | undefined {
+  if (!esvp || typeof esvp.serverUrl !== 'string') return undefined;
+  const serverUrl = esvp.serverUrl.trim();
+  return serverUrl || undefined;
+}
+
 app.post('/api/export', async (c) => {
   try {
     const body = await c.req.json();
@@ -3917,14 +4085,12 @@ app.post('/api/export', async (c) => {
       return c.json({ error: 'Project not found' }, 404);
     }
 
-    const project = result[0];
-    if (!project.videoPath) {
+    const rawProject = result[0] as ProjectRecord;
+    const normalizedProject = normalizeProjectRecord(rawProject);
+    if (!rawProject.videoPath && format !== 'applab' && format !== 'esvp') {
       return c.json({ error: 'No media file in project' }, 400);
     }
 
-    const { EXPORTS_DIR } = await import('../db/index.js');
-    const { mkdirSync, copyFileSync, writeFileSync, statSync, cpSync } = await import('node:fs');
-    const { exec } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const execAsync = promisify(exec);
 
@@ -3937,19 +4103,210 @@ app.post('/api/export', async (c) => {
     const timestamp = Date.now();
     let outputPath = '';
     let mimeType = 'image/png';
+    const resolvedVideoPath = resolveVideoPath(rawProject.videoPath);
 
     // Check if videoPath is a directory (e.g., Maestro recordings)
-    const isVideoPathDirectory = existsSync(project.videoPath) && statSync(project.videoPath).isDirectory();
+    const isVideoPathDirectory = !!rawProject.videoPath && existsSync(rawProject.videoPath) && statSync(rawProject.videoPath).isDirectory();
 
-    if (isVideoPathDirectory && format === 'gif') {
+    if (format === 'applab' || format === 'esvp') {
+      const projectFrames = await db
+        .select()
+        .from(frames)
+        .where(eq(frames.projectId, projectId))
+        .orderBy(frames.frameNumber);
+
+      const exportRecords = await db
+        .select()
+        .from(projectExports)
+        .where(eq(projectExports.projectId, projectId))
+        .orderBy(desc(projectExports.createdAt));
+
+      const recordingBaseDir = resolveProjectBundleRecordingDir(rawProject.videoPath, resolvedVideoPath);
+      const exportArtifactsDir = join(EXPORTS_DIR, projectId);
+      const sessionPath = recordingBaseDir ? join(recordingBaseDir, 'session.json') : null;
+
+      let sessionData: Record<string, unknown> | null = null;
+      let networkEntries: CapturedNetworkEntry[] = [];
+      let networkCapture: Record<string, unknown> | null = null;
+      let esvp: Record<string, unknown> | null = null;
+
+      if (sessionPath && existsSync(sessionPath)) {
+        try {
+          const parsed = JSON.parse(readFileSync(sessionPath, 'utf8'));
+          sessionData = parsed && typeof parsed === 'object' ? parsed : null;
+          networkEntries = Array.isArray(parsed?.networkEntries) ? parsed.networkEntries : [];
+          networkCapture = parsed?.networkCapture && typeof parsed.networkCapture === 'object'
+            ? parsed.networkCapture
+            : null;
+          esvp = parsed?.esvp && typeof parsed.esvp === 'object'
+            ? parsed.esvp
+            : null;
+        } catch {
+          sessionData = null;
+        }
+      }
+
+      const stagingRoot = mkdtempSync(join(tmpdir(), `${format}-export-`));
+      const bundleFolderName = `${sanitizeProjectExportSlug(rawProject.name)}-${new Date(timestamp).toISOString().slice(0, 10)}`;
+      const bundleRoot = join(stagingRoot, bundleFolderName);
+      mkdirSync(bundleRoot, { recursive: true });
+
+      try {
+        const summaryPath = rawProject.aiSummary ? 'analysis/app-intelligence.md' : null;
+        const ocrPath = rawProject.ocrText ? 'analysis/ocr.txt' : null;
+        const thumbnailName = rawProject.thumbnailPath ? basename(rawProject.thumbnailPath) : null;
+        const resolvedMediaName = resolvedVideoPath ? basename(resolvedVideoPath) : null;
+
+        const bundledFrames = projectFrames.map((frame) => {
+          const extensionMatch = basename(frame.imagePath).match(/(\.[^.]+)$/);
+          const extension = extensionMatch ? extensionMatch[1] : '.png';
+          const relativeImagePath = `frames/frame-${String(frame.frameNumber).padStart(4, '0')}${extension}`;
+          copyPathIntoExportBundle(frame.imagePath, join(bundleRoot, relativeImagePath));
+          return {
+            ...frame,
+            imagePath: relativeImagePath,
+          };
+        });
+
+        const mediaFiles: Array<{ role: string; path: string }> = [];
+        if (resolvedVideoPath && existsSync(resolvedVideoPath) && !statSync(resolvedVideoPath).isDirectory()) {
+          const relativePath = `media/${resolvedMediaName}`;
+          copyPathIntoExportBundle(resolvedVideoPath, join(bundleRoot, relativePath));
+          mediaFiles.push({ role: 'primary-media', path: relativePath });
+        }
+        if (rawProject.thumbnailPath && existsSync(rawProject.thumbnailPath) && thumbnailName) {
+          const relativePath = `media/${thumbnailName}`;
+          copyPathIntoExportBundle(rawProject.thumbnailPath, join(bundleRoot, relativePath));
+          mediaFiles.push({ role: 'thumbnail', path: relativePath });
+        }
+
+        const recordingIncluded = recordingBaseDir
+          ? copyPathIntoExportBundle(recordingBaseDir, join(bundleRoot, 'recording'))
+          : false;
+        const exportArtifactCount = copyProjectExportArtifacts(exportArtifactsDir, join(bundleRoot, 'exports'));
+
+        const esvpSessionId = resolveProjectESVPSessionId(esvp);
+        const esvpServerUrl = resolveProjectESVPServerUrl(esvp);
+        let esvpSnapshot: Record<string, unknown> | null = null;
+        if (esvpSessionId) {
+          try {
+            const inspected = await inspectESVPSession(
+              esvpSessionId,
+              { includeTranscript: true, includeArtifacts: true },
+              esvpServerUrl
+            );
+            esvpSnapshot = inspected && typeof inspected === 'object'
+              ? inspected as Record<string, unknown>
+              : null;
+          } catch (error) {
+            esvpSnapshot = {
+              sessionId: esvpSessionId,
+              serverUrl: esvpServerUrl || null,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        const packagedProject = {
+          ...normalizedProject,
+          videoPath: resolvedMediaName ? `media/${resolvedMediaName}` : normalizedProject.videoPath,
+          thumbnailPath: thumbnailName ? `media/${thumbnailName}` : normalizedProject.thumbnailPath,
+          frames: bundledFrames,
+        };
+
+        writeExportJson(join(bundleRoot, 'manifest.json'), {
+          bundleVersion: 1,
+          packageFormat: format,
+          exportedAt: new Date(timestamp).toISOString(),
+          exportedWith: {
+            app: 'DiscoveryLab',
+            version: APP_VERSION,
+          },
+          project: {
+            id: rawProject.id,
+            name: rawProject.name,
+            platform: rawProject.platform || null,
+            frameCount: bundledFrames.length,
+            hasRecordingFolder: recordingIncluded,
+            hasNetworkTrace: networkEntries.length > 0 || !!networkCapture,
+            hasOCR: !!rawProject.ocrText,
+            hasAppIntelligence: !!rawProject.aiSummary,
+            hasExportArtifacts: exportArtifactCount > 0,
+          },
+          included: {
+            mediaFiles,
+            frames: bundledFrames.length,
+            recordingFolder: recordingIncluded,
+            networkEntries: networkEntries.length,
+            exportArtifacts: exportArtifactCount,
+            esvpSessionId: esvpSessionId || null,
+          },
+        });
+        writeExportJson(join(bundleRoot, 'metadata', 'project.json'), packagedProject);
+        writeExportJson(join(bundleRoot, 'metadata', 'exports.json'), exportRecords);
+        if (sessionData) {
+          writeExportJson(join(bundleRoot, 'metadata', 'session.json'), sessionData);
+        }
+        if (rawProject.taskHubLinks) {
+          writeExportJson(join(bundleRoot, 'taskhub', 'links.json'), normalizedProject.taskHubLinks);
+        }
+        if (rawProject.taskRequirements) {
+          writeExportJson(join(bundleRoot, 'taskhub', 'requirements.json'), normalizedProject.taskRequirements);
+        }
+        if (rawProject.taskTestMap) {
+          writeExportJson(join(bundleRoot, 'taskhub', 'test-map.json'), normalizedProject.taskTestMap);
+        }
+        if (summaryPath) {
+          writeExportText(join(bundleRoot, summaryPath), rawProject.aiSummary || '');
+        }
+        if (ocrPath) {
+          writeExportText(join(bundleRoot, ocrPath), rawProject.ocrText || '');
+        }
+        if (bundledFrames.length > 0) {
+          writeExportJson(join(bundleRoot, 'analysis', 'frames.json'), bundledFrames);
+        }
+        if (networkEntries.length > 0) {
+          writeExportJson(join(bundleRoot, 'network', 'entries.json'), networkEntries);
+        }
+        if (networkCapture) {
+          writeExportJson(join(bundleRoot, 'network', 'capture.json'), networkCapture);
+        }
+        if (esvp) {
+          writeExportJson(join(bundleRoot, 'network', 'esvp.json'), esvp);
+        }
+        if (esvpSnapshot) {
+          writeExportJson(join(bundleRoot, 'esvp', 'snapshot.json'), esvpSnapshot);
+        }
+        writeExportText(join(bundleRoot, 'README.txt'), [
+          `${rawProject.name}`,
+          `Exported from DiscoveryLab ${APP_VERSION} on ${new Date(timestamp).toISOString()}.`,
+          '',
+          'This package bundles the local project context for sharing or re-analysis.',
+          '',
+          'Included when available:',
+          '- original media and thumbnail',
+          '- recording folder with session data, screenshots, and test script',
+          '- OCR text and app intelligence summary',
+          '- network trace, capture metadata, and ESVP snapshot',
+          '- previously generated export assets such as grids and renders',
+          '- Task Hub links, requirements, and test map',
+        ].join('\n'));
+
+        outputPath = join(exportDir, `export-${timestamp}.${format}`);
+        mimeType = 'application/zip';
+        await createProjectArchive(bundleRoot, outputPath);
+      } finally {
+        rmSync(stagingRoot, { recursive: true, force: true });
+      }
+    } else if (isVideoPathDirectory && format === 'gif') {
       // Maestro recording: create animated GIF from screenshots
       outputPath = join(exportDir, `export-${timestamp}.gif`);
       mimeType = 'image/gif';
 
       // Find screenshots directory
-      const screenshotsDir = join(project.videoPath, 'screenshots');
+      const screenshotsDir = join(rawProject.videoPath!, 'screenshots');
       const screenshotsDirExists = existsSync(screenshotsDir) && statSync(screenshotsDir).isDirectory();
-      const sourceDir = screenshotsDirExists ? screenshotsDir : project.videoPath;
+      const sourceDir = screenshotsDirExists ? screenshotsDir : rawProject.videoPath!;
 
       // Get all PNG files sorted by name (timestamp order)
       const { readdirSync } = await import('node:fs');
@@ -3987,9 +4344,9 @@ app.post('/api/export', async (c) => {
       mimeType = 'video/mp4';
 
       // Find screenshots directory
-      const screenshotsDir = join(project.videoPath, 'screenshots');
+      const screenshotsDir = join(rawProject.videoPath!, 'screenshots');
       const screenshotsDirExists = existsSync(screenshotsDir) && statSync(screenshotsDir).isDirectory();
-      const sourceDir = screenshotsDirExists ? screenshotsDir : project.videoPath;
+      const sourceDir = screenshotsDirExists ? screenshotsDir : rawProject.videoPath!;
 
       // Get all PNG files sorted by name (timestamp order)
       const { readdirSync } = await import('node:fs');
@@ -4024,7 +4381,7 @@ app.post('/api/export', async (c) => {
     } else if (isVideoPathDirectory) {
       // Maestro recording: copy entire directory for other formats
       outputPath = join(exportDir, `export-${timestamp}`);
-      cpSync(project.videoPath, outputPath, { recursive: true });
+      cpSync(rawProject.videoPath!, outputPath, { recursive: true });
       mimeType = 'application/octet-stream';
     } else if (format === 'png' || format === 'jpg' || format === 'jpeg') {
       // Handle different formats for single files
@@ -4033,16 +4390,16 @@ app.post('/api/export', async (c) => {
       mimeType = `image/${ext}`;
 
       // Convert if needed or just copy
-      if (project.videoPath.endsWith(`.${format}`)) {
-        copyFileSync(project.videoPath, outputPath);
+      if (resolvedVideoPath?.endsWith(`.${format}`)) {
+        copyFileSync(resolvedVideoPath, outputPath);
       } else {
         // Use sips for conversion on macOS
         try {
-          await execAsync(`sips -s format ${format} "${project.videoPath}" --out "${outputPath}"`);
+          await execAsync(`sips -s format ${format} "${resolvedVideoPath}" --out "${outputPath}"`);
         } catch {
           // If conversion fails, just copy
-          copyFileSync(project.videoPath, outputPath);
-          outputPath = join(exportDir, `export-${timestamp}${project.videoPath.substring(project.videoPath.lastIndexOf('.'))}`);
+          copyFileSync(resolvedVideoPath!, outputPath);
+          outputPath = join(exportDir, `export-${timestamp}${resolvedVideoPath?.substring(resolvedVideoPath.lastIndexOf('.'))}`);
         }
       }
     } else if (format === 'gif') {
@@ -4051,9 +4408,9 @@ app.post('/api/export', async (c) => {
 
       // Create GIF from single image
       try {
-        await execAsync(`ffmpeg -i "${project.videoPath}" -vf "fps=10,scale=320:-1:flags=lanczos" "${outputPath}" -y`);
+        await execAsync(`ffmpeg -i "${resolvedVideoPath}" -vf "fps=10,scale=320:-1:flags=lanczos" "${outputPath}" -y`);
       } catch {
-        copyFileSync(project.videoPath, outputPath.replace('.gif', '.png'));
+        copyFileSync(resolvedVideoPath!, outputPath.replace('.gif', '.png'));
         outputPath = outputPath.replace('.gif', '.png');
         mimeType = 'image/png';
       }
@@ -4061,34 +4418,36 @@ app.post('/api/export', async (c) => {
       outputPath = join(exportDir, `export-${timestamp}.mp4`);
       mimeType = 'video/mp4';
 
-      if (project.videoPath.endsWith('.mp4')) {
-        copyFileSync(project.videoPath, outputPath);
+      if (resolvedVideoPath?.endsWith('.mp4')) {
+        copyFileSync(resolvedVideoPath, outputPath);
       } else {
         // Create video from image
         try {
-          await execAsync(`ffmpeg -loop 1 -i "${project.videoPath}" -c:v libx264 -t 3 -pix_fmt yuv420p "${outputPath}" -y`);
+          await execAsync(`ffmpeg -loop 1 -i "${resolvedVideoPath}" -c:v libx264 -t 3 -pix_fmt yuv420p "${outputPath}" -y`);
         } catch {
           return c.json({ error: 'Video conversion failed - FFmpeg required' }, 400);
         }
       }
     } else {
       // Default: copy original
-      const ext = project.videoPath.substring(project.videoPath.lastIndexOf('.'));
+      const ext = resolvedVideoPath?.substring(resolvedVideoPath.lastIndexOf('.')) || '';
       outputPath = join(exportDir, `export-${timestamp}${ext}`);
-      copyFileSync(project.videoPath, outputPath);
+      if (resolvedVideoPath) {
+        copyFileSync(resolvedVideoPath, outputPath);
+      }
     }
 
     // Create text file with OCR and summary if requested
-    if (includeOcr || includeSummary) {
-      let textContent = `# ${project.name}\n\n`;
+    if ((includeOcr || includeSummary) && format !== 'applab' && format !== 'esvp') {
+      let textContent = `# ${rawProject.name}\n\n`;
       textContent += `Exported: ${new Date().toISOString()}\n\n`;
 
-      if (includeSummary && project.aiSummary) {
-        textContent += `## Summary\n${project.aiSummary}\n\n`;
+      if (includeSummary && rawProject.aiSummary) {
+        textContent += `## Summary\n${rawProject.aiSummary}\n\n`;
       }
 
-      if (includeOcr && project.ocrText) {
-        textContent += `## OCR Text\n${project.ocrText}\n`;
+      if (includeOcr && rawProject.ocrText) {
+        textContent += `## OCR Text\n${rawProject.ocrText}\n`;
       }
 
       const textPath = join(exportDir, `export-${timestamp}.txt`);
@@ -5782,10 +6141,12 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
     const { id } = c.req.param();
     const body = await c.req.json().catch(() => ({}));
     const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
-    const network =
+    const requestedNetwork =
       body?.network && typeof body.network === 'object'
         ? body.network
         : body?.network === false ? null : { enabled: true };
+    const localProxyOptInEnabled = appLabNetworkProxySettings.localProxyOptInEnabled === true;
+    const network = localProxyOptInEnabled ? requestedNetwork : null;
     const captureLogcat = typeof body?.captureLogcat === 'boolean' ? body.captureLogcat : undefined;
     const replay = typeof body?.replay === 'boolean' ? body.replay : undefined;
     const session = await readMobileRecordingSessionData(id);
@@ -5829,7 +6190,8 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
         network,
         captureLogcat,
         replay,
-        allowAppLabOwnedProxyAutostart: !appLabNetworkProxySettings.emergencyLockEnabled,
+        appTraceServerPort: currentServerPort,
+        allowAppLabOwnedProxyAutostart: localProxyOptInEnabled && !appLabNetworkProxySettings.emergencyLockEnabled,
         bootstrapScreenshotPath: getFirstRecordingScreenshotPath(session),
         recoveryVisionProvider: visionProviders.length > 0 ? visionProviders : undefined,
       }
@@ -5857,11 +6219,14 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
       },
       network: {
         sourceSessionId: result.sourceSessionId || null,
+        networkSupported: typeof result.networkState?.supported === 'boolean' ? result.networkState.supported : null,
         traceKinds: result.traceKinds,
+        traceCount: Number.isFinite(result.networkState?.trace_count) ? Number(result.networkState?.trace_count) : result.traceKinds.length,
         syncedAt: new Date().toISOString(),
         entryCount: result.networkEntries.length,
         managedProxy: result.managedProxy || null,
         captureProxy: result.captureProxy || null,
+        appTraceCollector: result.appTraceCollector || null,
         activeProfile: result.networkState?.active_profile || null,
         effectiveProfile: result.networkState?.effective_profile || null,
         configuredAt: result.networkState?.configured_at || null,
@@ -5895,6 +6260,7 @@ app.post('/api/testing/mobile/recordings/:id/esvp/validate', async (c) => {
           session.esvp.network = {
             ...session.esvp.network,
             traceKinds: deferred.traceKinds,
+            traceCount: Number.isFinite(result.networkState?.trace_count) ? Number(result.networkState?.trace_count) : deferred.traceKinds.length,
             entryCount: deferred.networkEntries.length,
             syncedAt: new Date().toISOString(),
           };
@@ -5927,6 +6293,11 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/start', async (c) => {
     const { id } = c.req.param();
     const body = await c.req.json().catch(() => ({}));
     const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : undefined;
+    if (appLabNetworkProxySettings.localProxyOptInEnabled !== true) {
+      return c.json({
+        error: 'App Lab local network capture is disabled. Enable it from the Capture or Testing start card before starting network capture.',
+      }, 403);
+    }
     const session = await readMobileRecordingSessionData(id);
     const executor = resolveRecordingExecutor(session);
     const appId = normalizeRecordingAppIdForESVP(session?.appId);
@@ -5955,6 +6326,7 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/start', async (c) => {
         sessionId: existingNetwork.activeCaptureSessionId,
         managedProxy: existingNetwork.managedProxy || null,
         captureProxy: existingNetwork.captureProxy || null,
+        appTraceCollector: existingNetwork.appTraceCollector || null,
         effectiveProfile: existingNetwork.effectiveProfile || null,
       });
     }
@@ -5981,31 +6353,50 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/start', async (c) => {
     if (!requestedNetworkProfile) {
       return c.json({ error: 'No network profile could be resolved for this recording.' }, 400);
     }
-
-    const preparedNetworkProfile = await ensureLocalCaptureProxyProfile({
-      sessionId: sourceSessionId,
-      profile: requestedNetworkProfile,
-      platform: session?.platform,
-      deviceId: session?.deviceId,
-      allowAppLabOwnedProxy: !appLabNetworkProxySettings.emergencyLockEnabled,
-      lifecycle: {
-        executor,
-        deviceId: String(session.deviceId || ''),
-        serverUrl,
-        captureLogcat: executor === 'adb',
-        cleanupMeta: {
-          recording_id: String(session.id || id),
-          recording_name: String(session.name || `Recording ${id}`),
-          recording_platform: session.platform === 'ios' ? 'ios' : 'android',
-        },
-      },
-    });
-
-    const networkResult = await configureESVPNetwork(
-      sourceSessionId,
-      preparedNetworkProfile.profile || requestedNetworkProfile,
-      serverUrl
-    );
+    const requestedCaptureMode = resolveRequestedAppLabCaptureMode(requestedNetworkProfile);
+    const appTraceMode = requestedCaptureMode === 'app-http-trace';
+    const preparedNetworkProfile = appTraceMode
+      ? {
+          profile: requestedNetworkProfile,
+          captureProxy: null,
+          usesExternalProxy: false,
+          appLabOwnedProxy: false,
+        }
+      : await ensureLocalCaptureProxyProfile({
+          sessionId: sourceSessionId,
+          profile: requestedNetworkProfile,
+          platform: session?.platform,
+          deviceId: session?.deviceId,
+          allowAppLabOwnedProxy: appLabNetworkProxySettings.localProxyOptInEnabled === true && !appLabNetworkProxySettings.emergencyLockEnabled,
+          lifecycle: {
+            executor,
+            deviceId: String(session.deviceId || ''),
+            serverUrl,
+            captureLogcat: executor === 'adb',
+            cleanupMeta: {
+              recording_id: String(session.id || id),
+              recording_name: String(session.name || `Recording ${id}`),
+              recording_platform: session.platform === 'ios' ? 'ios' : 'android',
+            },
+          },
+        });
+    const appTraceCollector = appTraceMode
+      ? startLocalAppHttpTraceCollector({
+          sessionId: sourceSessionId,
+          recordingId: String(session.id || id),
+          appId,
+          platform: session?.platform,
+          deviceId: session?.deviceId,
+          serverPort: currentServerPort,
+        })
+      : null;
+    const networkResult = preparedNetworkProfile.profile && !appTraceMode
+      ? await configureESVPNetwork(
+          sourceSessionId,
+          preparedNetworkProfile.profile || requestedNetworkProfile,
+          serverUrl
+        )
+      : null;
 
     if (appId) {
       await runESVPActions(
@@ -6032,13 +6423,24 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/start', async (c) => {
         activeCaptureSessionId: sourceSessionId,
         captureStatus: 'running',
         captureStartedAt: new Date().toISOString(),
-        entryCount: Number(existingNetwork?.entryCount || 0),
-        traceKinds: Array.isArray(existingNetwork?.traceKinds) ? existingNetwork.traceKinds : [],
+        networkSupported: appTraceMode
+          ? true
+          : typeof networkResult?.network?.supported === 'boolean'
+            ? networkResult.network.supported
+            : null,
+        entryCount: 0,
+        traceCount: Number.isFinite(networkResult?.network?.trace_count)
+          ? Number(networkResult.network.trace_count)
+          : 0,
+        traceKinds: appTraceMode
+          ? ['app_http_trace']
+          : [],
         managedProxy: networkResult?.network?.managed_proxy || null,
         captureProxy: preparedNetworkProfile.captureProxy || null,
-        activeProfile: resolvePersistedNetworkProfile(networkResult?.network, existingNetwork, preparedNetworkProfile.profile),
-        effectiveProfile: resolvePersistedNetworkProfile(networkResult?.network, existingNetwork, preparedNetworkProfile.profile),
-        configuredAt: networkResult?.network?.configured_at || null,
+        appTraceCollector: appTraceCollector || null,
+        activeProfile: resolvePersistedNetworkProfile(networkResult?.network, null, preparedNetworkProfile.profile),
+        effectiveProfile: resolvePersistedNetworkProfile(networkResult?.network, null, preparedNetworkProfile.profile),
+        configuredAt: networkResult?.network?.configured_at || new Date().toISOString(),
         clearedAt: null,
         lastError: networkResult?.network?.last_error || null,
       },
@@ -6053,6 +6455,67 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/start', async (c) => {
       network: session.esvp.network,
       managedProxy: session.esvp.network?.managedProxy || null,
       captureProxy: session.esvp.network?.captureProxy || null,
+      appTraceCollector: session.esvp.network?.appTraceCollector || null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get('/api/testing/mobile/app-http-trace/bootstrap', async (c) => {
+  const appId = typeof c.req.query('appId') === 'string' ? c.req.query('appId') : undefined;
+  const recordingId = typeof c.req.query('recordingId') === 'string' ? c.req.query('recordingId') : undefined;
+  const bootstrap = getLocalAppHttpTraceBootstrap({ appId, recordingId });
+  if (!bootstrap) {
+    return c.json({ error: 'No active local app_http_trace collector matched this app.' }, 404);
+  }
+
+  return c.json({
+    success: true,
+    collector: {
+      id: bootstrap.id,
+      sessionId: bootstrap.sessionId,
+      recordingId: bootstrap.recordingId,
+      appId: bootstrap.appId,
+      active: bootstrap.active,
+      host: bootstrap.host,
+      port: bootstrap.port,
+      bootstrapUrl: bootstrap.bootstrapUrl,
+      ingestUrl: bootstrap.ingestUrl,
+      entryCount: bootstrap.entryCount,
+      traceKind: bootstrap.traceKind,
+      source: bootstrap.source,
+    },
+    bootstrap: bootstrap.bootstrap,
+  });
+});
+
+app.post('/api/testing/mobile/recordings/:id/esvp/app-http-trace/:collectorId', async (c) => {
+  try {
+    const { id, collectorId } = c.req.param();
+    const collector = resolveLocalAppHttpTraceCollectorById(collectorId);
+    if (!collector || collector.recordingId !== id) {
+      return c.json({ error: 'Collector not found' }, 404);
+    }
+
+    const payload = await c.req.json().catch(() => ({}));
+    const authToken = c.req.header('x-applab-trace-token')
+      || c.req.header('authorization')?.replace(/^Bearer\s+/i, '')
+      || null;
+    const accepted = ingestLocalAppHttpTrace({
+      collectorId,
+      authToken,
+      payload,
+    });
+    if (!accepted.collector) {
+      return c.json({ error: 'Collector rejected the trace batch' }, 401);
+    }
+
+    return c.json({
+      success: true,
+      accepted: accepted.accepted,
+      collector: accepted.collector,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -6083,19 +6546,31 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/stop', async (c) => {
       return c.json({ error: 'No active ESVP network capture session was found.' }, 400);
     }
 
-    const finalization = await finalizeLocalCaptureProxySession({
-      sourceSessionId: sessionId,
-      executor,
-      deviceId: String(session.deviceId || ''),
-      serverUrl,
-      captureLogcat: executor === 'adb',
-      clearNetwork: true,
-      cleanupMeta: {
-        recording_id: String(session.id || id),
-        recording_name: String(session.name || `Recording ${id}`),
-        recording_platform: session.platform === 'ios' ? 'ios' : 'android',
-      },
-    });
+    const appTraceCollector = network?.appTraceCollector && typeof network.appTraceCollector === 'object'
+      ? (network.appTraceCollector as LocalAppHttpTraceCollectorState)
+      : null;
+    const appTraceMode = appTraceCollector?.sessionId === sessionId;
+    const proxyFinalization = appTraceMode
+      ? null
+      : await finalizeLocalCaptureProxySession({
+          sourceSessionId: sessionId,
+          executor,
+          deviceId: String(session.deviceId || ''),
+          serverUrl,
+          captureLogcat: executor === 'adb',
+          clearNetwork: true,
+          cleanupMeta: {
+            recording_id: String(session.id || id),
+            recording_name: String(session.name || `Recording ${id}`),
+            recording_platform: session.platform === 'ios' ? 'ios' : 'android',
+          },
+        });
+    const appTraceFinalization = appTraceMode
+      ? await finalizeLocalAppHttpTraceCollector({
+          sourceSessionId: sessionId,
+          serverUrl,
+        })
+      : null;
 
     const networkData = await collectESVPSessionNetworkData(sessionId, serverUrl);
     session.networkEntries = networkData.networkEntries;
@@ -6109,15 +6584,20 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/stop', async (c) => {
         activeCaptureSessionId: null,
         captureStatus: 'stopped',
         captureStoppedAt: new Date().toISOString(),
+        networkSupported: typeof networkData.networkState?.supported === 'boolean' ? networkData.networkState.supported : null,
         traceKinds: networkData.traceKinds,
+        traceCount: Number.isFinite(networkData.networkState?.trace_count)
+          ? Number(networkData.networkState?.trace_count)
+          : networkData.traceKinds.length,
         entryCount: networkData.networkEntries.length,
         managedProxy: networkData.networkState?.managed_proxy ?? network?.managedProxy ?? null,
-        captureProxy: finalization.captureProxy || network?.captureProxy || null,
+        captureProxy: proxyFinalization?.captureProxy || network?.captureProxy || null,
+        appTraceCollector: appTraceFinalization?.collector || appTraceCollector || null,
         activeProfile: resolvePersistedNetworkProfile(networkData.networkState, network),
         effectiveProfile: resolvePersistedNetworkProfile(networkData.networkState, network),
         configuredAt: networkData.networkState?.configured_at || null,
-        clearedAt: networkData.networkState?.cleared_at || finalization.clearedAt || null,
-        lastError: networkData.networkState?.last_error || (finalization.errors[0] || null),
+        clearedAt: networkData.networkState?.cleared_at || proxyFinalization?.clearedAt || null,
+        lastError: networkData.networkState?.last_error || proxyFinalization?.errors?.[0] || appTraceFinalization?.errors?.[0] || null,
         syncedAt: new Date().toISOString(),
       },
     };
@@ -6131,7 +6611,8 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/stop', async (c) => {
       networkEntries: networkData.networkEntries,
       networkCapture: networkData.networkCapture,
       traceKinds: networkData.traceKinds,
-      captureProxy: finalization.captureProxy || null,
+      captureProxy: proxyFinalization?.captureProxy || null,
+      appTraceCollector: appTraceFinalization?.collector || null,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -6209,10 +6690,15 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/trace-attach', async (
           : {}),
         sourceSessionId: sessionId,
         captureStatus: 'attached',
+        networkSupported: typeof networkData.networkState?.supported === 'boolean' ? networkData.networkState.supported : null,
         traceKinds: networkData.traceKinds,
+        traceCount: Number.isFinite(networkData.networkState?.trace_count)
+          ? Number(networkData.networkState?.trace_count)
+          : networkData.traceKinds.length,
         entryCount: networkData.networkEntries.length,
         managedProxy: networkData.networkState?.managed_proxy ?? session?.esvp?.network?.managedProxy ?? null,
         captureProxy: session?.esvp?.network?.captureProxy || null,
+        appTraceCollector: session?.esvp?.network?.appTraceCollector || null,
         activeProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
         effectiveProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
         configuredAt: networkData.networkState?.configured_at || null,
@@ -6231,6 +6717,7 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/trace-attach', async (
       networkEntries: networkData.networkEntries,
       networkCapture: networkData.networkCapture,
       traceKinds: networkData.traceKinds,
+      appTraceCollector: session.esvp?.network?.appTraceCollector || null,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -6265,9 +6752,21 @@ app.post('/api/testing/mobile/recordings/:id/esvp/sync-network', async (c) => {
           ? session.esvp.network
           : {}),
         sourceSessionId: sessionId,
+        networkSupported: typeof networkData.networkState?.supported === 'boolean' ? networkData.networkState.supported : null,
         traceKinds: networkData.traceKinds,
+        traceCount: Number.isFinite(networkData.networkState?.trace_count)
+          ? Number(networkData.networkState?.trace_count)
+          : networkData.traceKinds.length,
         syncedAt: new Date().toISOString(),
         entryCount: networkData.networkEntries.length,
+        managedProxy: networkData.networkState?.managed_proxy ?? session?.esvp?.network?.managedProxy ?? null,
+        captureProxy: session?.esvp?.network?.captureProxy || null,
+        appTraceCollector: session?.esvp?.network?.appTraceCollector || null,
+        activeProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
+        effectiveProfile: resolvePersistedNetworkProfile(networkData.networkState, session?.esvp?.network || null),
+        configuredAt: networkData.networkState?.configured_at || session?.esvp?.network?.configuredAt || null,
+        clearedAt: networkData.networkState?.cleared_at || session?.esvp?.network?.clearedAt || null,
+        lastError: networkData.networkState?.last_error || session?.esvp?.network?.lastError || null,
       },
     };
 
@@ -6280,6 +6779,7 @@ app.post('/api/testing/mobile/recordings/:id/esvp/sync-network', async (c) => {
       networkEntries: networkData.networkEntries,
       networkCapture: networkData.networkCapture,
       traceKinds: networkData.traceKinds,
+      appTraceCollector: session.esvp?.network?.appTraceCollector || null,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -8504,10 +9004,12 @@ app.get('/api/info', async (c) => {
 
 type AppLabNetworkProxySettings = {
   emergencyLockEnabled: boolean;
+  localProxyOptInEnabled: boolean;
 };
 
 const DEFAULT_APP_LAB_NETWORK_PROXY_SETTINGS: AppLabNetworkProxySettings = {
   emergencyLockEnabled: false,
+  localProxyOptInEnabled: false,
 };
 
 let appLabNetworkProxySettings: AppLabNetworkProxySettings = {
@@ -8520,6 +9022,7 @@ function sanitizeAppLabNetworkProxySettings(value: unknown): AppLabNetworkProxyS
     : {};
   return {
     emergencyLockEnabled: record.emergencyLockEnabled === true,
+    localProxyOptInEnabled: record.localProxyOptInEnabled === true,
   };
 }
 
@@ -8582,8 +9085,8 @@ app.put('/api/settings/network-proxy', async (c) => {
     };
     persistAppLabNetworkProxySettings();
 
-    const finalization = appLabNetworkProxySettings.emergencyLockEnabled
-      ? await finalizeAllLocalCaptureProxySessions({ reason: 'settings-emergency-lock' })
+    const finalization = (appLabNetworkProxySettings.emergencyLockEnabled || appLabNetworkProxySettings.localProxyOptInEnabled !== true)
+      ? await finalizeAllLocalCaptureProxySessions({ reason: 'settings-safety-toggle' })
       : null;
 
     return c.json(buildAppLabNetworkProxySettingsPayload({
@@ -10051,15 +10554,12 @@ app.get('/api/projects/:id/network-routes', async (c) => {
       return c.json({ routes: [] });
     }
 
-    // Group by METHOD /pathname
+    // Group by METHOD + normalized route label.
     const groups = new Map<string, any[]>();
     for (const entry of networkEntries) {
-      let pathname = (entry as any).pathname || '/';
-      if (!pathname && entry.url) {
-        try { pathname = new URL(entry.url).pathname; } catch { pathname = entry.url; }
-      }
+      const routeLabel = resolveNetworkRouteLabel(entry);
       const method = (entry.method || 'GET').toUpperCase();
-      const key = `${method} ${pathname}`;
+      const key = `${method} ${routeLabel}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(entry);
     }
@@ -10084,7 +10584,7 @@ app.get('/api/projects/:id/network-routes', async (c) => {
             entries.slice(0, 5).map((e: any) => ({
               status: e.status,
               durationMs: e.durationMs,
-              url: e.pathname || e.url,
+              url: resolveNetworkDisplayUrl(e),
             })),
             null,
             2
@@ -10318,8 +10818,8 @@ function assembleTemplateProps(project: any): TemplateProps | null {
     // No fallback — if no network data, terminalTabs stays empty
   }
 
-  // Get video duration (approximate from project data or default)
-  const videoDuration = project.duration || 10;
+  // Video duration — renderer will detect real duration via ffprobe
+  const videoDuration = project.duration || 0;
 
   // Determine platform
   const platform = (project.platform === 'ios' || project.platform === 'android' || project.platform === 'web')
@@ -10351,17 +10851,152 @@ function extractFirstSentence(text: string): string {
   return text.substring(0, 80).trim();
 }
 
+function isTunnelLikeNetworkEntry(entry: Partial<CapturedNetworkEntry> | null | undefined): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const method = typeof entry.method === 'string' ? entry.method.toUpperCase() : '';
+  const resourceType = typeof (entry as any).resourceType === 'string'
+    ? String((entry as any).resourceType).toLowerCase()
+    : '';
+  return method === 'CONNECT' || resourceType === 'connect_tunnel';
+}
+
+function resolveNetworkDisplayUrl(entry: Partial<CapturedNetworkEntry> | null | undefined): string {
+  if (!entry || typeof entry !== 'object') return '/';
+
+  const rawUrl = typeof entry.url === 'string' ? entry.url.trim() : '';
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return rawUrl;
+    }
+  }
+
+  const origin = typeof entry.origin === 'string' ? entry.origin.trim() : '';
+  const pathname = typeof entry.pathname === 'string' && entry.pathname.trim()
+    ? entry.pathname.trim()
+    : '/';
+  return `${origin}${pathname}` || pathname || '/';
+}
+
+function resolveNetworkRouteLabel(entry: Partial<CapturedNetworkEntry> | null | undefined): string {
+  if (!entry || typeof entry !== 'object') return '/';
+
+  if (isTunnelLikeNetworkEntry(entry)) {
+    const hostname = typeof entry.hostname === 'string' ? entry.hostname.trim() : '';
+    if (hostname) return hostname;
+
+    const displayUrl = resolveNetworkDisplayUrl(entry);
+    try {
+      const parsed = new URL(displayUrl);
+      if (parsed.hostname) return parsed.hostname;
+    } catch {
+      // Fall through to the raw display URL below.
+    }
+    if (displayUrl) return displayUrl;
+  }
+
+  const pathname = typeof entry.pathname === 'string' ? entry.pathname.trim() : '';
+  if (pathname) return pathname;
+
+  const rawUrl = typeof entry.url === 'string' ? entry.url.trim() : '';
+  if (rawUrl) {
+    try {
+      return new URL(rawUrl).pathname || '/';
+    } catch {
+      return rawUrl;
+    }
+  }
+
+  return '/';
+}
+
+const MOBILE_SYSTEM_BACKGROUND_HOST_PATTERNS = [
+  /(^|\.)icloud\.com$/i,
+  /^gdmf\.apple\.com$/i,
+  /^configuration\.ls\.apple\.com$/i,
+  /^xp\.apple\.com$/i,
+  /(^|\.)sandbox\.itunes\.apple\.com$/i,
+  /(^|\.)sandbox\.apple\.com$/i,
+  /(^|\.)mzstatic\.com$/i,
+];
+
+const MOBILE_DEVELOPER_BACKGROUND_HOST_PATTERNS = [
+  /^main\.vscode-cdn\.net$/i,
+  /^default\.exp-tas\.com$/i,
+  /(^|\.)chatgpt\.com$/i,
+  /(^|\.)openai\.com$/i,
+  /(^|\.)figma\.com$/i,
+  /(^|\.)modal\.com$/i,
+];
+
+function getNetworkEntryUserAgent(entry: Partial<CapturedNetworkEntry> | null | undefined): string {
+  if (!entry || typeof entry !== 'object') return '';
+  const requestHeaders = entry.requestHeaders && typeof entry.requestHeaders === 'object'
+    ? entry.requestHeaders
+    : null;
+  const userAgent = (requestHeaders as Record<string, string | undefined> | null)?.['user-agent']
+    || (requestHeaders as Record<string, string | undefined> | null)?.['User-Agent'];
+  return typeof userAgent === 'string' ? userAgent : '';
+}
+
+function isDesktopNetworkUserAgent(userAgent: string): boolean {
+  if (/\b(electron|code\/|vscode|xcode|exp-tas)\b/i.test(userAgent)) return true;
+  const hasDesktopOs = /\b(Macintosh|Windows NT|X11; Linux)\b/i.test(userAgent);
+  const hasDesktopBrowser = /\b(Chrome\/|CriOS\/|Firefox\/|Safari\/)\b/i.test(userAgent);
+  return hasDesktopOs && hasDesktopBrowser;
+}
+
+function isMobileFocusedNetworkCapture(session: any): boolean {
+  if (!session || (session.platform !== 'ios' && session.platform !== 'android')) return false;
+  const network = session.esvp && typeof session.esvp === 'object' && session.esvp.network && typeof session.esvp.network === 'object'
+    ? session.esvp.network
+    : null;
+  const captureMode = typeof network?.captureProxy?.captureMode === 'string'
+    ? network.captureProxy.captureMode
+    : typeof network?.effectiveProfile?.capture?.mode === 'string'
+      ? network.effectiveProfile.capture.mode
+      : typeof network?.activeProfile?.capture?.mode === 'string'
+        ? network.activeProfile.capture.mode
+        : '';
+  return captureMode === 'external-proxy' || captureMode === 'external-mitm' || captureMode === 'app-http-trace';
+}
+
+function filterFocusedMobileNetworkEntries(entries: CapturedNetworkEntry[]): CapturedNetworkEntry[] {
+  const decryptedHosts = new Set(
+    entries
+      .filter((entry) => !isTunnelLikeNetworkEntry(entry))
+      .map((entry) => String(entry.hostname || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  return entries.filter((entry) => {
+    const hostname = String(entry.hostname || '').trim().toLowerCase();
+    const userAgent = getNetworkEntryUserAgent(entry);
+    const failureText = String(entry.failureText || '').trim().toLowerCase();
+
+    if (MOBILE_DEVELOPER_BACKGROUND_HOST_PATTERNS.some((pattern) => pattern.test(hostname))) return false;
+    if (MOBILE_SYSTEM_BACKGROUND_HOST_PATTERNS.some((pattern) => pattern.test(hostname))) return false;
+    if (isDesktopNetworkUserAgent(userAgent)) return false;
+
+    if (isTunnelLikeNetworkEntry(entry)) {
+      if (hostname && decryptedHosts.has(hostname)) return false;
+      if (failureText.includes('certificateunknown') || failureText.includes('tls handshake eof')) return false;
+    }
+
+    return true;
+  });
+}
+
 function groupNetworkIntoTabs(entries: CapturedNetworkEntry[]): TerminalTab[] {
   const groups = new Map<string, CapturedNetworkEntry[]>();
 
   for (const entry of entries) {
-    // Build route key from method + pathname
-    let pathname = entry.pathname || '/';
-    if (!pathname && entry.url) {
-      try { pathname = new URL(entry.url).pathname; } catch { pathname = entry.url; }
-    }
+    // Build route key from method + normalized route label.
+    const routeLabel = resolveNetworkRouteLabel(entry);
     const method = (entry.method || 'GET').toUpperCase();
-    const key = `${method} ${pathname}`;
+    const key = `${method} ${routeLabel}`;
 
     if (!groups.has(key)) {
       groups.set(key, []);
@@ -10383,7 +11018,7 @@ function groupNetworkIntoTabs(entries: CapturedNetworkEntry[]): TerminalTab[] {
         status: e.status,
         durationMs: e.durationMs,
         responseSize: (e as any).responseSize || undefined,
-        url: e.pathname || e.url,
+        url: resolveNetworkDisplayUrl(e),
       })),
       null,
       2
@@ -10423,7 +11058,9 @@ function loadProjectNetworkData(project: any): CapturedNetworkEntry[] | null {
       try {
         const session = JSON.parse(readFileSync(sessionPath, 'utf-8'));
         if (session.networkEntries && Array.isArray(session.networkEntries) && session.networkEntries.length > 0) {
-          return session.networkEntries;
+          return isMobileFocusedNetworkCapture(session)
+            ? filterFocusedMobileNetworkEntries(session.networkEntries)
+            : session.networkEntries;
         }
       } catch { /* ignore */ }
     }

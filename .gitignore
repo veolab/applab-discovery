@@ -13,6 +13,7 @@ logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.tgz
 
 # Runtime data
 pids
@@ -48,6 +49,7 @@ Thumbs.db
 tmp/
 temp/
 ~
+runtime/target/
 
 # Claude Code
 .claude/
