@@ -33,6 +33,8 @@ export interface TemplateProps {
   hasNetworkData: boolean;
   /** Showcase display mode: 'artistic' = staggered fonts, no terminal; 'terminal' = plain title + terminal */
   showcaseMode?: 'artistic' | 'terminal';
+  /** Optional device frame asset override for Android renders */
+  deviceMockup?: string;
 }
 
 export type TemplateId = 'studio' | 'showcase';

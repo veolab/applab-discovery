@@ -2,8 +2,9 @@
  * Template Bundle Loader
  *
  * Search order:
- * 1. Bundled with npm package: <package>/dist/templates/
- * 2. Local override: ~/.discoverylab/templates/
+ * 1. Explicit override: DISCOVERYLAB_TEMPLATE_DIR or DISCOVERYLAB_TEMPLATE_SOURCE_DIR
+ * 2. Bundled with npm package: <package>/dist/templates/
+ * 3. Local legacy override: ~/.discoverylab/templates/
  *
  * This allows templates to ship with the npm package (compiled bundle,
  * source code protected) while also supporting local dev/override.
@@ -18,10 +19,15 @@ import type { TemplateManifest, TemplateInfo, TemplateId } from './types.js';
 const MANIFEST_FILE = 'manifest.json';
 const BUNDLE_DIR = 'bundle';
 
-// Resolve the bundled templates path relative to this file
-// In built package: dist/core/templates/loader.js → dist/templates/
+// tsup currently bundles this module into dist/chunk-*.js, but other build
+// layouts may preserve the original dist/core/templates/loader.js path.
+// Search a few likely bundled locations relative to the runtime module.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const BUNDLED_TEMPLATES_DIR = join(__dirname, '..', '..', 'templates');
+const BUNDLED_TEMPLATES_DIR_CANDIDATES = [
+  join(__dirname, 'templates'),
+  join(__dirname, '..', 'templates'),
+  join(__dirname, '..', '..', 'templates'),
+];
 
 let cachedManifest: TemplateManifest | null = null;
 let cachedTemplatesDir: string | null = null;
@@ -30,21 +36,34 @@ const CACHE_TTL = 30_000; // 30s
 
 /**
  * Find the templates directory.
- * Priority: local override (~/.discoverylab/templates/) > bundled (dist/templates/)
+ * Priority: explicit override > bundled (dist/templates/) > legacy local override
  */
 function resolveTemplatesDir(): string | null {
-  // 1. Local override (user-installed or dev)
+  // 1. Explicit override
+  const explicitOverride = process.env.DISCOVERYLAB_TEMPLATE_DIR?.trim()
+    || process.env.DISCOVERYLAB_TEMPLATE_SOURCE_DIR?.trim();
+  if (explicitOverride) {
+    const overrideManifest = join(explicitOverride, MANIFEST_FILE);
+    const overrideBundle = join(explicitOverride, BUNDLE_DIR);
+    if (existsSync(overrideManifest) && existsSync(overrideBundle)) {
+      return explicitOverride;
+    }
+  }
+
+  // 2. Bundled with npm package
+  for (const candidate of BUNDLED_TEMPLATES_DIR_CANDIDATES) {
+    const bundledManifest = join(candidate, MANIFEST_FILE);
+    const bundledBundle = join(candidate, BUNDLE_DIR);
+    if (existsSync(bundledManifest) && existsSync(bundledBundle)) {
+      return candidate;
+    }
+  }
+
+  // 3. Local legacy override (user-installed or dev)
   const localManifest = join(TEMPLATES_DIR, MANIFEST_FILE);
   const localBundle = join(TEMPLATES_DIR, BUNDLE_DIR);
   if (existsSync(localManifest) && existsSync(localBundle)) {
     return TEMPLATES_DIR;
-  }
-
-  // 2. Bundled with npm package
-  const bundledManifest = join(BUNDLED_TEMPLATES_DIR, MANIFEST_FILE);
-  const bundledBundle = join(BUNDLED_TEMPLATES_DIR, BUNDLE_DIR);
-  if (existsSync(bundledManifest) && existsSync(bundledBundle)) {
-    return BUNDLED_TEMPLATES_DIR;
   }
 
   return null;

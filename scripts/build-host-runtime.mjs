@@ -11,10 +11,14 @@ const WORKSPACE_MANIFEST = join(RUNTIME_ROOT, 'Cargo.toml');
 const CRATE_MANIFEST = join(RUNTIME_ROOT, 'crates', 'esvp-host-runtime', 'Cargo.toml');
 const DIST_RUNTIME_ROOT = join(PROJECT_ROOT, 'dist', 'runtime', 'esvp-host-runtime');
 const DIST_TEMPLATES_DIR = join(PROJECT_ROOT, 'dist', 'templates');
+const DIST_TEMPLATE_BUNDLE_DIR = join(DIST_TEMPLATES_DIR, 'bundle');
+const DIST_TEMPLATE_PUBLIC_DIR = join(DIST_TEMPLATE_BUNDLE_DIR, 'public');
+const DIST_TEMPLATE_BUNDLE_FILE = join(DIST_TEMPLATE_BUNDLE_DIR, 'bundle.js');
 const OPTIONS = parseArgs(process.argv.slice(2));
 const BEST_EFFORT = OPTIONS.bestEffort;
 const TARGET = OPTIONS.target || resolveHostTargetTriple();
 const BINARY_NAME = resolveBinaryName(TARGET);
+const DEFAULT_ANDROID_MOCKUP = 'mockup-android-galaxy.png';
 
 main();
 
@@ -97,6 +101,8 @@ function syncTemplateBundle() {
   rmSync(DIST_TEMPLATES_DIR, { recursive: true, force: true });
   mkdirSync(DIST_TEMPLATES_DIR, { recursive: true });
   cpSync(sourceDir, DIST_TEMPLATES_DIR, { recursive: true });
+  ensureAndroidMockupAlias();
+  patchTemplateBundleForAndroidMockups();
 
   const templateIds = loadTemplateIds(DIST_TEMPLATES_DIR);
   console.log(
@@ -134,6 +140,112 @@ function loadTemplateIds(dir) {
   } catch {
     return [];
   }
+}
+
+function ensureAndroidMockupAlias() {
+  if (!existsSync(DIST_TEMPLATE_PUBLIC_DIR)) {
+    return;
+  }
+
+  const destination = join(DIST_TEMPLATE_PUBLIC_DIR, DEFAULT_ANDROID_MOCKUP);
+  if (existsSync(destination)) {
+    return;
+  }
+
+  const candidates = [
+    join(DIST_TEMPLATE_PUBLIC_DIR, 'mockup-android-google-pixel-9-pro.png'),
+    join(DIST_TEMPLATE_PUBLIC_DIR, 'mockup-android.png'),
+  ];
+  const source = candidates.find((candidate) => existsSync(candidate));
+  if (!source) {
+    console.warn(`[templates] Could not create ${DEFAULT_ANDROID_MOCKUP}; no Android mockup source asset was found.`);
+    return;
+  }
+
+  copyFileSync(source, destination);
+  console.log(`[templates] created ${DEFAULT_ANDROID_MOCKUP} from ${source.split('/').pop()}`);
+}
+
+function patchTemplateBundleForAndroidMockups() {
+  if (!existsSync(DIST_TEMPLATE_BUNDLE_FILE)) {
+    return;
+  }
+
+  const original = readFileSync(DIST_TEMPLATE_BUNDLE_FILE, 'utf8');
+  if (original.includes('resolvedDeviceMockup = deviceMockup || inputProps.deviceMockup || "mockup-android-galaxy.png"')) {
+    return;
+  }
+
+  let patched = original;
+  patched = replaceRequired(
+    patched,
+    `const AndroidFrame = ({
+  children,
+  width,
+  height
+}) => {`,
+    `const AndroidFrame = ({
+  children,
+  width,
+  height,
+  deviceMockup
+}) => {`,
+    'AndroidFrame signature'
+  );
+  patched = replaceRequired(
+    patched,
+    `src: (0,esm.staticFile)("mockup-android.png"),`,
+    `src: (0,esm.staticFile)(deviceMockup || "mockup-android-galaxy.png"),`,
+    'AndroidFrame asset source'
+  );
+  patched = replaceRequired(
+    patched,
+    `const DeviceFrame = ({
+  platform,
+  children,
+  width,
+  height
+}) => {`,
+    `const DeviceFrame = ({
+  platform,
+  children,
+  width,
+  height,
+  deviceMockup
+}) => {`,
+    'DeviceFrame signature'
+  );
+  patched = replaceRegexRequired(
+    patched,
+    /  if \(platform === "android"\) \{\n    const h\d* = height \|\| 820;\n    const w\d* = width \|\| h\d* \* ANDROID_ASPECT;\n    return \/\* @__PURE__ \*\/ \(0,jsx_runtime\.jsx\)\(AndroidFrame, \{ width: w\d*, height: h\d*, children \}\);\n  \}/,
+    `  if (platform === "android") {
+    const inputProps = typeof window === "undefined" || (0,esm.getRemotionEnvironment)().isPlayer ? {} : (0,esm.getInputProps)() ?? {};
+    const resolvedDeviceMockup = deviceMockup || inputProps.deviceMockup || "mockup-android-galaxy.png";
+    const h2 = height || 820;
+    const w2 = width || h2 * ANDROID_ASPECT;
+    return /* @__PURE__ */ (0,jsx_runtime.jsx)(AndroidFrame, { deviceMockup: resolvedDeviceMockup, width: w2, height: h2, children });
+  }`,
+    'DeviceFrame Android branch'
+  );
+
+  if (patched !== original) {
+    writeFileSync(DIST_TEMPLATE_BUNDLE_FILE, patched, 'utf8');
+    console.log('[templates] patched bundle.js for Android mockup selection');
+  }
+}
+
+function replaceRequired(source, searchValue, replacementValue, label) {
+  if (!source.includes(searchValue)) {
+    throw new Error(`[templates] Failed to patch ${label}; upstream template bundle changed.`);
+  }
+  return source.replace(searchValue, replacementValue);
+}
+
+function replaceRegexRequired(source, pattern, replacementValue, label) {
+  if (!pattern.test(source)) {
+    throw new Error(`[templates] Failed to patch ${label}; upstream template bundle changed.`);
+  }
+  return source.replace(pattern, replacementValue);
 }
 
 function readManifest(manifestPath) {

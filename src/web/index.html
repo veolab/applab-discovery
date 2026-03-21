@@ -5602,6 +5602,12 @@
             width: fit-content;
         }
 
+        .template-restriction-note {
+            margin-bottom: 12px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
         .template-pill {
             position: relative;
             display: inline-flex;
@@ -11616,6 +11622,7 @@
                                 <span class="label">View:</span>
                                 <button class="template-pill active" data-template="raw" onclick="switchTemplate('raw')">Raw</button>
                             </div>
+                            <div class="template-restriction-note" id="templateRestrictionNote" style="display:none;"></div>
 
                             <!-- Raw video (default) -->
                             <div class="video-player-container" id="rawVideoContainer">
@@ -11795,7 +11802,7 @@
         let templateStatus = null;
         let activeTemplate = 'raw';
         let favoriteTemplate = null;
-        let currentTemplateProps = null; // { title, titleLines, terminalTabs, hasNetworkData }
+        let currentTemplateProps = null; // per-project template props + eligibility + mockup options
 
         // Space = play/pause active video
         document.addEventListener('keydown', (e) => {
@@ -11814,6 +11821,7 @@
 
         async function initTemplateUI() {
             try {
+                currentTemplateProps = null;
                 const [statusRes, prefRes] = await Promise.all([
                     fetch('/api/templates/status'),
                     fetch('/api/settings/template-preference'),
@@ -11827,37 +11835,93 @@
                 const bar = document.getElementById('templateToggleBar');
                 if (!bar) return;
 
-                // Build icon buttons for each template
-                const templateIcons = {
-                    raw: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
-                    studio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
-                    showcase: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>',
-                };
-                let pills = '';
-                pills += `<button class="template-pill active" data-template="raw" title="Raw video" tabindex="-1" onclick="switchTemplate('raw')">${templateIcons.raw}</button>`;
-                for (const t of templateStatus.templates) {
-                    const isFav = favoriteTemplate === t.id;
-                    const icon = templateIcons[t.id] || templateIcons.studio;
-                    pills += `<button class="template-pill" data-template="${t.id}" title="${t.name}" tabindex="-1" onclick="switchTemplate('${t.id}')" ondblclick="event.stopPropagation(); toggleFavoriteTemplate('${t.id}')">
-                        ${icon}
-                        <span class="star-dot ${isFav ? 'visible' : ''}"></span>
-                    </button>`;
-                }
-                pills += `<button class="template-pill template-edit-btn" title="Edit template text" tabindex="-1" onclick="openTemplateEditModal()" style="display:none;">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
-                </button>`;
-                bar.innerHTML = pills;
-                bar.style.display = 'flex';
+                await loadTemplateProps();
+                renderTemplatePills();
+                applyTemplateAvailabilityState();
 
-                // Load template props for terminal content editor
-                loadTemplateProps();
-
-                // Auto-apply favorite template if set
-                if (favoriteTemplate) {
+                if (favoriteTemplate && currentTemplateProps?.templatesAllowed !== false) {
                     switchTemplate(favoriteTemplate);
                 }
             } catch (e) {
                 console.log('[Templates] Init error:', e);
+            }
+        }
+
+        function getTemplateIcons() {
+            return {
+                raw: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>',
+                studio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+                showcase: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>',
+            };
+        }
+
+        function renderTemplatePills() {
+            const bar = document.getElementById('templateToggleBar');
+            if (!bar || !templateStatus?.available) return;
+
+            const allowTemplates = currentTemplateProps?.templatesAllowed !== false;
+            const templateIcons = getTemplateIcons();
+            let pills = '';
+            pills += `<span class="label">View:</span>`;
+            pills += `<button class="template-pill ${activeTemplate === 'raw' ? 'active' : ''}" data-template="raw" title="Raw video" tabindex="-1" onclick="switchTemplate('raw')">${templateIcons.raw}</button>`;
+            if (allowTemplates) {
+                for (const t of templateStatus.templates) {
+                    const isFav = favoriteTemplate === t.id;
+                    const icon = templateIcons[t.id] || templateIcons.studio;
+                    pills += `<button class="template-pill ${activeTemplate === t.id ? 'active' : ''}" data-template="${t.id}" title="${escapeHtml(t.name)}" tabindex="-1" onclick="switchTemplate('${t.id}')" ondblclick="event.stopPropagation(); toggleFavoriteTemplate('${t.id}')">
+                        ${icon}
+                        <span class="star-dot ${isFav ? 'visible' : ''}"></span>
+                    </button>`;
+                }
+                pills += `<button class="template-pill template-edit-btn" title="Edit template text" tabindex="-1" onclick="openTemplateEditModal()" style="${activeTemplate === 'raw' ? 'display:none;' : ''}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+                </button>`;
+            }
+            bar.innerHTML = pills;
+            bar.style.display = 'flex';
+            updateTemplateRestrictionNote();
+        }
+
+        function updateTemplateRestrictionNote() {
+            const note = document.getElementById('templateRestrictionNote');
+            if (!note) return;
+            const blocked = currentTemplateProps?.templatesAllowed === false;
+            if (!blocked) {
+                note.style.display = 'none';
+                note.textContent = '';
+                return;
+            }
+            note.textContent = currentTemplateProps?.templateRestrictionReason
+                || `Templates are limited to videos up to ${currentTemplateProps?.maxTemplateDurationSeconds || 60} seconds.`;
+            note.style.display = '';
+        }
+
+        function setRawTemplateView() {
+            activeTemplate = 'raw';
+            const rawContainer = document.getElementById('rawVideoContainer');
+            const templateContainer = document.getElementById('templatePreviewContainer');
+            const templateVideo = document.getElementById('templateVideo');
+            const downloadBtn = document.getElementById('downloadWithTemplateBtn');
+            const editBtn = document.querySelector('.template-edit-btn');
+            const skeleton = document.getElementById('templateSkeleton');
+
+            if (rawContainer) rawContainer.style.display = '';
+            if (templateContainer) templateContainer.style.display = 'none';
+            if (templateVideo) templateVideo.removeAttribute('src');
+            if (downloadBtn) downloadBtn.style.display = 'none';
+            if (editBtn) editBtn.style.display = 'none';
+            if (skeleton) skeleton.style.display = 'none';
+
+            document.querySelectorAll('.template-pill').forEach(pill => {
+                if (pill.classList.contains('template-edit-btn')) return;
+                pill.classList.toggle('active', pill.dataset.template === 'raw');
+            });
+        }
+
+        function applyTemplateAvailabilityState() {
+            renderTemplatePills();
+            if (currentTemplateProps?.templatesAllowed === false) {
+                setRawTemplateView();
             }
         }
 
@@ -11876,8 +11940,20 @@
                         titleLines: data.props.titleLines || undefined,
                         terminalTabs: data.props.terminalTabs || [],
                         hasNetworkData: data.props.hasNetworkData || false,
+                        platform: data.props.platform || 'web',
                         showcaseMode: data.props.showcaseMode || undefined,
+                        deviceMockup: data.props.deviceMockup || undefined,
+                        availableDeviceMockups: data.androidDeviceMockups || [],
+                        templatesAllowed: data.eligibility?.templatesAllowed !== false,
+                        templateRestrictionReason: data.eligibility?.reason || '',
+                        actualDurationSeconds: data.eligibility?.actualDurationSeconds || data.props.videoDuration || 0,
+                        maxTemplateDurationSeconds: data.eligibility?.maxTemplateDurationSeconds || 60,
                     };
+                    applyTemplateAvailabilityState();
+                } else {
+                    currentTemplateProps = null;
+                    renderTemplatePills();
+                    updateTemplateRestrictionNote();
                 }
             } catch (e) {
                 console.log('[Templates] Props load error:', e);
@@ -11887,6 +11963,11 @@
         async function switchTemplate(templateId) {
             // Skip if already on this template
             if (templateId === activeTemplate) return;
+            if (templateId !== 'raw' && currentTemplateProps?.templatesAllowed === false) {
+                showToast(currentTemplateProps.templateRestrictionReason || 'Templates are disabled for long recordings', 'info');
+                setRawTemplateView();
+                return;
+            }
             activeTemplate = templateId;
             const rawContainer = document.getElementById('rawVideoContainer');
             const templateContainer = document.getElementById('templatePreviewContainer');
@@ -11900,10 +11981,7 @@
             });
 
             if (templateId === 'raw') {
-                if (rawContainer) rawContainer.style.display = '';
-                if (templateContainer) templateContainer.style.display = 'none';
-                if (downloadBtn) downloadBtn.style.display = 'none';
-                if (editBtn) editBtn.style.display = 'none';
+                setRawTemplateView();
                 return;
             }
 
@@ -12008,6 +12086,10 @@
                 showToast('No template data loaded', 'info');
                 return;
             }
+            if (currentTemplateProps.templatesAllowed === false) {
+                showToast(currentTemplateProps.templateRestrictionReason || 'Templates are disabled for this recording', 'info');
+                return;
+            }
             const existing = document.getElementById('templateEditModal');
             if (existing) existing.remove();
 
@@ -12027,7 +12109,9 @@
                     #templateEditModal .te-field-full { grid-column: 1 / -1; }
                     #templateEditModal .te-field label { display: block; font-size: 11px; font-weight: 500; color: var(--text-secondary); margin-bottom: 3px; }
                     #templateEditModal .te-field input[type="text"] { width: 100%; padding: 7px 10px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 12px; box-sizing: border-box; }
+                    #templateEditModal .te-field select { width: 100%; padding: 7px 10px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 12px; box-sizing: border-box; }
                     #templateEditModal .te-field input:focus { outline: none; border-color: var(--accent); }
+                    #templateEditModal .te-field select:focus { outline: none; border-color: var(--accent); }
                     #templateEditModal .te-btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
                     #templateEditModal .te-tab-row { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; overflow: hidden; }
                     #templateEditModal .te-tab-header { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; background: var(--bg-elevated); }
@@ -12118,7 +12202,7 @@
                         lines.push(words.slice(i, i + 2).join(' '));
                     }
                 }
-                fieldsArea.innerHTML = lines.map((line, i) => `
+                fieldsArea.innerHTML = buildAndroidMockupFieldHtml(props) + lines.map((line, i) => `
                     <div class="te-field te-field-full">
                         <label>Line ${i + 1} <span style="opacity:0.5">(${fontLabels[i % fontLabels.length]})</span></label>
                         <input type="text" class="te-title-line" data-index="${i}" value="${(line || '').replace(/"/g, '&quot;')}" autocomplete="off">
@@ -12129,6 +12213,22 @@
                 const existingTabs = (props.terminalTabs && props.terminalTabs.length > 0) ? props.terminalTabs : [];
                 fieldsArea.innerHTML = buildTerminalEditorHtml(props, existingTabs);
             }
+        }
+
+        function buildAndroidMockupFieldHtml(props) {
+            if (props.platform !== 'android' || !Array.isArray(props.availableDeviceMockups) || props.availableDeviceMockups.length === 0) {
+                return '';
+            }
+            const selected = props.deviceMockup || props.availableDeviceMockups[0]?.id || '';
+            const options = props.availableDeviceMockups.map((option) => `
+                <option value="${escapeHtml(option.id)}" ${option.id === selected ? 'selected' : ''}>${escapeHtml(option.label || option.id)}</option>
+            `).join('');
+            return `
+                <div class="te-field te-field-full">
+                    <label>Android Mockup</label>
+                    <select id="teDeviceMockup">${options}</select>
+                </div>
+            `;
         }
 
         function buildTerminalEditorHtml(props, existingTabs) {
@@ -12149,6 +12249,7 @@
             `).join('');
 
             return `
+                ${buildAndroidMockupFieldHtml(props)}
                 <div class="te-field te-field-full">
                     <label>Title</label>
                     <input type="text" id="teTitle" value="${(props.title || '').replace(/"/g, '&quot;')}" autocomplete="off">
@@ -12304,6 +12405,7 @@
             let title = '';
             let titleLines = undefined;
             let showcaseMode = undefined;
+            let deviceMockup = currentTemplateProps?.deviceMockup;
 
             // Determine showcase mode from toggle
             if (isShowcase) {
@@ -12322,6 +12424,11 @@
                 title = titleInput ? titleInput.value : (currentTemplateProps?.title || '');
             }
 
+            const deviceMockupSelect = modal.querySelector('#teDeviceMockup');
+            if (deviceMockupSelect) {
+                deviceMockup = deviceMockupSelect.value;
+            }
+
             // Collect terminal tabs
             const tabRows = modal.querySelectorAll('.te-tab-row');
             const terminalTabs = Array.from(tabRows).map(row => {
@@ -12336,16 +12443,29 @@
             });
 
             try {
-                await fetch(`/api/projects/${currentProject.id}/template-content`, {
+                const res = await fetch(`/api/projects/${currentProject.id}/template-content`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ title, titleLines, terminalTabs, showcaseMode }),
+                    body: JSON.stringify({ title, titleLines, terminalTabs, showcaseMode, deviceMockup }),
                 });
+                const data = await res.json();
+                if (data.error) {
+                    showToast(data.error, 'error');
+                    return;
+                }
                 showToast('Template content saved', 'success');
                 modal.remove();
 
                 // Update local props
-                currentTemplateProps = { title, titleLines, terminalTabs, hasNetworkData: terminalTabs.length > 0, showcaseMode };
+                currentTemplateProps = {
+                    ...currentTemplateProps,
+                    title: data.content?.title || title,
+                    titleLines: data.content?.titleLines || titleLines,
+                    terminalTabs,
+                    hasNetworkData: terminalTabs.length > 0,
+                    showcaseMode: data.content?.showcaseMode || showcaseMode,
+                    deviceMockup: data.content?.deviceMockup || deviceMockup,
+                };
 
                 // Force re-render
                 if (activeTemplate !== 'raw') {

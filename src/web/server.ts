@@ -10767,12 +10767,12 @@ app.post('/api/templates/props', async (c) => {
       return c.json({ error: 'Project not found' }, 404);
     }
 
-    const props = assembleTemplateProps(project);
-    if (!props) {
+    const templateState = getTemplateProjectState(project);
+    if (!templateState) {
       return c.json({ error: 'Project has no video to render' }, 400);
     }
 
-    return c.json({ props });
+    return c.json(templateState);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -10844,7 +10844,7 @@ app.put('/api/projects/:id/template-content', async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { title, titleLines, terminalTabs, showcaseMode } = body;
+    const { title, titleLines, terminalTabs, showcaseMode, deviceMockup } = body;
 
     const db = getDatabase();
     const project = db.select().from(projects).where(eq(projects.id, id)).get();
@@ -10852,21 +10852,41 @@ app.put('/api/projects/:id/template-content', async (c) => {
       return c.json({ error: 'Project not found' }, 404);
     }
 
+    const defaultTitle = sanitizeTemplateTitle(
+      extractFirstSentence(project.aiSummary || project.name || 'App Recording'),
+      'App Recording'
+    );
+    const sanitizedTitle = sanitizeTemplateTitle(title, defaultTitle);
+    const sanitizedTitleLines = sanitizeTemplateTitleLines(titleLines, sanitizedTitle);
+    const sanitizedTerminalTabs = sanitizeTemplateTerminalTabs(terminalTabs);
+    const sanitizedShowcaseMode = showcaseMode === 'artistic' || showcaseMode === 'terminal'
+      ? showcaseMode
+      : undefined;
+    const platform = (project.platform === 'ios' || project.platform === 'android' || project.platform === 'web')
+      ? project.platform
+      : 'web';
+    const availableAndroidMockups = listAndroidDeviceMockupIds();
+    const sanitizedDeviceMockup = platform === 'android'
+      ? resolveAndroidDeviceMockup(deviceMockup, availableAndroidMockups)
+      : undefined;
+    const savedContent = {
+      title: sanitizedTitle,
+      titleLines: sanitizedTitleLines,
+      terminalTabs: sanitizedTerminalTabs,
+      showcaseMode: sanitizedShowcaseMode,
+      deviceMockup: sanitizedDeviceMockup,
+      updatedAt: new Date().toISOString(),
+    };
+
     const { writeFileSync, mkdirSync } = await import('node:fs');
     const projectDir = join(PROJECTS_DIR, id);
     if (!existsSync(projectDir)) {
       mkdirSync(projectDir, { recursive: true });
     }
     const contentPath = join(projectDir, 'template-content.json');
-    writeFileSync(contentPath, JSON.stringify({
-      title,
-      titleLines,
-      terminalTabs,
-      showcaseMode,
-      updatedAt: new Date().toISOString(),
-    }));
+    writeFileSync(contentPath, JSON.stringify(savedContent));
 
-    return c.json({ success: true, message: 'Template content saved' });
+    return c.json({ success: true, message: 'Template content saved', content: savedContent });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -10893,10 +10913,15 @@ app.post('/api/templates/render', async (c) => {
       return c.json({ error: 'Project not found' }, 404);
     }
 
-    const props = assembleTemplateProps(project);
-    if (!props) {
+    const templateState = getTemplateProjectState(project);
+    if (!templateState) {
       return c.json({ error: 'Project has no video to render' }, 400);
     }
+    if (!templateState.eligibility.templatesAllowed) {
+      return c.json({ error: templateState.eligibility.reason || `Templates are limited to videos up to ${TEMPLATE_MAX_DURATION_SECONDS} seconds.` }, 400);
+    }
+
+    const { props } = templateState;
 
     const job = await startRender(projectId, templateId as TemplateId, props, (progress) => {
       broadcastToClients({
@@ -11015,36 +11040,32 @@ app.get('/api/settings/template-preference', async (c) => {
  * Assemble TemplateProps from a project record
  */
 function assembleTemplateProps(project: any): TemplateProps | null {
-  const resolvedVideoPath = resolveVideoPath(project.videoPath);
-  if (!resolvedVideoPath || !existsSync(resolvedVideoPath)) {
+  const resolvedVideoPath = resolveTemplateVideoPath(project);
+  if (!resolvedVideoPath) {
     return null;
   }
 
-  try {
-    if (statSync(resolvedVideoPath).isDirectory()) {
-      return null;
-    }
-  } catch {
-    return null;
-  }
-
-  // Extract first sentence from aiSummary for title
-  const defaultTitle = extractFirstSentence(project.aiSummary || project.name || 'App Recording');
+  const defaultTitle = sanitizeTemplateTitle(
+    extractFirstSentence(project.aiSummary || project.name || 'App Recording'),
+    'App Recording'
+  );
   const subtitle = project.name || undefined;
 
   // Try to load edited template content first
   const editedContent = loadEditedTemplateContent(project.id);
+  const availableAndroidMockups = listAndroidDeviceMockupIds();
 
   let title = defaultTitle;
   let titleLines: string[] | undefined;
   let terminalTabs: TerminalTab[] = [];
   let hasNetworkData = false;
   let showcaseMode: 'artistic' | 'terminal' | undefined;
+  let deviceMockup: string | undefined;
 
   if (editedContent) {
-    title = editedContent.title || defaultTitle;
-    titleLines = editedContent.titleLines;
-    terminalTabs = editedContent.terminalTabs || [];
+    title = sanitizeTemplateTitle(editedContent.title || defaultTitle, defaultTitle);
+    titleLines = sanitizeTemplateTitleLines(editedContent.titleLines, title);
+    terminalTabs = sanitizeTemplateTerminalTabs(editedContent.terminalTabs);
     hasNetworkData = terminalTabs.length > 0;
     showcaseMode = editedContent.showcaseMode;
   } else {
@@ -11058,13 +11079,18 @@ function assembleTemplateProps(project: any): TemplateProps | null {
     // No fallback — if no network data, terminalTabs stays empty
   }
 
-  // Video duration — renderer will detect real duration via ffprobe
-  const videoDuration = project.duration || 0;
-
   // Determine platform
   const platform = (project.platform === 'ios' || project.platform === 'android' || project.platform === 'web')
     ? project.platform
     : 'web';
+  if (platform === 'android') {
+    deviceMockup = resolveAndroidDeviceMockup(editedContent?.deviceMockup, availableAndroidMockups);
+  }
+  if (!titleLines && (!showcaseMode || showcaseMode === 'artistic') && !hasNetworkData) {
+    titleLines = splitTemplateTitleIntoLines(title);
+  }
+
+  const videoDuration = getActualTemplateVideoDuration(project, resolvedVideoPath);
 
   // Use full HTTP URL so Remotion's headless browser can fetch the video
   const videoUrl = `http://localhost:${currentServerPort}/api/file?path=${encodeURIComponent(resolvedVideoPath)}`;
@@ -11079,6 +11105,53 @@ function assembleTemplateProps(project: any): TemplateProps | null {
     terminalTabs,
     hasNetworkData,
     showcaseMode,
+    deviceMockup,
+  };
+}
+
+type EditedTemplateContent = {
+  title?: string;
+  titleLines?: string[];
+  terminalTabs?: TerminalTab[];
+  showcaseMode?: 'artistic' | 'terminal';
+  deviceMockup?: string;
+};
+
+type TemplateEligibility = {
+  templatesAllowed: boolean;
+  maxTemplateDurationSeconds: number;
+  actualDurationSeconds: number;
+  reason?: string;
+};
+
+const TEMPLATE_MAX_DURATION_SECONDS = 60;
+const DEFAULT_ANDROID_DEVICE_MOCKUP = 'mockup-android-galaxy.png';
+const ANDROID_DEVICE_MOCKUP_FALLBACKS = [
+  DEFAULT_ANDROID_DEVICE_MOCKUP,
+  'mockup-android.png',
+  'mockup-android-google-pixel-9-pro.png',
+];
+
+function getTemplateProjectState(project: any): {
+  props: TemplateProps;
+  eligibility: TemplateEligibility;
+  androidDeviceMockups: Array<{ id: string; label: string }>;
+  defaultAndroidDeviceMockup: string;
+} | null {
+  const props = assembleTemplateProps(project);
+  if (!props) {
+    return null;
+  }
+  const eligibility = buildTemplateEligibility(props.videoDuration);
+  const androidDeviceMockups = listAndroidDeviceMockupIds().map((id) => ({
+    id,
+    label: formatAndroidDeviceMockupLabel(id),
+  }));
+  return {
+    props,
+    eligibility,
+    androidDeviceMockups,
+    defaultAndroidDeviceMockup: resolveAndroidDeviceMockup(undefined, androidDeviceMockups.map((option) => option.id)),
   };
 }
 
@@ -11089,6 +11162,202 @@ function extractFirstSentence(text: string): string {
   if (match) return match[0].trim();
   // If no sentence terminator, take first 80 chars
   return text.substring(0, 80).trim();
+}
+
+function resolveTemplateVideoPath(project: any): string | null {
+  const resolvedVideoPath = resolveVideoPath(project.videoPath);
+  if (!resolvedVideoPath || !existsSync(resolvedVideoPath)) {
+    return null;
+  }
+
+  try {
+    if (statSync(resolvedVideoPath).isDirectory()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return resolvedVideoPath;
+}
+
+function getActualTemplateVideoDuration(project: any, resolvedVideoPath: string): number {
+  const probedDuration = probeVideoDurationSeconds(resolvedVideoPath);
+  if (probedDuration && probedDuration > 0) {
+    return probedDuration;
+  }
+  const projectDuration = Number(project?.duration);
+  if (Number.isFinite(projectDuration) && projectDuration > 0) {
+    return projectDuration;
+  }
+  return 0;
+}
+
+function probeVideoDurationSeconds(filePath: string): number | null {
+  try {
+    if (!existsSync(filePath)) return null;
+    const output = execSync(
+      `ffprobe -v quiet -print_format json -show_format "${filePath}"`,
+      { encoding: 'utf-8', timeout: 10_000 }
+    );
+    const data = JSON.parse(output);
+    const duration = parseFloat(data?.format?.duration || '0');
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildTemplateEligibility(actualDurationSeconds: number): TemplateEligibility {
+  const templatesAllowed = isTemplateDurationAllowed(actualDurationSeconds);
+  return {
+    templatesAllowed,
+    maxTemplateDurationSeconds: TEMPLATE_MAX_DURATION_SECONDS,
+    actualDurationSeconds,
+    reason: templatesAllowed || actualDurationSeconds <= 0
+      ? undefined
+      : `Templates are limited to videos up to ${TEMPLATE_MAX_DURATION_SECONDS} seconds. This recording is ${formatTemplateDuration(actualDurationSeconds)}.`,
+  };
+}
+
+function isTemplateDurationAllowed(actualDurationSeconds: number): boolean {
+  if (!Number.isFinite(actualDurationSeconds) || actualDurationSeconds <= 0) {
+    return true;
+  }
+  return Math.round(actualDurationSeconds * 1000) <= TEMPLATE_MAX_DURATION_SECONDS * 1000;
+}
+
+function formatTemplateDuration(actualDurationSeconds: number): string {
+  if (!Number.isFinite(actualDurationSeconds) || actualDurationSeconds <= 0) {
+    return 'unknown duration';
+  }
+  const totalSeconds = Math.max(1, Math.round(actualDurationSeconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${totalSeconds}s`;
+}
+
+function sanitizeTemplateTitle(value: unknown, fallback = 'App Recording'): string {
+  const normalized = normalizeTemplateTitle(value);
+  if (normalized) return normalized;
+  const safeFallback = normalizeTemplateTitle(fallback);
+  return safeFallback || 'App Recording';
+}
+
+function normalizeTemplateTitle(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const withoutMarkdown = value
+    .replace(/[#*_`~>\-[\]{}()<>\\/|]+/g, ' ')
+    .replace(/&/g, ' and ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!withoutMarkdown) return '';
+
+  const limitedWords = withoutMarkdown.split(' ').filter(Boolean).slice(0, 7).join(' ');
+  if (!limitedWords) return '';
+  if (limitedWords.length <= 48) return limitedWords;
+  const truncated = limitedWords.slice(0, 48).trim();
+  return truncated.replace(/\s+\S*$/, '').trim() || truncated;
+}
+
+function sanitizeTemplateTitleLines(value: unknown, fallbackTitle: string): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const cleaned = value
+    .map((line) => sanitizeTemplateTitle(line, ''))
+    .filter(Boolean)
+    .slice(0, 4);
+  if (cleaned.length > 0) {
+    return cleaned;
+  }
+  return splitTemplateTitleIntoLines(fallbackTitle);
+}
+
+function splitTemplateTitleIntoLines(title: string): string[] | undefined {
+  const words = title.split(' ').filter(Boolean);
+  if (words.length === 0) return undefined;
+  if (words.length <= 2) return [title];
+  const lines: string[] = [];
+  for (let index = 0; index < words.length && lines.length < 4; index += 2) {
+    lines.push(words.slice(index, index + 2).join(' '));
+  }
+  return lines;
+}
+
+function sanitizeTemplateTerminalTabs(value: unknown): TerminalTab[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((tab): TerminalTab | null => {
+      if (!tab || typeof tab !== 'object') return null;
+      const record = tab as Record<string, unknown>;
+      const label = typeof record.label === 'string' ? record.label.trim() : '';
+      const methodFromLabel = label.split(' ')[0] || 'GET';
+      const routeFromLabel = label.split(' ').slice(1).join(' ') || '/';
+      const method = typeof record.method === 'string' && record.method.trim()
+        ? record.method.trim().toUpperCase()
+        : methodFromLabel.toUpperCase();
+      const route = typeof record.route === 'string' && record.route.trim()
+        ? record.route.trim()
+        : routeFromLabel;
+      const content = typeof record.content === 'string' ? record.content : '';
+      if (!label && !content.trim()) return null;
+      return {
+        label: label || `${method} ${route}`.trim(),
+        method: method || 'GET',
+        route: route || '/',
+        content,
+      };
+    })
+    .filter((tab): tab is TerminalTab => !!tab);
+}
+
+function listAndroidDeviceMockupIds(): string[] {
+  const bundlePath = getBundlePath();
+  if (!bundlePath) {
+    return [...ANDROID_DEVICE_MOCKUP_FALLBACKS];
+  }
+  const publicDir = join(bundlePath, 'public');
+  if (!existsSync(publicDir)) {
+    return [...ANDROID_DEVICE_MOCKUP_FALLBACKS];
+  }
+  const files = readdirSync(publicDir)
+    .filter((file) => /^mockup-android.*\.png$/i.test(file));
+  const unique = new Set<string>(files.length > 0 ? files : ANDROID_DEVICE_MOCKUP_FALLBACKS);
+  return [...unique].sort((left, right) => {
+    const leftIndex = ANDROID_DEVICE_MOCKUP_FALLBACKS.indexOf(left);
+    const rightIndex = ANDROID_DEVICE_MOCKUP_FALLBACKS.indexOf(right);
+    if (leftIndex !== -1 || rightIndex !== -1) {
+      if (leftIndex === -1) return 1;
+      if (rightIndex === -1) return -1;
+      return leftIndex - rightIndex;
+    }
+    return left.localeCompare(right);
+  });
+}
+
+function resolveAndroidDeviceMockup(requested: unknown, available: string[]): string {
+  const candidate = typeof requested === 'string' ? requested.trim() : '';
+  if (candidate && available.includes(candidate)) {
+    return candidate;
+  }
+  for (const fallback of ANDROID_DEVICE_MOCKUP_FALLBACKS) {
+    if (available.includes(fallback)) {
+      return fallback;
+    }
+  }
+  return available[0] || DEFAULT_ANDROID_DEVICE_MOCKUP;
+}
+
+function formatAndroidDeviceMockupLabel(filename: string): string {
+  const base = filename.replace(/^mockup-android-?/i, '').replace(/\.png$/i, '');
+  if (!base) return 'Android';
+  return base
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
 }
 
 function isTunnelLikeNetworkEntry(entry: Partial<CapturedNetworkEntry> | null | undefined): boolean {
@@ -11271,7 +11540,7 @@ function groupNetworkIntoTabs(entries: CapturedNetworkEntry[]): TerminalTab[] {
   });
 }
 
-function loadEditedTemplateContent(projectId: string): { title?: string; titleLines?: string[]; terminalTabs?: TerminalTab[]; showcaseMode?: 'artistic' | 'terminal' } | null {
+function loadEditedTemplateContent(projectId: string): EditedTemplateContent | null {
   const contentPath = join(PROJECTS_DIR, projectId, 'template-content.json');
   if (!existsSync(contentPath)) return null;
   try {
@@ -11282,6 +11551,7 @@ function loadEditedTemplateContent(projectId: string): { title?: string; titleLi
       titleLines: data.titleLines,
       terminalTabs: data.terminalTabs,
       showcaseMode: data.showcaseMode,
+      deviceMockup: data.deviceMockup,
     };
   } catch {
     return null;
