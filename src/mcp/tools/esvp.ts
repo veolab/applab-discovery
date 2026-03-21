@@ -37,6 +37,7 @@ import {
   type ESVPExecutor,
   type ESVPPreflightConfig,
 } from '../../core/integrations/esvp.js';
+import { LOCAL_ESVP_SERVER_URL } from '../../core/integrations/esvp-local-runtime.js';
 import { buildAppLabNetworkProfile } from '../../core/integrations/esvp-network-profile.js';
 import { listAllEmulators } from '../../core/capture/emulator.js';
 import { PROJECTS_DIR } from '../../db/index.js';
@@ -137,9 +138,14 @@ function resolveProjectRecordingReplaySessionId(session: any): string | null {
 
 function resolveProjectRecordingESVPServerUrl(session: any): string | undefined {
   const esvp = resolveProjectRecordingESVPState(session);
-  if (!esvp || typeof esvp.serverUrl !== 'string') return undefined;
-  const serverUrl = esvp.serverUrl.trim();
-  return serverUrl || undefined;
+  const serverUrl = typeof esvp?.serverUrl === 'string' ? esvp.serverUrl.trim().replace(/\/+$/, '') : '';
+  if (serverUrl === LOCAL_ESVP_SERVER_URL) {
+    return LOCAL_ESVP_SERVER_URL;
+  }
+  if (!serverUrl && esvp?.connectionMode === 'local') {
+    return LOCAL_ESVP_SERVER_URL;
+  }
+  return undefined;
 }
 
 function resolveAppLabBaseUrl(appLabUrl?: string): string {

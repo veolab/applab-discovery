@@ -62,6 +62,7 @@ import {
   runESVPActions,
   validateESVPReplay,
 } from '../core/integrations/esvp.js';
+import { LOCAL_ESVP_SERVER_URL } from '../core/integrations/esvp-local-runtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -4071,9 +4072,26 @@ function resolveProjectESVPSessionId(esvp: Record<string, unknown> | null): stri
 }
 
 function resolveProjectESVPServerUrl(esvp: Record<string, unknown> | null): string | undefined {
-  if (!esvp || typeof esvp.serverUrl !== 'string') return undefined;
-  const serverUrl = esvp.serverUrl.trim();
-  return serverUrl || undefined;
+  return normalizePersistedLocalESVPServerUrl(esvp?.serverUrl, esvp?.connectionMode);
+}
+
+function normalizePersistedLocalESVPServerUrl(serverUrl: unknown, connectionMode?: unknown): string | undefined {
+  const normalized = typeof serverUrl === 'string' ? serverUrl.trim().replace(/\/+$/, '') : '';
+  if (normalized === LOCAL_ESVP_SERVER_URL) {
+    return LOCAL_ESVP_SERVER_URL;
+  }
+  if (!normalized && connectionMode === 'local') {
+    return LOCAL_ESVP_SERVER_URL;
+  }
+  return undefined;
+}
+
+function resolvePersistedLocalESVPServerUrl(serverUrl: unknown, esvp: Record<string, unknown> | null): string {
+  return (
+    normalizePersistedLocalESVPServerUrl(serverUrl, 'local') ||
+    resolveProjectESVPServerUrl(esvp) ||
+    LOCAL_ESVP_SERVER_URL
+  );
 }
 
 function isESVPReplayValidationSupported(result: Record<string, unknown> | null): boolean {
@@ -6470,7 +6488,7 @@ app.post('/api/testing/mobile/recordings/:id/esvp/replay', async (c) => {
     session.esvp = {
       ...(esvp || {}),
       currentSessionId: sourceSessionId,
-      serverUrl: serverUrl || (typeof esvp?.serverUrl === 'string' ? esvp.serverUrl : null),
+      serverUrl: resolvePersistedLocalESVPServerUrl(serverUrl, esvp),
       executor,
       validation: {
         ...existingValidation,
@@ -6631,7 +6649,10 @@ app.post('/api/testing/mobile/recordings/:id/esvp/network/start', async (c) => {
       ...(session.esvp && typeof session.esvp === 'object' ? session.esvp : {}),
       currentSessionId: sourceSessionId,
       connectionMode: typeof session?.esvp?.connectionMode === 'string' ? session.esvp.connectionMode : 'local',
-      serverUrl: serverUrl || (typeof session?.esvp?.serverUrl === 'string' ? session.esvp.serverUrl : null),
+      serverUrl: resolvePersistedLocalESVPServerUrl(
+        serverUrl,
+        session?.esvp && typeof session.esvp === 'object' ? session.esvp as Record<string, unknown> : null
+      ),
       executor,
       network: {
         ...(existingNetwork || {}),
