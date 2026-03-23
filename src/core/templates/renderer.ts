@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
-import { EXPORTS_DIR } from '../../db/index.js';
+import { DATA_DIR, EXPORTS_DIR } from '../../db/index.js';
 import { getBundlePath, getTemplate } from './loader.js';
 import type { TemplateProps, TemplateId, RenderJob, TerminalTab } from './types.js';
 
@@ -245,7 +245,12 @@ async function renderAsync(
 ): Promise<void> {
   job.status = 'rendering';
 
+  // Temporarily change cwd so @remotion/renderer caches its Chrome download
+  // in ~/.discoverylab/.remotion/ instead of polluting the user's project dir.
+  const originalCwd = process.cwd();
   try {
+    process.chdir(DATA_DIR);
+
     // Dynamic import to avoid failing if @remotion/renderer is not installed
     const { selectComposition, renderMedia } = await import('@remotion/renderer');
 
@@ -296,6 +301,8 @@ async function renderAsync(
     job.error = err.message;
     job.completedAt = Date.now();
     throw err;
+  } finally {
+    process.chdir(originalCwd);
   }
 }
 
