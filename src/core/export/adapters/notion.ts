@@ -4,6 +4,8 @@
  * Wraps existing notion.ts integration with the pipeline interface
  */
 
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type {
   ExportDestinationAdapter,
   ExportAssetType,
@@ -103,8 +105,6 @@ export const notionAdapter: ExportDestinationAdapter = {
           switch (asset.type) {
             case 'frames': {
               // Frames directory - collect image files
-              const { readdirSync } = require('node:fs');
-              const { join } = require('node:path');
               try {
                 const files = readdirSync(asset.filePath) as string[];
                 const imageFiles = files

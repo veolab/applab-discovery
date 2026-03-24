@@ -12567,7 +12567,6 @@ const TEMPLATE_MAX_DURATION_SECONDS = 60;
 const DEFAULT_ANDROID_DEVICE_MOCKUP = 'mockup-android-galaxy.png';
 const ANDROID_DEVICE_MOCKUP_FALLBACKS = [
   DEFAULT_ANDROID_DEVICE_MOCKUP,
-  'mockup-android.png',
   'mockup-android-google-pixel-9-pro.png',
 ];
 

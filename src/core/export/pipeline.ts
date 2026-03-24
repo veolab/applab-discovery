@@ -3,7 +3,7 @@
  * Orchestrates: manifest → prepare assets → adapt for destination → upload
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, statSync, readdirSync } from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { lookup } from 'mime-types';
 import type {
@@ -114,7 +114,6 @@ async function prepareAsset(
 function resolveVideoFile(videoPath: string): string | null {
   if (!existsSync(videoPath)) return null;
 
-  const { statSync, readdirSync } = require('node:fs');
   const stat = statSync(videoPath);
 
   if (stat.isFile()) return videoPath;
