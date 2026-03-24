@@ -5,7 +5,18 @@
 
 import { existsSync, statSync, readdirSync } from 'node:fs';
 import { join, basename, extname } from 'node:path';
-import { lookup } from 'mime-types';
+
+/** Simple MIME lookup - no external dependency */
+function lookupMime(filePath: string): string {
+  const ext = extname(filePath).toLowerCase();
+  const types: Record<string, string> = {
+    '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
+    '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  };
+  return types[ext] || 'application/octet-stream';
+}
 import type {
   BatchExportManifest,
   PreparedProject,
@@ -65,7 +76,7 @@ async function prepareAsset(
         type: 'video',
         originalType: 'video',
         filePath: videoPath,
-        mimeType: lookup(videoPath) || `video/${ext}`,
+        mimeType: lookupMime(videoPath),
         fileName: basename(videoPath),
         metadata: { ...(asset.config || {}) },
       };
