@@ -63,6 +63,9 @@ import {
   validateESVPReplay,
 } from '../core/integrations/esvp.js';
 import { LOCAL_ESVP_SERVER_URL } from '../core/integrations/esvp-local-runtime.js';
+import { executeBatchExport, registerAdapter, getAvailableAdapters, type ProjectDataProvider } from '../core/export/pipeline.js';
+import { notionAdapter } from '../core/export/adapters/notion.js';
+import type { BatchExportManifest } from '../core/export/adapters/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -70,6 +73,138 @@ const __dirname = dirname(__filename);
 const ANALYZING_PROJECT_STATUSES = new Set(['analyzing', 'processing', 'pending', 'in_progress']);
 const BACKGROUND_ANALYSIS_TIMEOUT_MS = 10 * 60 * 1000; // 10 min hard timeout for OCR/AI jobs
 const STALE_ANALYSIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 min stale protection on reads
+
+// ============================================================================
+// SMART ANNOTATION CACHE & BACKGROUND PRE-GENERATION
+// ============================================================================
+
+interface CachedAnnotations {
+  projectId: string;
+  title: string;
+  subtitle: string;
+  steps: string[];
+  generatedAt: number;
+}
+
+const annotationCache = new Map<string, CachedAnnotations>();
+let pregenInProgress = false;
+
+/**
+ * Check if the machine is busy with resource-intensive tasks.
+ * Only pre-generate when idle to avoid impacting user experience.
+ */
+function isMachineBusy(): boolean {
+  try {
+    // Check active recording
+    const recorder = getMaestroRecorder();
+    if (recorder.isRecording()) return true;
+
+    // Check active render jobs
+    const job = getRenderJob(''); // empty = checks if any active
+    // Actually check all active renders
+    // renderJobs is private, so check via the session-level state
+  } catch { /* ignore */ }
+
+  // Check active analysis
+  for (const [, progress] of analysisProgressByProject) {
+    if (progress.status === 'running') return true;
+  }
+
+  return false;
+}
+
+/**
+ * Schedule smart annotation pre-generation after analyzer completes.
+ * Waits 3s then checks if machine is idle before proceeding.
+ */
+function scheduleSmartAnnotationPregen(projectId: string) {
+  setTimeout(async () => {
+    if (pregenInProgress || isMachineBusy()) {
+      console.log(`[SmartAnnotations] Skipping pregen for ${projectId} - machine busy`);
+      return;
+    }
+
+    // Check if already cached
+    if (annotationCache.has(projectId)) return;
+
+    pregenInProgress = true;
+    console.log(`[SmartAnnotations] Pre-generating annotations for ${projectId}...`);
+
+    try {
+      const db = getDatabase();
+      const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+      if (!project?.aiSummary) return;
+
+      const dbFrames = await db.select().from(frames)
+        .where(eq(frames.projectId, projectId))
+        .orderBy(frames.frameNumber)
+        .limit(10);
+
+      if (dbFrames.length === 0) return;
+
+      const provider = await getLLMProvider();
+      if (!provider) {
+        // Fallback: parse from aiSummary
+        const flowMatch = project.aiSummary.match(/## (?:User Flow|Likely User Flow)\n([\s\S]*?)(?=\n##|\n$|$)/);
+        const flowLines = flowMatch ? (flowMatch[1].match(/^\d+\.\s+(.+)$/gm) || []) : [];
+        annotationCache.set(projectId, {
+          projectId,
+          title: project.marketingTitle || cleanProjectTitle(project.name) || 'App Flow',
+          subtitle: project.marketingDescription || '',
+          steps: dbFrames.map((_, i) => flowLines[i]?.replace(/^\d+\.\s+/, '').slice(0, 40) || `Step ${i + 1}`),
+          generatedAt: Date.now(),
+        });
+        return;
+      }
+
+      // Re-check busy state before LLM call
+      if (isMachineBusy()) return;
+
+      const framesContext = dbFrames.map((f, i) =>
+        `Frame ${i + 1}: "${(f.ocrText || '').slice(0, 200)}"`
+      ).join('\n');
+
+      const prompt = `You create labels for an app flow infographic. Be concise.
+
+App Intelligence:
+${project.aiSummary.slice(0, 2000)}
+
+Frames OCR (in order):
+${framesContext}
+
+Return ONLY valid JSON, no extra text:
+{
+  "title": "catchy 3-5 word title for this flow",
+  "subtitle": "one sentence about the app",
+  "steps": [${dbFrames.map((_, i) => `{"label": "max 6 words for frame ${i + 1}"}`).join(', ')}]
+}`;
+
+      const response = await provider.sendMessage(prompt);
+      const jsonMatch = (typeof response === 'string' ? response : '').match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        annotationCache.set(projectId, {
+          projectId,
+          title: parsed.title || 'App Flow',
+          subtitle: parsed.subtitle || '',
+          steps: Array.isArray(parsed.steps) ? parsed.steps.map((s: { label?: string }) => s.label || '') : [],
+          generatedAt: Date.now(),
+        });
+        console.log(`[SmartAnnotations] Cached annotations for ${projectId}`);
+
+        // Broadcast to frontend that annotations are ready
+        broadcastToClients({
+          type: 'smartAnnotationsReady',
+          data: { projectId },
+        });
+      }
+    } catch (e) {
+      console.error(`[SmartAnnotations] Pregen failed for ${projectId}:`, e);
+    } finally {
+      pregenInProgress = false;
+    }
+  }, 3000); // Wait 3s after analysis completes
+}
 
 function isAnalyzingProjectStatus(status: unknown): boolean {
   return typeof status === 'string' && ANALYZING_PROJECT_STATUSES.has(status);
@@ -1044,10 +1179,15 @@ async function selectBestFrame(framePaths: string[]): Promise<{ bestFrame: strin
     return { bestFrame: null, analyses: [] };
   }
 
+  // Filter out blank (white/black) frames before OCR analysis
+  const { isBlankFrame } = await import('../core/analyze/frames.js');
+  const validPaths = framePaths.filter(p => !isBlankFrame(p).isBlank);
+  const candidates = validPaths.length > 0 ? validPaths : framePaths;
+
   const { recognizeText } = await import('../core/analyze/ocr.js');
   const analyses: FrameAnalysis[] = [];
 
-  for (const framePath of framePaths.slice(0, 10)) { // Analyze max 10 frames
+  for (const framePath of candidates.slice(0, 10)) { // Analyze max 10 frames
     try {
       const result = await recognizeText(framePath);
       analyses.push({
@@ -1066,7 +1206,7 @@ async function selectBestFrame(framePaths: string[]): Promise<{ bestFrame: strin
   // Select frame with most text, or middle frame if no text found
   const bestFrame = analyses[0]?.textLength > 50
     ? analyses[0].path
-    : framePaths[Math.floor(framePaths.length / 2)] || framePaths[0];
+    : candidates[Math.floor(candidates.length / 2)] || candidates[0];
 
   return { bestFrame, analyses };
 }
@@ -1075,6 +1215,9 @@ async function selectBestFrame(framePaths: string[]): Promise<{ bestFrame: strin
 // APP SETUP
 // ============================================================================
 const app = new Hono();
+
+// Register export destination adapters
+registerAdapter(notionAdapter);
 
 // CORS for development
 app.use('*', cors());
@@ -1873,6 +2016,8 @@ app.patch('/api/projects/:id', async (c) => {
     const updates: any = { updatedAt: new Date() };
 
     if (body.name !== undefined) updates.name = body.name;
+    if (body.marketingTitle !== undefined) updates.marketingTitle = body.marketingTitle;
+    if (body.marketingDescription !== undefined) updates.marketingDescription = body.marketingDescription;
     if (body.manualNotes !== undefined) updates.manualNotes = body.manualNotes;
     if (body.tags !== undefined) updates.tags = JSON.stringify(body.tags);
     if (body.linkedTicket !== undefined) updates.linkedTicket = body.linkedTicket;
@@ -2414,6 +2559,169 @@ app.post('/api/ai/jira-summary', async (c) => {
   }
 });
 
+// ============================================================================
+// SMART TITLE & MARKETING DESCRIPTION
+// ============================================================================
+
+/**
+ * Clean device names, timestamps, and "Recording" prefix from project titles.
+ * e.g. "iOS: iPhone 14 Pro Recording - 2026-03-23 10:30:00" → "App Recording"
+ * Returns empty string if nothing meaningful remains, so caller can fallback.
+ */
+function cleanProjectTitle(rawName: string): string {
+  return rawName
+    // Remove platform prefixes like "iOS:", "Android:", "Web:"
+    .replace(/^(iOS|Android|Web)\s*:\s*/i, '')
+    // Remove device model names
+    .replace(/\b(iPhone|iPad|iPod|Pixel|Galaxy|Samsung|Motorola|OnePlus|Xiaomi|Huawei|Emulator|Simulator|emulator-\d+)\s*(\d+\s*)?(Pro|Max|Plus|Ultra|Mini|Air|SE|lite)?\s*/gi, '')
+    // Remove "Recording -" or "Recording" standalone
+    .replace(/\bRecording\s*-?\s*/gi, '')
+    // Remove "Test -" patterns like "Test - 5 actions"
+    .replace(/\bTest\s*-\s*\d+\s*actions?\s*-?\s*/gi, '')
+    // Remove ISO timestamps and date patterns
+    .replace(/\d{4}-\d{2}-\d{2}(\s+\d{2}:\d{2}(:\d{2})?)?/g, '')
+    // Remove trailing dashes and extra whitespace
+    .replace(/\s*-\s*$/, '')
+    .replace(/^\s*-\s*/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+// Generate or update marketing title (cleaned) for a project
+app.post('/api/ai/clean-title', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId } = body;
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+
+    const db = getDatabase();
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+    if (!project) return c.json({ error: 'Project not found' }, 404);
+
+    const cleaned = cleanProjectTitle(project.name);
+    const marketingTitle = cleaned || project.name;
+
+    await db.update(projects)
+      .set({ marketingTitle, updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
+
+    return c.json({ success: true, originalTitle: project.name, marketingTitle });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Update marketing title manually (user editable)
+app.put('/api/projects/:id/marketing-title', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { marketingTitle } = body;
+    if (!marketingTitle || typeof marketingTitle !== 'string') {
+      return c.json({ error: 'marketingTitle required' }, 400);
+    }
+
+    const db = getDatabase();
+    await db.update(projects)
+      .set({ marketingTitle: marketingTitle.trim(), updatedAt: new Date() })
+      .where(eq(projects.id, id));
+
+    return c.json({ success: true, marketingTitle: marketingTitle.trim() });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Generate marketing-quality description using LLM
+app.post('/api/ai/marketing-description', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId } = body;
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+
+    const db = getDatabase();
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+    if (!project) return c.json({ error: 'Project not found' }, 404);
+
+    if (!project.aiSummary && !project.ocrText) {
+      return c.json({ error: 'Project has no analysis data. Run analyzer first.' }, 400);
+    }
+
+    const provider = await getLLMProvider();
+    if (!provider) {
+      return c.json({ error: 'No LLM provider available' }, 500);
+    }
+
+    const cleanedTitle = project.marketingTitle || cleanProjectTitle(project.name) || project.name;
+    const analysisData = project.aiSummary || project.ocrText?.slice(0, 3000) || '';
+
+    const prompt = `You are a professional copywriter for app marketing. Given this app analysis, write a compelling 2-3 sentence marketing description suitable for a portfolio, Notion page, or app store listing.
+
+App Title: ${cleanedTitle}
+Platform: ${project.platform || 'unknown'}
+
+App Analysis:
+${analysisData.slice(0, 4000)}
+
+Rules:
+- Focus on what the app does and its value to users
+- Professional, engaging tone
+- No technical jargon or QA terminology
+- No markdown formatting - plain text only
+- 2-3 sentences max`;
+
+    const response = await provider.sendMessage(prompt);
+    const description = typeof response === 'string' ? response.trim() : '';
+
+    if (!description) {
+      return c.json({ error: 'LLM returned empty response' }, 500);
+    }
+
+    // Save to database
+    await db.update(projects)
+      .set({
+        marketingDescription: description,
+        marketingTitle: project.marketingTitle || cleanedTitle,
+        updatedAt: new Date(),
+      })
+      .where(eq(projects.id, projectId));
+
+    return c.json({
+      success: true,
+      marketingTitle: project.marketingTitle || cleanedTitle,
+      marketingDescription: description,
+      provider: provider.name,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Update marketing description manually (user editable)
+app.put('/api/projects/:id/marketing-description', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { marketingDescription } = body;
+    if (!marketingDescription || typeof marketingDescription !== 'string') {
+      return c.json({ error: 'marketingDescription required' }, 400);
+    }
+
+    const db = getDatabase();
+    await db.update(projects)
+      .set({ marketingDescription: marketingDescription.trim(), updatedAt: new Date() })
+      .where(eq(projects.id, id));
+
+    return c.json({ success: true, marketingDescription: marketingDescription.trim() });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
 // Delete project
 app.delete('/api/projects/:id', async (c) => {
   try {
@@ -2450,6 +2758,21 @@ app.delete('/api/projects/:id', async (c) => {
     if (existsSync(projectDir)) {
       rmSync(projectDir, { recursive: true, force: true });
       console.log(`[Delete] Removed project directory: ${id}`);
+    }
+
+    // Delete exports dir (template renders, grids, viz screenshots)
+    const { EXPORTS_DIR: exportsDir, FRAMES_DIR: framesDir } = await import('../db/index.js');
+    const projectExportsDir = join(exportsDir, id);
+    if (existsSync(projectExportsDir)) {
+      rmSync(projectExportsDir, { recursive: true, force: true });
+      console.log(`[Delete] Removed exports directory: ${id}`);
+    }
+
+    // Delete frames dir
+    const projectFramesDir = join(framesDir, id);
+    if (existsSync(projectFramesDir)) {
+      rmSync(projectFramesDir, { recursive: true, force: true });
+      console.log(`[Delete] Removed frames directory: ${id}`);
     }
 
     return c.json({ message: 'Project deleted' });
@@ -2988,8 +3311,18 @@ app.post('/api/capture/web/start', async (c) => {
     }
 
     const body = await c.req.json();
-    const { url } = body;
+    const { url, captureResolution: captureResKey, viewportMode, viewportResolution: vpResKey } = body;
     const startUrl = url || 'about:blank';
+
+    // Resolve capture resolution from settings (default 1080p)
+    const CAPTURE_RESOLUTIONS: Record<string, { width: number; height: number }> = {
+      '720': { width: 1280, height: 720 },
+      '1080': { width: 1920, height: 1080 },
+      '1440': { width: 2560, height: 1440 },
+      '2160': { width: 3840, height: 2160 },
+    };
+    const captureRes = CAPTURE_RESOLUTIONS[captureResKey || '1080'] || CAPTURE_RESOLUTIONS['1080'];
+    const vpRes = CAPTURE_RESOLUTIONS[vpResKey || captureResKey || '1080'] || captureRes;
 
     const { mkdirSync } = await import('node:fs');
 
@@ -3019,10 +3352,22 @@ app.post('/api/capture/web/start', async (c) => {
       const context = await browser.newContext({
         recordVideo: {
           dir: projectDir,
-          size: { width: 1280, height: 720 }
+          size: captureRes
         },
-        viewport: { width: 1280, height: 720 }
+        viewport: viewportMode === 'fixed' ? vpRes : null
       });
+
+      // Hide scrollbars in all pages created in this context
+      const hideScrollbarJS = `
+        function __hideScrollbars() {
+          const s = document.createElement('style');
+          s.textContent = '::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}html,body,*{scrollbar-width:none!important}';
+          (document.head || document.documentElement).appendChild(s);
+        }
+        if (document.head || document.body) { __hideScrollbars(); }
+        else { document.addEventListener('DOMContentLoaded', __hideScrollbars); }
+      `;
+      await context.addInitScript({ content: hideScrollbarJS });
 
       page = await context.newPage();
       const networkHandle = attachPlaywrightNetworkCapture(page, {
@@ -3030,6 +3375,7 @@ app.post('/api/capture/web/start', async (c) => {
         meta: networkCapture,
       });
       await page.goto(startUrl);
+      try { await page.addStyleTag({ content: '::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}html,body,*{scrollbar-width:none!important}' }); } catch { /* ignore */ }
 
       captureSession = {
         type: 'web',
@@ -3270,8 +3616,22 @@ async function analyzeProjectInBackground(projectId: string) {
     await execAsync(`ffmpeg -i "${videoPath}" -vf "fps=1" -q:v 2 "${framesDir}/frame_%04d.jpg" -y`);
     broadcastProgress('extract', 'done', 'Frames extracted');
 
-    // Get frame files
-    const frameFiles = readdirSync(framesDir).filter(f => f.endsWith('.jpg')).sort();
+    // Get frame files and filter out blank (white/black) frames from browser startup
+    const { isBlankFrame } = await import('../core/analyze/frames.js');
+    const { unlinkSync } = await import('node:fs');
+    const allFrameFiles = readdirSync(framesDir).filter(f => f.endsWith('.jpg')).sort();
+    const frameFiles: string[] = [];
+    for (const f of allFrameFiles) {
+      const { isBlank } = isBlankFrame(join(framesDir, f));
+      if (isBlank) {
+        try { unlinkSync(join(framesDir, f)); } catch { /* ignore */ }
+      } else {
+        frameFiles.push(f);
+      }
+    }
+    if (frameFiles.length < allFrameFiles.length) {
+      console.log(`[BackgroundOCR] Filtered ${allFrameFiles.length - frameFiles.length} blank frames (${frameFiles.length} remaining)`);
+    }
 
     if (frameFiles.length === 0) {
       broadcastProgress('save', 'done', 'No frames extracted from video');
@@ -3624,6 +3984,16 @@ app.post('/api/canvas/export', async (c) => {
 // ============================================================================
 
 // Get available grid layouts
+// Get cached smart annotations for a project (pre-generated after analysis)
+app.get('/api/grid/smart-annotations/:projectId', async (c) => {
+  const projectId = c.req.param('projectId');
+  const cached = annotationCache.get(projectId);
+  if (cached) {
+    return c.json({ ready: true, ...cached });
+  }
+  return c.json({ ready: false });
+});
+
 app.get('/api/grid/layouts', async (c) => {
   try {
     const { getAllLayouts, getLayoutInfo } = await import('../core/canvas/gridCompositor.js');
@@ -3712,13 +4082,127 @@ app.post('/api/grid/preview', async (c) => {
       }
     }
 
-    // Map image paths to GridCell format
-    const gridImages = images.map((img: { path: string; label?: string }) => ({
-      imagePath: img.path,
-      label: img.label,
-    }));
+    const isInfographicLayout = ['flow-horizontal', 'flow-vertical', 'infographic'].includes(gridConfig.layout);
 
-    const result = await composeGrid(gridImages, gridConfig, outputPath);
+    let result;
+    let smartTitle = config?.title || 'App Flow';
+    let smartSubtitle = config?.subtitle || '';
+    let stepLabels: string[] = images.map((_: unknown, i: number) => `Step ${i + 1}`);
+
+    if (isInfographicLayout) {
+      const { composeInfographic } = await import('../core/canvas/gridCompositor.js');
+      const arrowDir: 'right' | 'down' | 'none' = gridConfig.layout === 'flow-horizontal' ? 'right' : gridConfig.layout === 'flow-vertical' ? 'down' : 'none';
+
+      const projectId = body.projectId;
+      if (projectId) {
+        // Check cache first (pre-generated after analysis)
+        const cached = annotationCache.get(projectId);
+        if (cached) {
+          smartTitle = cached.title;
+          smartSubtitle = cached.subtitle;
+          stepLabels = images.map((_: unknown, i: number) => cached.steps[i] || `Step ${i + 1}`);
+        } else try {
+          const db = getDatabase();
+          const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+
+          if (project?.aiSummary) {
+            // Project has been analyzed - use AI for smart annotations
+            // Try to get per-frame OCR from frames table
+            const dbFrames = await db.select().from(frames)
+              .where(eq(frames.projectId, projectId))
+              .orderBy(frames.frameNumber)
+              .limit(images.length);
+
+            const framesOcr = dbFrames.map((f: { ocrText?: string | null }) => f.ocrText?.slice(0, 300) || '');
+
+            const provider = await getLLMProvider();
+            if (provider) {
+              const framesContext = images.map((img: { path: string; label?: string }, i: number) => {
+                const ocr = framesOcr[i] || img.label || '';
+                return `Frame ${i + 1}: "${ocr.slice(0, 200)}"`;
+              }).join('\n');
+
+              const prompt = `You create labels for an app flow infographic. Be concise.
+
+App Intelligence:
+${project.aiSummary.slice(0, 2000)}
+
+Frames OCR (in order):
+${framesContext}
+
+Return ONLY valid JSON, no extra text:
+{
+  "title": "catchy 3-5 word title for this flow",
+  "subtitle": "one sentence about the app",
+  "steps": [${images.map((_: unknown, i: number) => `{"label": "max 6 words for frame ${i + 1}"}`).join(', ')}]
+}`;
+
+              try {
+                const response = await provider.sendMessage(prompt);
+                const jsonMatch = (typeof response === 'string' ? response : '').match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  const parsed = JSON.parse(jsonMatch[0]);
+                  if (parsed.title) smartTitle = parsed.title;
+                  if (parsed.subtitle) smartSubtitle = parsed.subtitle;
+                  if (Array.isArray(parsed.steps)) {
+                    stepLabels = parsed.steps.map((s: { label?: string }, i: number) => s.label || `Step ${i + 1}`);
+                  }
+                  // Cache for future requests
+                  annotationCache.set(projectId, {
+                    projectId, title: smartTitle, subtitle: smartSubtitle,
+                    steps: stepLabels, generatedAt: Date.now(),
+                  });
+                }
+              } catch { /* LLM failed, use fallbacks */ }
+            } else {
+              // No LLM: parse User Flow from aiSummary
+              const flowMatch = project.aiSummary.match(/## (?:User Flow|Likely User Flow)\n([\s\S]*?)(?=\n##|\n$|$)/);
+              if (flowMatch) {
+                const flowLines = flowMatch[1].match(/^\d+\.\s+(.+)$/gm) || [];
+                stepLabels = images.map((_: unknown, i: number) => {
+                  if (flowLines[i]) return flowLines[i].replace(/^\d+\.\s+/, '').slice(0, 40);
+                  return `Step ${i + 1}`;
+                });
+              }
+              smartTitle = project.marketingTitle || cleanProjectTitle(project.name) || 'App Flow';
+              smartSubtitle = project.marketingDescription || '';
+            }
+          } else {
+            // No analyzer yet - use basic labels from image names
+            smartTitle = project.marketingTitle || cleanProjectTitle(project.name) || 'App Flow';
+          }
+        } catch { /* DB error, use defaults */ }
+      }
+
+      const infographicImages = images.map((img: { path: string; label?: string }, i: number) => ({
+        imagePath: img.path,
+        label: img.label,
+        stepNumber: i + 1,
+        annotation: stepLabels[i] || img.label || `Step ${i + 1}`,
+        flowArrow: ((i < images.length - 1) ? arrowDir : 'none') as 'right' | 'down' | 'none',
+      }));
+
+      result = await composeInfographic(
+        infographicImages,
+        {
+          title: smartTitle,
+          subtitle: smartSubtitle,
+          footerText: config?.footerText,
+          layout: gridConfig.layout,
+          aspectRatio: gridConfig.aspectRatio,
+          background: gridConfig.background,
+          outputWidth: gridConfig.outputWidth,
+        },
+        outputPath,
+      );
+    } else {
+      // Standard grid compositor
+      const gridImages = images.map((img: { path: string; label?: string }) => ({
+        imagePath: img.path,
+        label: img.label,
+      }));
+      result = await composeGrid(gridImages, gridConfig, outputPath);
+    }
 
     if (!result.success) {
       return c.json({ error: result.error }, 500);
@@ -3730,6 +4214,8 @@ app.post('/api/grid/preview', async (c) => {
       previewUrl: `/api/file?path=${encodeURIComponent(outputPath)}`,
       width: result.width,
       height: result.height,
+      // Return smart annotations so export can reuse them
+      ...(isInfographicLayout ? { smartTitle, smartSubtitle, smartAnnotations: stepLabels } : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -3785,13 +4271,45 @@ app.post('/api/grid/export', async (c) => {
       }
     }
 
-    // Map image paths to GridCell format
-    const gridImages = images.map((img: { path: string; label?: string }) => ({
-      imagePath: img.path,
-      label: img.label,
-    }));
+    // Use same smart annotation logic as preview (config.smartAnnotations passed from preview cache)
+    const isInfographicLayout = ['flow-horizontal', 'flow-vertical', 'infographic'].includes(gridConfig.layout);
 
-    const result = await composeGrid(gridImages, gridConfig, outputPath);
+    let result;
+
+    if (isInfographicLayout) {
+      const { composeInfographic } = await import('../core/canvas/gridCompositor.js');
+      const arrowDir: 'right' | 'down' | 'none' = gridConfig.layout === 'flow-horizontal' ? 'right' : gridConfig.layout === 'flow-vertical' ? 'down' : 'none';
+
+      // Use annotations from config if passed (from preview), otherwise basic
+      const annotations: string[] = config?.smartAnnotations || [];
+      const infographicImages = images.map((img: { path: string; label?: string }, i: number) => ({
+        imagePath: img.path,
+        label: img.label,
+        stepNumber: i + 1,
+        annotation: annotations[i] || img.label || `Step ${i + 1}`,
+        flowArrow: ((i < images.length - 1) ? arrowDir : 'none') as 'right' | 'down' | 'none',
+      }));
+
+      result = await composeInfographic(
+        infographicImages,
+        {
+          title: config?.smartTitle || config?.title || 'App Flow',
+          subtitle: config?.smartSubtitle || config?.subtitle || '',
+          footerText: config?.footerText,
+          layout: gridConfig.layout,
+          aspectRatio: gridConfig.aspectRatio,
+          background: gridConfig.background,
+          outputWidth: gridConfig.outputWidth,
+        },
+        outputPath,
+      );
+    } else {
+      const gridImages = images.map((img: { path: string; label?: string }) => ({
+        imagePath: img.path,
+        label: img.label,
+      }));
+      result = await composeGrid(gridImages, gridConfig, outputPath);
+    }
 
     if (!result.success) {
       return c.json({ error: result.error }, 500);
@@ -3804,6 +4322,139 @@ app.post('/api/grid/export', async (c) => {
       width: result.width,
       height: result.height,
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Generate infographic with annotations, step badges, and flow arrows
+app.post('/api/grid/infographic', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId, images, config } = body;
+
+    if (!images || !Array.isArray(images) || images.length === 0) {
+      return c.json({ error: 'No images provided' }, 400);
+    }
+
+    const { composeInfographic } = await import('../core/canvas/gridCompositor.js');
+    const { EXPORTS_DIR } = await import('../db/index.js');
+
+    const exportDir = projectId ? join(EXPORTS_DIR, projectId) : join(EXPORTS_DIR, 'grids');
+    if (!existsSync(exportDir)) {
+      mkdirSync(exportDir, { recursive: true });
+    }
+
+    const outputPath = join(exportDir, `infographic-${Date.now()}.png`);
+
+    const result = await composeInfographic(
+      images.map((img: any, i: number) => ({
+        imagePath: img.path || img.imagePath,
+        label: img.label,
+        stepNumber: img.stepNumber ?? (i + 1),
+        annotation: img.annotation,
+        flowArrow: img.flowArrow || (config?.layout === 'flow-horizontal' ? 'right' : config?.layout === 'flow-vertical' ? 'down' : 'none'),
+      })),
+      {
+        title: config?.title || 'App Flow',
+        subtitle: config?.subtitle || '',
+        footerText: config?.footerText,
+        layout: config?.layout || 'flow-horizontal',
+        aspectRatio: config?.aspectRatio,
+        outputWidth: config?.outputWidth,
+      },
+      outputPath,
+    );
+
+    if (!result.success) {
+      return c.json({ error: result.error }, 500);
+    }
+
+    return c.json({
+      success: true,
+      path: outputPath,
+      downloadUrl: `/api/file?path=${encodeURIComponent(outputPath)}&download=true`,
+      width: result.width,
+      height: result.height,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// AI-powered frame annotation - generates step labels from OCR data
+app.post('/api/ai/annotate-frames', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId, frameIds } = body;
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+
+    const db = getDatabase();
+    let projectFrames;
+    if (frameIds && Array.isArray(frameIds) && frameIds.length > 0) {
+      projectFrames = await db.select().from(frames)
+        .where(and(eq(frames.projectId, projectId), inArray(frames.id, frameIds)))
+        .orderBy(frames.frameNumber);
+    } else {
+      projectFrames = await db.select().from(frames)
+        .where(eq(frames.projectId, projectId))
+        .orderBy(frames.frameNumber)
+        .limit(10);
+    }
+
+    if (!projectFrames.length) {
+      return c.json({ error: 'No frames found' }, 404);
+    }
+
+    const provider = await getLLMProvider();
+    if (!provider) {
+      // Fallback: generate simple numbered labels
+      const annotations = projectFrames.map((f, i) => ({
+        frameId: f.id,
+        stepNumber: i + 1,
+        label: `Step ${i + 1}`,
+        annotation: f.ocrText?.slice(0, 50) || `Screen ${i + 1}`,
+      }));
+      return c.json({ success: true, annotations, provider: 'fallback' });
+    }
+
+    const framesData = projectFrames.map((f, i) =>
+      `Step ${i + 1}: OCR text: "${(f.ocrText || '').slice(0, 200)}"`
+    ).join('\n');
+
+    const prompt = `Given these ${projectFrames.length} app screenshots in sequence, generate a brief label (max 8 words) for each step in the user flow.
+
+${framesData}
+
+Return ONLY a valid JSON array with no extra text:
+[{"step": 1, "label": "Opens login screen"}, ...]`;
+
+    const response = await provider.sendMessage(prompt);
+    const text = typeof response === 'string' ? response.trim() : '';
+
+    let parsed: Array<{ step: number; label: string }> = [];
+    try {
+      // Extract JSON from response (may have markdown code fences)
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        parsed = JSON.parse(jsonMatch[0]);
+      }
+    } catch {
+      // Fallback to simple labels
+      parsed = projectFrames.map((_, i) => ({ step: i + 1, label: `Step ${i + 1}` }));
+    }
+
+    const annotations = projectFrames.map((f, i) => ({
+      frameId: f.id,
+      framePath: f.imagePath,
+      stepNumber: i + 1,
+      label: parsed[i]?.label || `Step ${i + 1}`,
+      annotation: parsed[i]?.label || f.ocrText?.slice(0, 50) || `Screen ${i + 1}`,
+    }));
+
+    return c.json({ success: true, annotations, provider: provider.name });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -3826,6 +4477,7 @@ app.get('/api/grid/project-frames/:id', async (c) => {
     const { readdirSync } = await import('node:fs');
 
     const availableFrames: Array<{ path: string; previewUrl: string; name: string }> = [];
+    const { isBlankFrame } = await import('../core/analyze/frames.js');
 
     // Check for extracted frames in global FRAMES_DIR
     const projectFramesDir = join(FRAMES_DIR, id);
@@ -3836,6 +4488,8 @@ app.get('/api/grid/project-frames/:id', async (c) => {
 
       for (const f of frameFiles) {
         const framePath = join(projectFramesDir, f);
+        // Skip blank (white/black) frames
+        if (isBlankFrame(framePath).isBlank) continue;
         availableFrames.push({
           path: framePath,
           previewUrl: `/api/file?path=${encodeURIComponent(framePath)}`,
@@ -4578,6 +5232,577 @@ app.post('/api/export', async (c) => {
       path: outputPath,
       downloadUrl: `/api/file?path=${encodeURIComponent(outputPath)}&download=true`
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// ============================================================================
+// INTERACTIVE VISUALIZATION ENGINE
+// ============================================================================
+
+// Serve visualization as self-contained HTML
+app.get('/api/visualization/:projectId/:templateId', async (c) => {
+  try {
+    const projectId = c.req.param('projectId');
+    const templateId = c.req.param('templateId');
+
+    const db = getDatabase();
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+    if (!project) return c.json({ error: 'Project not found' }, 404);
+
+    const { FRAMES_DIR } = await import('../db/index.js');
+    const projectFramesDir = join(FRAMES_DIR, projectId);
+
+    // Get frames from database
+    const dbFrames = await db.select().from(frames)
+      .where(eq(frames.projectId, projectId))
+      .orderBy(frames.frameNumber)
+      .limit(10);
+
+    // Build frame images list - fallback to filesystem if DB has no frames
+    let frameImages: Array<{ imageUrl: string; label: string; number: number }> = [];
+
+    if (dbFrames.length > 0) {
+      frameImages = dbFrames.map((f, i) => ({
+        imageUrl: `/api/file?path=${encodeURIComponent(f.imagePath)}`,
+        label: f.ocrText?.slice(0, 40) || `Screen ${i + 1}`,
+        number: i + 1,
+      }));
+    } else {
+      // Fallback: look for screenshots in recording directories
+      const screenshotsDirs = [
+        join(projectFramesDir),
+        ...(project.videoPath ? [
+          join(project.videoPath, 'screenshots'),
+          project.videoPath,
+        ] : []),
+        join(PROJECTS_DIR, 'maestro-recordings', projectId, 'screenshots'),
+        join(PROJECTS_DIR, 'web-recordings', projectId, 'screenshots'),
+      ];
+
+      for (const dir of screenshotsDirs) {
+        if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
+        const files = readdirSync(dir)
+          .filter(f => /\.(png|jpg|jpeg|gif|webp)$/i.test(f))
+          .sort()
+          .slice(0, 10);
+        if (files.length > 0) {
+          frameImages = files.map((f, i) => ({
+            imageUrl: `/api/file?path=${encodeURIComponent(join(dir, f))}`,
+            label: `Screen ${i + 1}`,
+            number: i + 1,
+          }));
+          break;
+        }
+      }
+
+      // Last fallback: use thumbnail if nothing else
+      if (frameImages.length === 0 && project.thumbnailPath && existsSync(project.thumbnailPath)) {
+        frameImages = [{
+          imageUrl: `/api/file?path=${encodeURIComponent(project.thumbnailPath)}`,
+          label: 'App Screenshot',
+          number: 1,
+        }];
+      }
+    }
+
+    // Build visualization data based on template
+    // Use cleaned title - never show raw device names in visualizations
+    const vizTitle = project.marketingTitle || cleanProjectTitle(project.name) || project.name;
+    let vizData: Record<string, unknown> = {
+      title: vizTitle,
+      subtitle: '',
+      platform: project.platform || 'unknown',
+    };
+
+    switch (templateId) {
+      case 'flow-diagram':
+        vizData = {
+          ...vizData,
+          steps: frameImages,
+          direction: 'horizontal',
+        };
+        break;
+
+      case 'device-showcase':
+        vizData = {
+          ...vizData,
+          screens: frameImages,
+        };
+        break;
+
+      case 'metrics-dashboard': {
+        // Parse analysis data for metrics
+        const summary = project.aiSummary || '';
+        const ocrText = project.ocrText || '';
+
+        // Count UI elements from OCR
+        const buttonMatches = ocrText.match(/button|btn|tap|click|submit|save|cancel|ok|next/gi) || [];
+        const navMatches = ocrText.match(/menu|tab|nav|home|back|settings|profile/gi) || [];
+        const inputMatches = ocrText.match(/input|field|search|email|password|text|enter/gi) || [];
+        const dataMatches = ocrText.match(/table|list|card|chart|graph|data|item/gi) || [];
+
+        vizData = {
+          ...vizData,
+          screenCount: project.frameCount || frameImages.length,
+          flowSteps: frameImages.length,
+          uiElements: buttonMatches.length + navMatches.length + inputMatches.length,
+          screens: frameImages,
+          categories: [
+            { name: 'Buttons & Actions', count: buttonMatches.length },
+            { name: 'Navigation', count: navMatches.length },
+            { name: 'Inputs & Forms', count: inputMatches.length },
+            { name: 'Data & Views', count: dataMatches.length },
+          ].filter(c => c.count > 0),
+          steps: frameImages.map(f => ({ label: f.label })),
+        };
+        break;
+      }
+
+      case 'app-flow-map': {
+        // AI-powered: analyze project data and generate narrative flow phases
+        // Cache results to avoid re-generating (saves tokens)
+        let phases: Array<{
+          title: string;
+          description: string;
+          screens: typeof frameImages;
+          insight?: string;
+        }> = [];
+
+        const { EXPORTS_DIR: expDir } = await import('../db/index.js');
+        const cachePath = join(expDir, projectId, 'flowmap-cache.json');
+        let cachedFlowMap: any = null;
+        try {
+          if (existsSync(cachePath)) {
+            cachedFlowMap = JSON.parse(readFileSync(cachePath, 'utf-8'));
+            // Validate cache is still relevant (same frame count)
+            if (cachedFlowMap._frameCount === frameImages.length) {
+              vizData.title = cachedFlowMap.title || vizData.title;
+              vizData.subtitle = cachedFlowMap.subtitle || vizData.subtitle;
+              // Rebuild phases with current image URLs (paths may change)
+              phases = (cachedFlowMap.phases || []).map((p: any) => ({
+                title: p.title,
+                description: p.description,
+                screens: (p.screenIndices || []).map((idx: number) => frameImages[idx]).filter(Boolean),
+                insight: p.insight,
+              }));
+            } else {
+              cachedFlowMap = null; // Invalidate
+            }
+          }
+        } catch { cachedFlowMap = null; }
+
+        if (!cachedFlowMap) {
+        const provider = await getLLMProvider();
+        if (provider && project.aiSummary && frameImages.length >= 2) {
+          try {
+            const framesInfo = frameImages.map((f, i) =>
+              `Screen ${i + 1}: "${f.label}"`
+            ).join('\n');
+
+            const prompt = `You are creating a visual flow map for an app. Analyze the data and group screens into logical phases that tell a story.
+
+App Intelligence:
+${(project.aiSummary || '').slice(0, 2500)}
+
+Screens captured (in order):
+${framesInfo}
+
+Group these ${frameImages.length} screens into 2-4 phases. Each phase is a logical step in the user journey.
+
+Return ONLY valid JSON:
+{
+  "title": "compelling 3-5 word map title",
+  "subtitle": "one sentence about the app experience",
+  "phases": [
+    {
+      "title": "phase name (2-4 words)",
+      "description": "what happens in this phase (1 sentence)",
+      "screenIndices": [0, 1],
+      "insight": "interesting UX observation about this phase (optional, 1 sentence)"
+    }
+  ]
+}
+
+Rules:
+- Every screen must be assigned to exactly one phase
+- screenIndices are 0-based, matching the screen order above
+- Phase titles should tell a story progression (e.g. "Discovery", "Decision", "Action", "Confirmation")
+- Insights should be specific observations, not generic`;
+
+            const response = await provider.sendMessage(prompt);
+            const jsonMatch = (typeof response === 'string' ? response : '').match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              if (parsed.title) vizData.title = parsed.title;
+              if (parsed.subtitle) vizData.subtitle = parsed.subtitle;
+              if (Array.isArray(parsed.phases)) {
+                phases = parsed.phases.map((p: any) => ({
+                  title: p.title || 'Phase',
+                  description: p.description || '',
+                  screens: (p.screenIndices || []).map((idx: number) => frameImages[idx]).filter(Boolean),
+                  insight: p.insight || undefined,
+                }));
+              }
+              // Store provider name for display
+              (vizData as any)._providerName = provider.name;
+            }
+          } catch { /* LLM failed, use fallback */ }
+        }
+
+        // Fallback: simple sequential grouping
+        if (phases.length === 0) {
+          const chunkSize = Math.max(1, Math.ceil(frameImages.length / 3));
+          const defaultTitles = ['Getting Started', 'Core Experience', 'Completing the Flow'];
+          for (let i = 0; i < frameImages.length; i += chunkSize) {
+            const chunk = frameImages.slice(i, i + chunkSize);
+            phases.push({
+              title: defaultTitles[Math.floor(i / chunkSize)] || `Phase ${Math.floor(i / chunkSize) + 1}`,
+              description: `Screens ${i + 1}-${Math.min(i + chunkSize, frameImages.length)}`,
+              screens: chunk,
+            });
+          }
+        }
+
+        // Save to cache (avoid re-generating on next open)
+        try {
+          const cacheDir = join(expDir, projectId);
+          if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
+          const cacheData = {
+            title: vizData.title,
+            subtitle: vizData.subtitle,
+            _frameCount: frameImages.length,
+            _providerName: (vizData as any)._providerName || 'fallback',
+            phases: phases.map(p => ({
+              title: p.title,
+              description: p.description,
+              screenIndices: p.screens.map(s => frameImages.findIndex(f => f.imageUrl === s.imageUrl)),
+              insight: p.insight,
+            })),
+          };
+          writeFileSync(cachePath, JSON.stringify(cacheData, null, 2));
+        } catch { /* cache write failed, not critical */ }
+        } // end if (!cachedFlowMap)
+
+        const providerName = (vizData as any)._providerName || cachedFlowMap?._providerName || '';
+        vizData = {
+          ...vizData,
+          providerName,
+          phases: phases.map(p => ({
+            title: p.title,
+            description: p.description,
+            screens: p.screens.map(s => ({
+              imageUrl: s.imageUrl,
+              label: s.label,
+              detail: '',
+            })),
+            insight: p.insight,
+          })),
+        };
+        break;
+      }
+
+      default:
+        return c.json({ error: `Unknown template: ${templateId}` }, 400);
+    }
+
+    // Read HTML template and inject data
+    const templatePath = join(__dirname, '..', 'core', 'visualizations', 'templates', `${templateId}.html`);
+    // Fallback paths for different build structures
+    const possiblePaths = [
+      templatePath,
+      join(__dirname, '..', '..', 'src', 'core', 'visualizations', 'templates', `${templateId}.html`),
+      join(process.cwd(), 'src', 'core', 'visualizations', 'templates', `${templateId}.html`),
+    ];
+
+    let htmlContent = '';
+    for (const p of possiblePaths) {
+      if (existsSync(p)) {
+        htmlContent = readFileSync(p, 'utf-8');
+        break;
+      }
+    }
+
+    if (!htmlContent) {
+      return c.json({ error: `Template file not found: ${templateId}` }, 404);
+    }
+
+    // Inject data before the closing </head> or before the first <script>
+    const dataScript = `<script>window.__VISUALIZATION_DATA__ = ${JSON.stringify(vizData)};</script>`;
+    htmlContent = htmlContent.replace('<script>', dataScript + '\n<script>');
+
+    return c.html(htmlContent);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// List available visualization templates
+app.get('/api/visualization/templates', async (c) => {
+  return c.json({
+    templates: [
+      { id: 'flow-diagram', name: 'Flow Diagram', description: 'Screenshots connected by animated arrows' },
+      { id: 'device-showcase', name: 'Device Showcase', description: '3D rotating carousel of screens' },
+      { id: 'metrics-dashboard', name: 'Metrics Dashboard', description: 'Analysis data with animated charts' },
+      { id: 'app-flow-map', name: 'App Flow Map', description: 'AI-powered narrative flow with grouped phases' },
+    ],
+  });
+});
+
+// Capture visualization as PNG screenshot
+app.post('/api/visualization/screenshot', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId, templateId, format } = body;
+
+    if (!projectId || !templateId) {
+      return c.json({ error: 'projectId and templateId required' }, 400);
+    }
+
+    const { EXPORTS_DIR } = await import('../db/index.js');
+    const exportDir = join(EXPORTS_DIR, projectId);
+    if (!existsSync(exportDir)) {
+      mkdirSync(exportDir, { recursive: true });
+    }
+
+    const ext = format === 'gif' ? 'gif' : 'png';
+    const outputPath = join(exportDir, `viz-${templateId}-${Date.now()}.${ext}`);
+
+    // Get the server port to build the URL
+    const serverPort = process.env.PORT || '3847';
+    const vizUrl = `http://localhost:${serverPort}/api/visualization/${projectId}/${templateId}`;
+
+    const { chromium } = await import('playwright');
+
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+
+    await page.goto(vizUrl, { waitUntil: 'networkidle' });
+    // Wait for CSS animations to play
+    await page.waitForTimeout(2500);
+
+    if (format === 'gif') {
+      // Capture multiple frames for GIF
+      const framesDir = join(exportDir, `viz-gif-frames-${Date.now()}`);
+      mkdirSync(framesDir, { recursive: true });
+
+      const frameCount = 20;
+      const intervalMs = 200; // 5fps, 4 seconds total
+
+      for (let i = 0; i < frameCount; i++) {
+        await page.screenshot({ path: join(framesDir, `frame-${String(i).padStart(3, '0')}.png`) });
+        await page.waitForTimeout(intervalMs);
+      }
+
+      await browser.close();
+
+      // Compose GIF from frames using FFmpeg
+      const { promisify } = await import('util');
+      const execPromise = promisify(exec);
+      try {
+        await execPromise(
+          `ffmpeg -framerate 5 -i "${join(framesDir, 'frame-%03d.png')}" -vf "scale=600:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" -loop 0 "${outputPath}" -y`,
+          { timeout: 30000 }
+        );
+      } catch (ffmpegError) {
+        // Fallback: just use first frame as PNG
+        const { copyFileSync } = await import('node:fs');
+        const fallbackPath = outputPath.replace('.gif', '.png');
+        copyFileSync(join(framesDir, 'frame-000.png'), fallbackPath);
+        // Clean up frames
+        const { rmSync } = await import('node:fs');
+        rmSync(framesDir, { recursive: true, force: true });
+        return c.json({
+          success: true,
+          format: 'png',
+          path: fallbackPath,
+          downloadUrl: `/api/file?path=${encodeURIComponent(fallbackPath)}&download=true`,
+          note: 'GIF conversion failed (FFmpeg required), exported as PNG instead',
+        });
+      }
+
+      // Clean up frames
+      const { rmSync } = await import('node:fs');
+      rmSync(framesDir, { recursive: true, force: true });
+    } else {
+      // PNG screenshot
+      await page.screenshot({ path: outputPath, fullPage: true });
+      await browser.close();
+    }
+
+    return c.json({
+      success: true,
+      format: ext,
+      path: outputPath,
+      downloadUrl: `/api/file?path=${encodeURIComponent(outputPath)}&download=true`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// ============================================================================
+// BATCH EXPORT PIPELINE
+// ============================================================================
+
+// Build default document from project data
+app.get('/api/export/document/:projectId', async (c) => {
+  try {
+    const projectId = c.req.param('projectId');
+    const db = getDatabase();
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+    if (!project) return c.json({ error: 'Project not found' }, 404);
+
+    const projectFrames = await db.select().from(frames)
+      .where(eq(frames.projectId, projectId))
+      .orderBy(frames.frameNumber)
+      .limit(20);
+
+    // Fallback frames from filesystem if DB empty
+    let frameData = projectFrames.map(f => ({ imagePath: f.imagePath, ocrText: f.ocrText }));
+    if (frameData.length === 0 && project.videoPath) {
+      const { FRAMES_DIR } = await import('../db/index.js');
+      const dirs = [
+        join(FRAMES_DIR, projectId),
+        join(project.videoPath, 'screenshots'),
+        join(PROJECTS_DIR, 'maestro-recordings', projectId, 'screenshots'),
+        join(PROJECTS_DIR, 'web-recordings', projectId, 'screenshots'),
+      ];
+      for (const dir of dirs) {
+        if (existsSync(dir) && statSync(dir).isDirectory()) {
+          const files = readdirSync(dir).filter(f => /\.(png|jpg|jpeg|webp)$/i.test(f)).sort().slice(0, 20);
+          if (files.length > 0) {
+            frameData = files.map((f, i) => ({ imagePath: join(dir, f), ocrText: null }));
+            break;
+          }
+        }
+      }
+    }
+
+    // Check for cached template render
+    const { getCachedRender: getCached } = await import('../core/templates/renderer.js');
+    const templateRenderPath = getCached(projectId, 'showcase') || getCached(projectId, 'studio') || null;
+
+    const { buildDefaultDocument } = await import('../core/export/document.js');
+    const doc = buildDefaultDocument({
+      id: project.id,
+      name: project.name,
+      marketingTitle: project.marketingTitle,
+      marketingDescription: project.marketingDescription,
+      platform: project.platform,
+      aiSummary: project.aiSummary,
+      videoPath: project.videoPath,
+      thumbnailPath: project.thumbnailPath,
+      taskHubLinks: project.taskHubLinks,
+      frames: frameData,
+      duration: project.duration,
+      templateRenderPath,
+    });
+
+    return c.json({ success: true, document: doc });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Create Notion page from document via REST API (hybrid: API for structure, Playwright for files)
+app.post('/api/export/notion-page', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { document: doc, parentPageId } = body;
+
+    if (!doc || !parentPageId) {
+      return c.json({ error: 'document and parentPageId required' }, 400);
+    }
+
+    // Read notion settings for token
+    const notionSettingsPath = join(DATA_DIR, 'notion-settings.json');
+    let apiToken = '';
+    if (existsSync(notionSettingsPath)) {
+      const settings = JSON.parse(readFileSync(notionSettingsPath, 'utf-8'));
+      apiToken = settings.apiToken || '';
+    }
+
+    if (!apiToken) {
+      return c.json({ error: 'Notion API token not configured' }, 400);
+    }
+
+    const { createNotionPageViaApi } = await import('../core/export/adapters/notion-api.js');
+    const result = await createNotionPageViaApi(doc, {
+      token: apiToken,
+      parentPageId,
+    });
+
+    return c.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Get available export adapters
+app.get('/api/export/adapters', async (c) => {
+  return c.json({ adapters: getAvailableAdapters() });
+});
+
+// Batch export via pipeline
+app.post('/api/export/batch', async (c) => {
+  try {
+    const manifest = await c.req.json() as BatchExportManifest;
+
+    if (!manifest.projects || !Array.isArray(manifest.projects) || manifest.projects.length === 0) {
+      return c.json({ error: 'No projects in manifest' }, 400);
+    }
+    if (!manifest.destination?.type) {
+      return c.json({ error: 'Destination type required' }, 400);
+    }
+
+    const { FRAMES_DIR } = await import('../db/index.js');
+
+    const dataProvider: ProjectDataProvider = {
+      async getProject(projectId: string) {
+        const db = getDatabase();
+        const [p] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+        return p || null;
+      },
+      getFramesDir(projectId: string) {
+        return join(FRAMES_DIR, projectId);
+      },
+    };
+
+    // Execute pipeline with progress broadcast via WebSocket
+    const result = await executeBatchExport(manifest, dataProvider, (progress) => {
+      broadcastToClients({
+        type: 'batchExportProgress',
+        data: progress,
+      });
+    });
+
+    // Record exports in database
+    const db = getDatabase();
+    for (const r of result.results) {
+      const { randomUUID } = await import('node:crypto');
+      await db.insert(projectExports).values({
+        id: randomUUID(),
+        projectId: r.projectId,
+        destination: manifest.destination.type,
+        destinationUrl: r.destinationUrl || null,
+        contentIncluded: JSON.stringify(
+          manifest.projects.find(p => p.projectId === r.projectId)?.assets || []
+        ),
+        status: r.success ? 'completed' : 'failed',
+        errorMessage: r.error || null,
+        exportedAt: new Date(),
+        createdAt: new Date(),
+      });
+    }
+
+    return c.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -8314,6 +9539,41 @@ async function runOCRInBackground(
     broadcastProgress('save', 'running', 'Saving results to database...');
 
     const db = getDatabase();
+    // Auto-generate marketing title from raw project name
+    const [currentProject] = await db.select({ name: projects.name, tags: projects.tags }).from(projects).where(eq(projects.id, projectId)).limit(1);
+    const autoMarketingTitle = currentProject ? (cleanProjectTitle(currentProject.name) || currentProject.name) : undefined;
+
+    // Auto-generate contextual tags from AI summary for knowledge search
+    let autoTags: string[] = [];
+    if (aiSummary) {
+      const tagKeywords = new Set<string>();
+      // Extract screen/flow names from summary
+      const flowSteps = aiSummary.match(/^\d+\.\s+(.+)$/gm) || [];
+      for (const step of flowSteps.slice(0, 5)) {
+        const clean = step.replace(/^\d+\.\s+/, '').toLowerCase();
+        // Extract key nouns: "Opens login screen" → "login"
+        const words = clean.split(/\s+/).filter(w => w.length > 3 && !['user', 'taps', 'opens', 'clicks', 'enters', 'scrolls', 'navigates', 'views', 'sees', 'goes', 'back', 'into', 'with', 'from', 'screen', 'page'].includes(w));
+        words.forEach(w => tagKeywords.add(w));
+      }
+      // Extract from headings
+      const headingTerms = aiSummary.match(/## .+/g) || [];
+      for (const h of headingTerms) {
+        const words = h.replace(/^## /, '').toLowerCase().split(/\s+/).filter(w => w.length > 3);
+        words.forEach(w => tagKeywords.add(w));
+      }
+      autoTags = [...tagKeywords].slice(0, 10);
+    }
+
+    // Merge with existing tags
+    let mergedTags: string[] = autoTags;
+    if (currentProject?.tags) {
+      try {
+        const existing = JSON.parse(currentProject.tags) as string[];
+        const combined = new Set([...existing, ...autoTags]);
+        mergedTags = [...combined];
+      } catch { /* use auto only */ }
+    }
+
     await db.update(projects).set({
       status: 'analyzed',
       ocrText: ocrText || null,
@@ -8322,6 +9582,8 @@ async function runOCRInBackground(
       aiSummary,
       frameCount: detectedActionsCount > 0 ? detectedActionsCount : undefined,
       ...(iconCoverPath ? { thumbnailPath: iconCoverPath } : {}),
+      ...(autoMarketingTitle ? { marketingTitle: autoMarketingTitle } : {}),
+      ...(mergedTags.length > 0 ? { tags: JSON.stringify(mergedTags) } : {}),
       updatedAt: new Date()
     }).where(eq(projects.id, projectId));
 
@@ -8341,6 +9603,10 @@ async function runOCRInBackground(
       type: 'projectAnalysisUpdated',
       data: { projectId, status: 'analyzed' }
     });
+
+    // Pre-generate smart annotations in background if machine is idle
+    scheduleSmartAnnotationPregen(projectId);
+
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
     console.error(`[BackgroundOCR] Analysis failed for project ${projectId}:`, error);
@@ -9547,6 +10813,158 @@ app.put('/api/settings/jira', async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
+  }
+});
+
+// ============================================================================
+// NOTION SETTINGS & PAGE PICKER
+// ============================================================================
+
+let notionSettings: {
+  apiToken?: string;
+  lastParentPageId?: string;
+  lastParentPageTitle?: string;
+} = {};
+
+// Load Notion settings from file on startup
+(async () => {
+  try {
+    const settingsPath = join(DATA_DIR, 'notion-settings.json');
+    if (existsSync(settingsPath)) {
+      notionSettings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      console.log('[Notion Settings] Loaded from file');
+    }
+  } catch (e) {
+    console.log('[Notion Settings] No saved settings found');
+  }
+})();
+
+app.get('/api/settings/notion', async (c) => {
+  return c.json({
+    configured: !!notionSettings.apiToken,
+    apiToken: notionSettings.apiToken ? '••••' + notionSettings.apiToken.slice(-4) : '',
+    lastParentPageId: notionSettings.lastParentPageId || '',
+    lastParentPageTitle: notionSettings.lastParentPageTitle || '',
+  });
+});
+
+app.put('/api/settings/notion', async (c) => {
+  try {
+    const body = await c.req.json();
+
+    if (body.apiToken && !body.apiToken.startsWith('••')) {
+      notionSettings.apiToken = body.apiToken;
+    }
+    if (body.lastParentPageId !== undefined) {
+      notionSettings.lastParentPageId = body.lastParentPageId;
+      notionSettings.lastParentPageTitle = body.lastParentPageTitle || '';
+    }
+
+    const settingsPath = join(DATA_DIR, 'notion-settings.json');
+    writeFileSync(settingsPath, JSON.stringify(notionSettings, null, 2));
+
+    return c.json({ success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Search Notion pages (for page picker)
+app.get('/api/notion/search', async (c) => {
+  try {
+    const query = c.req.query('q') || '';
+    const token = notionSettings.apiToken;
+
+    if (!token) {
+      return c.json({ error: 'Notion API token not configured. Go to Settings to add it.' }, 400);
+    }
+
+    const response = await fetch('https://api.notion.com/v1/search', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        filter: { property: 'object', value: 'page' },
+        sort: { direction: 'descending', timestamp: 'last_edited_time' },
+        page_size: 20,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      if (response.status === 401) {
+        return c.json({ error: 'Invalid Notion API token. Check your integration token in Settings.' }, 401);
+      }
+      return c.json({ error: `Notion API error: ${response.status}` }, 500);
+    }
+
+    const data = await response.json() as { results: Array<{ id: string; properties?: Record<string, any>; icon?: any; url?: string }> };
+
+    const pages = (data.results || []).map((page: any) => {
+      // Extract title from properties
+      let title = 'Untitled';
+      if (page.properties?.title?.title) {
+        title = page.properties.title.title.map((t: any) => t.plain_text).join('') || 'Untitled';
+      } else if (page.properties?.Name?.title) {
+        title = page.properties.Name.title.map((t: any) => t.plain_text).join('') || 'Untitled';
+      } else {
+        // Try to find any property with type "title"
+        for (const prop of Object.values(page.properties || {})) {
+          if ((prop as any)?.type === 'title' && (prop as any)?.title) {
+            title = (prop as any).title.map((t: any) => t.plain_text).join('') || 'Untitled';
+            break;
+          }
+        }
+      }
+
+      return {
+        id: page.id,
+        title,
+        icon: page.icon?.emoji || null,
+        url: page.url || `https://www.notion.so/${page.id.replace(/-/g, '')}`,
+      };
+    });
+
+    return c.json({ success: true, pages });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Check Notion connection status
+app.get('/api/notion/status', async (c) => {
+  const token = notionSettings.apiToken;
+  if (!token) {
+    return c.json({ connected: false, method: 'none' });
+  }
+
+  try {
+    const response = await fetch('https://api.notion.com/v1/users/me', {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Notion-Version': '2022-06-28',
+      },
+    });
+
+    if (response.ok) {
+      const user = await response.json() as { name?: string; type?: string };
+      return c.json({
+        connected: true,
+        method: 'api',
+        name: (user as any).name || 'Integration',
+        type: (user as any).type || 'bot',
+      });
+    }
+
+    return c.json({ connected: false, method: 'api', error: 'Invalid token' });
+  } catch {
+    return c.json({ connected: false, method: 'api', error: 'Connection failed' });
   }
 });
 

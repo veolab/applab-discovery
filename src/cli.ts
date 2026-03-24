@@ -742,6 +742,7 @@ program
         integrationTools,
         taskHubTools,
         esvpTools,
+        knowledgeTools,
       } = await import('./mcp/tools/index.js');
 
       // Register all tools
@@ -757,6 +758,7 @@ program
         ...integrationTools,
         ...taskHubTools,
         ...esvpTools,
+        ...knowledgeTools,
       ]);
 
       // Start STDIO transport

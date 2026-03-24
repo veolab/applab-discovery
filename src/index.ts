@@ -22,6 +22,7 @@ import {
   taskHubTools,
   esvpTools,
   templateTools,
+  knowledgeTools,
 } from './mcp/tools/index.js';
 
 // ============================================================================
@@ -46,6 +47,7 @@ async function main() {
       ...taskHubTools,
       ...esvpTools,
       ...templateTools,
+      ...knowledgeTools,
     ]);
 
     // Start STDIO transport for MCP

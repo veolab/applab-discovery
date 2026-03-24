@@ -15,6 +15,7 @@ export { integrationTools } from './integrations.js';
 export { taskHubTools } from './taskhub.js';
 export { esvpTools } from './esvp.js';
 export { templateTools } from './templates.js';
+export { knowledgeTools } from './knowledge.js';
 
 // Re-export individual tools if needed
 export { uiOpenTool, uiStatusTool } from './ui.js';
@@ -125,3 +126,7 @@ export {
   templateListTool,
   templateRenderTool,
 } from './templates.js';
+export {
+  knowledgeSearchTool,
+  knowledgeSummaryTool,
+} from './knowledge.js';

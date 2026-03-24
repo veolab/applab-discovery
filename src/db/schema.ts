@@ -40,6 +40,10 @@ export const projects = sqliteTable('projects', {
   taskRequirements: text('task_requirements'), // AI-generated requirements from linked content
   taskTestMap: text('task_test_map'), // AI-generated test map from linked content
 
+  // Marketing / Export
+  marketingTitle: text('marketing_title'), // Cleaned title without device names
+  marketingDescription: text('marketing_description'), // AI-generated marketing-quality description
+
   // Status
   status: text('status').default('draft'), // 'draft' | 'analyzed' | 'exported' | 'archived'
 

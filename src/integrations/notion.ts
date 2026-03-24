@@ -49,7 +49,7 @@ export interface NotionExportOptions {
   notes?: string;
   tags?: string[];
   parentPageId?: string;
-  template?: 'evidence' | 'testReport' | 'gallery' | 'custom';
+  template?: 'evidence' | 'testReport' | 'gallery' | 'marketing' | 'custom';
 }
 
 export interface NotionExportResult {
@@ -459,6 +459,65 @@ function buildPageContent(options: NotionExportOptions): NotionBlock[] {
 
       if (screenshots && screenshots.length > 0) {
         blocks.push({ type: 'gallery', paths: screenshots });
+      }
+      break;
+
+    case 'marketing':
+      // Marketing template: callout → description → visual assets → analysis
+      blocks.push({
+        type: 'callout',
+        content: `${options.title || 'App Review'}`,
+        color: 'purple',
+      });
+
+      if (description) {
+        blocks.push({ type: 'paragraph', content: description });
+      }
+
+      blocks.push({ type: 'divider' });
+
+      // Screenshots/grids/infographics/visualizations (first few as featured images)
+      if (screenshots && screenshots.length > 0) {
+        // First image as hero (infographic or grid if available)
+        blocks.push({ type: 'image', url: screenshots[0] });
+
+        // Remaining as gallery if more than 1
+        if (screenshots.length > 1) {
+          blocks.push({ type: 'heading2', content: 'Screenshots' });
+          blocks.push({ type: 'gallery', paths: screenshots.slice(1) });
+        }
+      }
+
+      // Videos (GIFs will display inline in Notion)
+      if (videos && videos.length > 0) {
+        blocks.push({ type: 'heading2', content: 'Preview' });
+        for (const video of videos) {
+          // GIFs are embedded as images in Notion (they animate!)
+          if (video.endsWith('.gif')) {
+            blocks.push({ type: 'image', url: video });
+          } else {
+            blocks.push({ type: 'file', url: video });
+          }
+        }
+      }
+
+      // Analysis details
+      if (notes) {
+        blocks.push({ type: 'divider' });
+        blocks.push({ type: 'heading2', content: 'Analysis' });
+        // Convert markdown to Notion blocks if possible
+        const analysisBlocks = markdownToNotionBlocks(notes);
+        if (analysisBlocks.length > 0) {
+          blocks.push(...analysisBlocks);
+        } else {
+          blocks.push({ type: 'paragraph', content: notes });
+        }
+      }
+
+      // Tags
+      if (tags && tags.length > 0) {
+        blocks.push({ type: 'divider' });
+        blocks.push({ type: 'paragraph', content: `Tags: ${tags.join(', ')}` });
       }
       break;
 

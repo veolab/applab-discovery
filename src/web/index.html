@@ -6992,7 +6992,8 @@
                 </div>
                 <div class="selection-bar-right">
                     <button class="btn btn-secondary" id="cancelSelectBtn">Cancel</button>
-                    <button class="btn btn-primary" id="deleteSelectedBtn" style="background: var(--error);">Delete Selected</button>
+                    <button class="btn btn-primary" id="exportSelectedBtn" disabled>Export</button>
+                    <button class="btn btn-primary" id="deleteSelectedBtn" style="background: var(--error);">Delete</button>
                 </div>
             </div>
 
@@ -7117,6 +7118,11 @@
                 <!-- Top: Images Carousel (Full Width) -->
                 <div class="grid-top-carousel">
                     <div class="carousel-header">
+                        <button class="icon-btn" id="gridBackBtn" title="Back to project" style="width: 28px; height: 28px; margin-right: 4px;">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M19 12H5"/><polyline points="12 19 5 12 12 5"/>
+                            </svg>
+                        </button>
                         <span class="carousel-title">IMAGES</span>
                         <button class="btn btn-small" id="addGridImages">+ Add</button>
                     </div>
@@ -8358,6 +8364,20 @@
         let testingStatus = { maestro: false, playwright: false };
         let selectMode = false;
         let selectedProjects = new Set();
+        let globalProviderLabel = '';
+        // Fetch active LLM provider name once on load
+        (async () => {
+            try {
+                const resp = await fetch('/api/settings/llm');
+                const s = await resp.json();
+                const pref = s.preferredProvider || 'auto';
+                if (pref === 'anthropic' || (pref === 'auto' && s.anthropicApiKey)) globalProviderLabel = s.anthropicModel || 'Claude';
+                else if (pref === 'openai' || (pref === 'auto' && s.openaiApiKey)) globalProviderLabel = s.openaiModel || 'GPT';
+                else if (pref === 'ollama') globalProviderLabel = s.ollamaModel || 'Ollama';
+                else if (pref === 'claude-cli') globalProviderLabel = 'Claude CLI';
+                else globalProviderLabel = 'AI';
+            } catch { globalProviderLabel = 'AI'; }
+        })();
 
         // Grid state
         let gridImages = [];
@@ -10792,10 +10812,16 @@
             const startUrl = urlInput.value.trim() || 'about:blank';
 
             try {
+                const captureSettings = getCaptureSettings();
                 const response = await fetch('/api/capture/web/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url: startUrl })
+                    body: JSON.stringify({
+                        url: startUrl,
+                        captureResolution: captureSettings.captureResolution,
+                        viewportMode: captureSettings.viewportMode,
+                        viewportResolution: captureSettings.viewportResolution
+                    })
                 });
 
                 const data = await response.json();
@@ -11394,6 +11420,7 @@
             const count = selectedProjects.size;
             document.getElementById('selectionCount').textContent = `${count} selected`;
             document.getElementById('deleteSelectedBtn').disabled = count === 0;
+            document.getElementById('exportSelectedBtn').disabled = count === 0;
         }
 
         document.getElementById('selectModeBtn').addEventListener('click', () => {
@@ -11416,6 +11443,791 @@
             }
             updateSelectionCount();
         });
+
+        // ====================================================================
+        // BATCH EXPORT MODAL
+        // ====================================================================
+        async function openBatchExportModal(projectIds) {
+            const existing = document.getElementById('batchExportModal');
+            if (existing) existing.remove();
+
+            // Fetch project details for selected projects
+            const projectDetails = [];
+            for (const id of projectIds) {
+                const p = projects.find(pr => pr.id === id);
+                if (p) {
+                    projectDetails.push({
+                        id: p.id,
+                        name: p.name,
+                        marketingTitle: p.marketingTitle || p.name,
+                        marketingDescription: p.marketingDescription || '',
+                        platform: p.platform || 'unknown',
+                        status: p.status,
+                        thumbnailPath: p.thumbnailPath,
+                        videoPath: p.videoPath,
+                        aiSummary: p.aiSummary,
+                        hasFrames: (p.frameCount || 0) > 0,
+                    });
+                }
+            }
+
+            if (!projectDetails.length) {
+                showToast('No valid projects selected', 'error');
+                return;
+            }
+
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay active';
+            modal.id = 'batchExportModal';
+            modal.innerHTML = `
+                <style>
+                    #batchExportModal .export-modal { max-width: 800px; max-height: 85vh; display: flex; flex-direction: column; }
+                    #batchExportModal .export-stepper { display: flex; gap: 0; border-bottom: 1px solid var(--border); padding: 0 16px; }
+                    #batchExportModal .export-step { padding: 10px 16px; font-size: 12px; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
+                    #batchExportModal .export-step.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+                    #batchExportModal .export-step.done { color: var(--success); }
+                    #batchExportModal .export-body { padding: 16px; overflow-y: auto; flex: 1; }
+                    #batchExportModal .export-project-row { display: grid; grid-template-columns: 48px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+                    #batchExportModal .export-project-row:last-child { border-bottom: none; }
+                    #batchExportModal .export-project-thumb { width: 48px; height: 48px; border-radius: 8px; overflow: hidden; background: var(--bg-tertiary); }
+                    #batchExportModal .export-project-thumb img { width: 100%; height: 100%; object-fit: cover; }
+                    #batchExportModal .export-project-fields { display: flex; flex-direction: column; gap: 6px; }
+                    #batchExportModal .export-field label { display: block; font-size: 10px; font-weight: 500; color: var(--text-muted); margin-bottom: 2px; }
+                    #batchExportModal .export-field input, #batchExportModal .export-field textarea { width: 100%; padding: 6px 8px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 12px; box-sizing: border-box; font-family: inherit; }
+                    #batchExportModal .export-field textarea { resize: vertical; min-height: 40px; }
+                    #batchExportModal .export-field input:focus, #batchExportModal .export-field textarea:focus { outline: none; border-color: var(--accent); }
+                    #batchExportModal .export-regen-btn { font-size: 10px; color: var(--accent); cursor: pointer; background: none; border: none; padding: 2px 0; }
+                    #batchExportModal .export-regen-btn:hover { text-decoration: underline; }
+                    #batchExportModal .export-assets-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }
+                    #batchExportModal .export-asset-card { padding: 10px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; text-align: center; transition: all 0.2s; }
+                    #batchExportModal .export-asset-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-tertiary)); }
+                    #batchExportModal .export-asset-card .asset-icon { margin-bottom: 6px; display: flex; justify-content: center; }
+                    #batchExportModal .export-asset-card .asset-label { font-size: 11px; font-weight: 500; color: var(--text-primary); }
+                    #batchExportModal .export-asset-card .asset-desc { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+                    #batchExportModal .export-dest-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 8px; }
+                    #batchExportModal .export-dest-card { padding: 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; text-align: center; transition: all 0.2s; }
+                    #batchExportModal .export-dest-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-tertiary)); }
+                    #batchExportModal .export-dest-card .dest-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+                    #batchExportModal .export-dest-card .dest-desc { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+                    #batchExportModal .export-progress { margin-top: 12px; }
+                    #batchExportModal .export-progress-bar { height: 4px; background: var(--bg-tertiary); border-radius: 2px; overflow: hidden; }
+                    #batchExportModal .export-progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; width: 0%; }
+                    #batchExportModal .export-progress-text { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+                    #batchExportModal .export-btn-row { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--border); }
+                </style>
+                <div class="modal export-modal">
+                    <div class="modal-header">
+                        <div class="modal-title">Export ${projectDetails.length} Project${projectDetails.length > 1 ? 's' : ''}</div>
+                        <button class="icon-btn" onclick="document.getElementById('batchExportModal')?.remove()">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="export-stepper">
+                        <div class="export-step active" data-step="1">1. Review</div>
+                        <div class="export-step" data-step="2">2. Compose</div>
+                        <div class="export-step" data-step="3">3. Destination</div>
+                    </div>
+                    <div class="export-body" id="exportModalBody"></div>
+                    <div class="export-btn-row">
+                        <button class="btn btn-secondary" id="exportPrevBtn" style="display:none">Back</button>
+                        <button class="btn btn-primary" id="exportNextBtn">Next</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            // State
+            let currentStep = 1;
+            const exportState = {
+                projects: projectDetails.map(p => ({
+                    projectId: p.id,
+                    title: p.marketingTitle || p.name,
+                    description: p.marketingDescription || '',
+                    assets: [
+                        { type: 'video', include: !!p.videoPath },
+                        { type: 'grid', include: p.hasFrames },
+                        { type: 'frames', include: false },
+                        { type: 'visualization', include: false },
+                    ]
+                })),
+                destination: { type: 'notion', config: {} },
+                document: null, // loaded in compose step
+            };
+
+            function renderStep(step) {
+                currentStep = step;
+                const body = document.getElementById('exportModalBody');
+                const prevBtn = document.getElementById('exportPrevBtn');
+                const nextBtn = document.getElementById('exportNextBtn');
+
+                // Update stepper
+                modal.querySelectorAll('.export-step').forEach(s => {
+                    const sNum = parseInt(s.dataset.step);
+                    s.classList.toggle('active', sNum === step);
+                    s.classList.toggle('done', sNum < step);
+                });
+
+                prevBtn.style.display = step > 1 ? '' : 'none';
+                nextBtn.textContent = step === 3 ? 'Export' : 'Next';
+
+                if (step === 1) renderReviewStep(body);
+                else if (step === 2) renderComposeStep(body);
+                else if (step === 3) renderDestinationStep(body);
+            }
+
+            // Fetch active LLM provider name for display
+            let activeProviderLabel = 'AI';
+            (async () => {
+                try {
+                    const resp = await fetch('/api/settings/llm');
+                    const s = await resp.json();
+                    const pref = s.preferredProvider || 'auto';
+                    if (pref === 'anthropic' || (pref === 'auto' && s.anthropicApiKey)) {
+                        activeProviderLabel = s.anthropicModel || 'Claude';
+                    } else if (pref === 'openai' || (pref === 'auto' && s.openaiApiKey)) {
+                        activeProviderLabel = s.openaiModel || 'GPT';
+                    } else if (pref === 'ollama') {
+                        activeProviderLabel = s.ollamaModel || 'Ollama';
+                    } else if (pref === 'claude-cli') {
+                        activeProviderLabel = 'Claude CLI';
+                    }
+                    // Update buttons if already rendered
+                    modal.querySelectorAll('.export-regen-btn .provider-name').forEach(el => {
+                        el.textContent = activeProviderLabel;
+                    });
+                } catch { /* ignore */ }
+            })();
+
+            function renderReviewStep(body) {
+                body.innerHTML = projectDetails.map((p, i) => {
+                    const thumbUrl = p.thumbnailPath ? `/api/file?path=${encodeURIComponent(p.thumbnailPath)}` : '';
+                    return `
+                        <div class="export-project-row">
+                            <div class="export-project-thumb">
+                                ${thumbUrl ? `<img src="${thumbUrl}" alt="">` : ''}
+                            </div>
+                            <div class="export-project-fields">
+                                <div class="export-field">
+                                    <label>Title</label>
+                                    <input type="text" value="${(exportState.projects[i].title || '').replace(/"/g, '&quot;')}" data-idx="${i}" data-field="title">
+                                </div>
+                                <div class="export-field" style="position: relative;">
+                                    <label style="display: flex; align-items: center; gap: 6px;">
+                                        Description
+                                        <button class="export-regen-btn" data-idx="${i}" style="display: flex; align-items: center; gap: 3px;">
+                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 6v6l4 2"/></svg>
+                                            <span class="provider-name">${activeProviderLabel}</span>
+                                        </button>
+                                    </label>
+                                    <div style="position: relative;">
+                                        <textarea rows="2" data-idx="${i}" data-field="description">${exportState.projects[i].description || ''}</textarea>
+                                        <div class="export-ai-progress" data-idx="${i}" style="display: none; position: absolute; top: 6px; right: 6px; font-size: 9px; color: var(--accent); background: var(--bg-primary); padding: 2px 6px; border-radius: 10px; border: 1px solid var(--border); align-items: center; gap: 3px;">
+                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation: spin 1s linear infinite;"><path d="M12 2a10 10 0 1 0 10 10"/></svg>
+                                            <span class="provider-name">${activeProviderLabel}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Add spin keyframe if not exists
+                if (!document.getElementById('exportSpinStyle')) {
+                    const style = document.createElement('style');
+                    style.id = 'exportSpinStyle';
+                    style.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
+                    document.head.appendChild(style);
+                }
+
+                // Bind input changes
+                body.querySelectorAll('input[data-field], textarea[data-field]').forEach(el => {
+                    el.addEventListener('input', () => {
+                        const idx = parseInt(el.dataset.idx);
+                        exportState.projects[idx][el.dataset.field] = el.value;
+                    });
+                });
+
+                // Bind AI regenerate buttons
+                body.querySelectorAll('.export-regen-btn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        const idx = parseInt(btn.dataset.idx);
+                        const pid = projectDetails[idx].id;
+                        const progressEl = body.querySelector(`.export-ai-progress[data-idx="${idx}"]`);
+                        const textarea = body.querySelector(`textarea[data-idx="${idx}"]`);
+                        btn.style.opacity = '0.4';
+                        btn.disabled = true;
+                        if (progressEl) progressEl.style.display = 'flex';
+                        if (textarea) textarea.style.opacity = '0.5';
+                        try {
+                            const resp = await fetch('/api/ai/marketing-description', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ projectId: pid })
+                            });
+                            const data = await resp.json();
+                            if (data.success) {
+                                exportState.projects[idx].description = data.marketingDescription;
+                                if (data.marketingTitle) exportState.projects[idx].title = data.marketingTitle;
+                                renderStep(1);
+                            } else {
+                                showToast(data.error || 'Failed to generate', 'error');
+                            }
+                        } catch {
+                            showToast('Failed to generate description', 'error');
+                        } finally {
+                            btn.style.opacity = '';
+                            btn.disabled = false;
+                            if (progressEl) progressEl.style.display = 'none';
+                            if (textarea) textarea.style.opacity = '';
+                        }
+                    });
+                });
+            }
+
+            async function renderComposeStep(body) {
+                // Load documents for ALL projects
+                if (!exportState.documents) {
+                    body.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 12px;">Loading documents...</div>';
+                    exportState.documents = {};
+                    for (const p of projectDetails) {
+                        try {
+                            const resp = await fetch(`/api/export/document/${p.id}`);
+                            const data = await resp.json();
+                            if (data.success) exportState.documents[p.id] = data.document;
+                        } catch { /* skip */ }
+                        if (!exportState.documents[p.id]) {
+                            exportState.documents[p.id] = {
+                                title: p.marketingTitle || p.name,
+                                sections: [
+                                    { type: 'callout', text: p.marketingTitle || p.name, color: 'purple' },
+                                    { type: 'paragraph', text: p.marketingDescription || '' },
+                                ],
+                            };
+                        }
+                    }
+                    // Also set first doc as exportState.document for backward compat
+                    exportState.document = exportState.documents[projectDetails[0].id];
+                }
+
+                if (!exportState._activeComposeProject) {
+                    exportState._activeComposeProject = projectDetails[0].id;
+                }
+                const activeId = exportState._activeComposeProject;
+                const doc = exportState.documents[activeId];
+                if (!doc) return;
+
+                const sectionLabels = {
+                    callout: 'Header', paragraph: 'Description', divider: 'Divider',
+                    links: 'Links', 'image-gallery': 'Screenshots', image: 'Image',
+                    video: 'Video', gif: 'Interactive', grid: 'Grid', markdown: 'Analysis', heading: 'Heading',
+                };
+
+                function renderSection(section, idx) {
+                    const label = sectionLabels[section.type] || section.type;
+                    let preview = '';
+
+                    switch (section.type) {
+                        case 'callout':
+                            preview = `<input type="text" class="compose-edit" data-section="${idx}" data-field="text" value="${(section.text || '').replace(/"/g, '&quot;')}" style="width: 100%; padding: 6px 8px; background: rgba(147,51,234,0.08); border-left: 3px solid rgba(147,51,234,0.4); border-radius: 4px; font-size: 12px; font-weight: 600; border: none; color: var(--text-primary); outline: none;">`;
+                            break;
+                        case 'paragraph':
+                            preview = `<textarea class="compose-edit" data-section="${idx}" data-field="text" rows="2" style="width: 100%; font-size: 11px; color: var(--text-secondary); line-height: 1.5; background: transparent; border: 1px solid transparent; border-radius: 4px; resize: vertical; padding: 4px 6px; outline: none; font-family: inherit;" onfocus="this.style.borderColor='var(--border)'" onblur="this.style.borderColor='transparent'">${section.text || ''}</textarea>`;
+                            break;
+                        case 'divider':
+                            preview = '<hr style="border: none; border-top: 1px solid var(--border); margin: 2px 0;">';
+                            break;
+                        case 'links':
+                            preview = (section.items || []).map(l =>
+                                `<a href="${l.url}" target="_blank" style="font-size: 10px; padding: 2px 6px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 4px; display: inline-flex; align-items: center; gap: 3px; margin: 1px; color: var(--accent); text-decoration: none;">${l.linkType} ${(l.label || '').slice(0, 25)}</a>`
+                            ).join(' ') || '<span style="font-size: 10px; opacity: 0.4;">No links</span>';
+                            break;
+                        case 'image-gallery': {
+                            const imgs = section.images || [];
+                            const selectedCount = imgs.filter(i => i.selected !== false).length;
+                            preview = `
+                                <div style="display: flex; gap: 4px; overflow-x: auto; padding: 4px 0;">
+                                    ${imgs.map((img, j) => `
+                                        <div class="compose-thumb" data-section="${idx}" data-img="${j}"
+                                             style="width: 48px; height: 80px; border-radius: 4px; overflow: hidden;
+                                                    border: 2px solid ${img.selected !== false ? 'var(--accent)' : 'var(--border)'};
+                                                    cursor: pointer; flex-shrink: 0;
+                                                    opacity: ${img.selected !== false ? '1' : '0.3'};
+                                                    transition: all 0.15s;">
+                                            <img src="/api/file?path=${encodeURIComponent(img.path)}" style="width: 100%; height: 100%; object-fit: cover;" loading="lazy">
+                                        </div>
+                                    `).join('')}
+                                </div>
+                                <div style="font-size: 9px; color: var(--text-muted); margin-top: 3px;">${selectedCount} of ${imgs.length} selected - click to toggle</div>
+                            `;
+                            break;
+                        }
+                        case 'video': {
+                            const videoUrl = section.path ? `/api/file?path=${encodeURIComponent(section.path)}` : '';
+                            const dur = section.duration ? `${Math.floor(section.duration / 60)}:${String(Math.floor(section.duration % 60)).padStart(2, '0')}` : '';
+                            preview = videoUrl ? `
+                                <div style="border-radius: 6px; overflow: hidden; background: #000; max-height: 120px;">
+                                    <video src="${videoUrl}" style="width: 100%; max-height: 120px; object-fit: contain;" controls preload="metadata"></video>
+                                </div>
+                                ${dur ? `<div style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">${section.path?.includes('template-') ? 'Template render' : 'Original recording'} (${dur})</div>` : ''}
+                            ` : '<div style="font-size: 10px; opacity: 0.4;">No video</div>';
+                            break;
+                        }
+                        case 'gif': {
+                            const tplId = section.templateId || 'flow-diagram';
+                            preview = `
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <select class="compose-edit" data-section="${idx}" data-field="templateId" style="font-size: 10px; padding: 3px 6px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary);">
+                                        <option value="flow-diagram" ${tplId === 'flow-diagram' ? 'selected' : ''}>Flow Diagram</option>
+                                        <option value="device-showcase" ${tplId === 'device-showcase' ? 'selected' : ''}>Device Showcase</option>
+                                        <option value="metrics-dashboard" ${tplId === 'metrics-dashboard' ? 'selected' : ''}>Metrics Dashboard</option>
+                                        <option value="app-flow-map" ${tplId === 'app-flow-map' ? 'selected' : ''}>App Flow Map</option>
+                                    </select>
+                                    <span style="font-size: 9px; color: var(--text-muted);">Exported as GIF</span>
+                                </div>
+                            `;
+                            break;
+                        }
+                        case 'markdown': {
+                            const lines = (section.content || '').split('\n').filter(l => l.trim()).slice(0, 4);
+                            preview = `<div style="font-size: 10px; color: var(--text-muted); padding: 4px 8px; background: var(--bg-primary); border-radius: 4px; max-height: 60px; overflow: hidden; line-height: 1.5;">
+                                ${section.label ? `<div style="font-weight: 600; margin-bottom: 2px;">${section.label}</div>` : ''}
+                                ${lines.map(l => `<div>${l.replace(/^#+\s/, '').slice(0, 60)}</div>`).join('')}
+                                ${(section.content || '').split('\n').length > 4 ? '<div style="opacity: 0.4;">...</div>' : ''}
+                            </div>`;
+                            break;
+                        }
+                        default:
+                            preview = `<div style="font-size: 10px; opacity: 0.4;">${section.type}</div>`;
+                    }
+
+                    return `
+                        <div class="compose-section" data-idx="${idx}" style="padding: 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 4px;">
+                            <div style="display: flex; align-items: center; gap: 4px; margin-bottom: 4px;">
+                                <div style="display: flex; flex-direction: column; gap: 0;">
+                                    ${idx > 0 ? `<button class="compose-move" data-idx="${idx}" data-dir="up" style="background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0; font-size: 8px; line-height: 1;">&#9650;</button>` : '<span style="width:8px;"></span>'}
+                                    ${idx < doc.sections.length - 1 ? `<button class="compose-move" data-idx="${idx}" data-dir="down" style="background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0; font-size: 8px; line-height: 1;">&#9660;</button>` : ''}
+                                </div>
+                                <span style="font-size: 9px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">${label}</span>
+                                <button class="compose-remove" data-idx="${idx}" style="margin-left: auto; background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 2px; font-size: 11px; opacity: 0.5;">&times;</button>
+                            </div>
+                            ${preview}
+                        </div>
+                    `;
+                }
+
+                // Project tabs (if multiple)
+                const tabs = projectDetails.length > 1 ? `
+                    <div style="display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 8px; overflow-x: auto;">
+                        ${projectDetails.map(p => `
+                            <button class="compose-tab" data-pid="${p.id}" style="padding: 6px 12px; font-size: 11px; border: none; background: none; cursor: pointer; color: ${p.id === activeId ? 'var(--accent)' : 'var(--text-muted)'}; border-bottom: 2px solid ${p.id === activeId ? 'var(--accent)' : 'transparent'}; white-space: nowrap; transition: all 0.15s;">
+                                ${(p.marketingTitle || p.name).slice(0, 20)}
+                            </button>
+                        `).join('')}
+                    </div>
+                ` : '';
+
+                body.innerHTML = `
+                    ${tabs}
+                    <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 6px;">Page preview - reorder, remove, or select frames</div>
+                    <div id="composeSections">
+                        ${doc.sections.map((s, i) => renderSection(s, i)).join('')}
+                    </div>
+                `;
+
+                // Tab switching
+                body.querySelectorAll('.compose-tab').forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        exportState._activeComposeProject = tab.dataset.pid;
+                        renderComposeStep(body);
+                    });
+                });
+
+                // Frame selection toggle
+                body.querySelectorAll('.compose-thumb').forEach(thumb => {
+                    thumb.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const sIdx = parseInt(thumb.dataset.section);
+                        const iIdx = parseInt(thumb.dataset.img);
+                        const section = doc.sections[sIdx];
+                        if (section.type === 'image-gallery') {
+                            const img = section.images[iIdx];
+                            img.selected = img.selected === false ? true : false;
+                            renderComposeStep(body);
+                        }
+                    });
+                });
+
+                // Move sections
+                body.querySelectorAll('.compose-move').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const idx = parseInt(btn.dataset.idx);
+                        const dir = btn.dataset.dir;
+                        const targetIdx = dir === 'up' ? idx - 1 : idx + 1;
+                        if (targetIdx < 0 || targetIdx >= doc.sections.length) return;
+                        [doc.sections[idx], doc.sections[targetIdx]] = [doc.sections[targetIdx], doc.sections[idx]];
+                        renderComposeStep(body);
+                    });
+                });
+
+                // Remove sections
+                body.querySelectorAll('.compose-remove').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        doc.sections.splice(parseInt(btn.dataset.idx), 1);
+                        renderComposeStep(body);
+                    });
+                });
+
+                // Inline edit sync (inputs, textareas, selects)
+                body.querySelectorAll('.compose-edit').forEach(el => {
+                    const handler = () => {
+                        const sIdx = parseInt(el.dataset.section);
+                        const field = el.dataset.field;
+                        if (doc.sections[sIdx] && field) {
+                            doc.sections[sIdx][field] = el.value;
+                        }
+                    };
+                    el.addEventListener('input', handler);
+                    el.addEventListener('change', handler);
+                });
+            }
+
+            async function renderDestinationStep(body) {
+                const destinations = [
+                    { type: 'notion', label: 'Notion', desc: 'Create pages in Notion' },
+                    { type: 'local', label: 'Local Download', desc: 'Save files locally' },
+                ];
+
+                body.innerHTML = `
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">Where to export:</div>
+                    <div class="export-dest-grid">
+                        ${destinations.map(d => `
+                            <div class="export-dest-card ${exportState.destination.type === d.type ? 'selected' : ''}" data-dest="${d.type}">
+                                <div class="dest-label">${d.label}</div>
+                                <div class="dest-desc">${d.desc}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div id="notionConfigArea" style="display: ${exportState.destination.type === 'notion' ? 'block' : 'none'}; margin-top: 12px;">
+                        <div id="notionStatusArea" style="margin-bottom: 8px;">
+                            <span style="font-size: 11px; color: var(--text-muted);">Checking Notion connection...</span>
+                        </div>
+                        <div id="notionTokenArea" style="display: none; margin-bottom: 10px;">
+                            <label style="display: block; font-size: 10px; font-weight: 500; color: var(--text-muted); margin-bottom: 3px;">Notion Integration Token</label>
+                            <div style="display: flex; gap: 6px;">
+                                <input type="password" id="notionTokenInput" placeholder="ntn_..." style="flex: 1; padding: 6px 8px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 12px;">
+                                <button class="btn btn-primary" id="notionSaveTokenBtn" style="font-size: 11px; padding: 6px 10px;">Connect</button>
+                            </div>
+                            <div style="font-size: 10px; color: var(--text-muted); margin-top: 3px;">
+                                Create at <a href="https://www.notion.so/my-integrations" target="_blank" style="color: var(--accent);">notion.so/my-integrations</a> → give it page access
+                            </div>
+                        </div>
+                        <div id="notionPagePickerArea" style="display: none;">
+                            <label style="display: block; font-size: 10px; font-weight: 500; color: var(--text-muted); margin-bottom: 3px;">Parent Page</label>
+                            <div style="display: flex; gap: 6px; margin-bottom: 6px;">
+                                <input type="text" id="notionPageSearch" placeholder="Search pages..." style="flex: 1; padding: 6px 8px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 12px;">
+                            </div>
+                            <div id="notionPageList" style="max-height: 150px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary);"></div>
+                        </div>
+                    </div>
+                    <div class="export-progress" id="exportProgressArea" style="display: none;">
+                        <div class="export-progress-bar">
+                            <div class="export-progress-fill" id="exportProgressFill"></div>
+                        </div>
+                        <div class="export-progress-text" id="exportProgressText"></div>
+                    </div>
+                `;
+
+                // Destination card selection
+                body.querySelectorAll('.export-dest-card').forEach(card => {
+                    card.addEventListener('click', () => {
+                        body.querySelectorAll('.export-dest-card').forEach(c => c.classList.remove('selected'));
+                        card.classList.add('selected');
+                        exportState.destination.type = card.dataset.dest;
+                        const notionArea = document.getElementById('notionConfigArea');
+                        if (notionArea) notionArea.style.display = card.dataset.dest === 'notion' ? 'block' : 'none';
+                    });
+                });
+
+                // Check Notion connection
+                if (exportState.destination.type === 'notion') {
+                    await loadNotionStatus();
+                }
+
+                async function loadNotionStatus() {
+                    const statusArea = document.getElementById('notionStatusArea');
+                    const tokenArea = document.getElementById('notionTokenArea');
+                    const pagePickerArea = document.getElementById('notionPagePickerArea');
+
+                    try {
+                        const resp = await fetch('/api/notion/status');
+                        const status = await resp.json();
+
+                        if (status.connected) {
+                            statusArea.innerHTML = `
+                                <div style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--bg-tertiary); border-radius: 20px; font-size: 11px;">
+                                    <div style="width: 6px; height: 6px; border-radius: 50%; background: var(--success, #22c55e);"></div>
+                                    Connected as ${status.name || 'Integration'}
+                                    <button style="background: none; border: none; color: var(--accent); font-size: 10px; cursor: pointer; padding: 0;" id="notionChangeTokenBtn">Change</button>
+                                </div>
+                            `;
+                            tokenArea.style.display = 'none';
+                            pagePickerArea.style.display = 'block';
+
+                            document.getElementById('notionChangeTokenBtn')?.addEventListener('click', () => {
+                                tokenArea.style.display = 'block';
+                            });
+
+                            // Load pages
+                            await searchNotionPages('');
+                        } else {
+                            statusArea.innerHTML = `
+                                <div style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--bg-tertiary); border-radius: 20px; font-size: 11px; color: var(--text-secondary);">
+                                    <div style="width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted);"></div>
+                                    Not connected
+                                </div>
+                            `;
+                            tokenArea.style.display = 'block';
+                            pagePickerArea.style.display = 'none';
+                        }
+                    } catch {
+                        statusArea.innerHTML = '<span style="font-size: 11px; color: var(--error);">Failed to check status</span>';
+                        tokenArea.style.display = 'block';
+                    }
+                }
+
+                // Save token
+                document.getElementById('notionSaveTokenBtn')?.addEventListener('click', async () => {
+                    const input = document.getElementById('notionTokenInput');
+                    const token = input?.value?.trim();
+                    if (!token) return;
+
+                    const btn = document.getElementById('notionSaveTokenBtn');
+                    btn.textContent = 'Connecting...';
+                    btn.disabled = true;
+
+                    try {
+                        await fetch('/api/settings/notion', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ apiToken: token }),
+                        });
+                        await loadNotionStatus();
+                        showToast('Notion connected', 'success');
+                    } catch {
+                        showToast('Failed to connect', 'error');
+                    } finally {
+                        btn.textContent = 'Connect';
+                        btn.disabled = false;
+                    }
+                });
+
+                // Page search
+                let searchDebounce;
+                document.getElementById('notionPageSearch')?.addEventListener('input', (e) => {
+                    clearTimeout(searchDebounce);
+                    searchDebounce = setTimeout(() => searchNotionPages(e.target.value), 300);
+                });
+
+                async function searchNotionPages(query) {
+                    const listEl = document.getElementById('notionPageList');
+                    if (!listEl) return;
+                    listEl.innerHTML = '<div style="padding: 8px; font-size: 11px; color: var(--text-muted);">Searching...</div>';
+
+                    try {
+                        const resp = await fetch(`/api/notion/search?q=${encodeURIComponent(query)}`);
+                        const data = await resp.json();
+
+                        if (!data.success || !data.pages?.length) {
+                            listEl.innerHTML = '<div style="padding: 8px; font-size: 11px; color: var(--text-muted);">No pages found. Make sure to share pages with your integration.</div>';
+                            return;
+                        }
+
+                        const selectedId = exportState.destination.config?.parentPageId;
+                        listEl.innerHTML = data.pages.map(p => `
+                            <div class="notion-page-item" data-page-id="${p.id}" data-page-title="${(p.title || '').replace(/"/g, '&quot;')}"
+                                style="padding: 8px 10px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 12px;
+                                       border-bottom: 1px solid var(--border); transition: background 0.15s;
+                                       ${p.id === selectedId ? 'background: color-mix(in srgb, var(--accent) 15%, transparent);' : ''}">
+                                <span style="font-size: 14px;">${p.icon || '\u{1F4C4}'}</span>
+                                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.title}</span>
+                                ${p.id === selectedId ? '<span style="margin-left: auto; font-size: 10px; color: var(--accent);">Selected</span>' : ''}
+                            </div>
+                        `).join('');
+
+                        listEl.querySelectorAll('.notion-page-item').forEach(item => {
+                            item.addEventListener('click', () => {
+                                const pageId = item.dataset.pageId;
+                                const pageTitle = item.dataset.pageTitle;
+                                exportState.destination.config = {
+                                    ...exportState.destination.config,
+                                    parentPageId: pageId,
+                                    template: 'marketing',
+                                };
+
+                                // Visual feedback
+                                listEl.querySelectorAll('.notion-page-item').forEach(i => {
+                                    i.style.background = '';
+                                    i.querySelector('span:last-child')?.remove();
+                                });
+                                item.style.background = 'color-mix(in srgb, var(--accent) 15%, transparent)';
+                                const badge = document.createElement('span');
+                                badge.style.cssText = 'margin-left: auto; font-size: 10px; color: var(--accent);';
+                                badge.textContent = 'Selected';
+                                item.appendChild(badge);
+
+                                // Persist selection
+                                fetch('/api/settings/notion', {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ lastParentPageId: pageId, lastParentPageTitle: pageTitle }),
+                                }).catch(() => {});
+                            });
+
+                            // Hover effect
+                            item.addEventListener('mouseenter', () => {
+                                if (item.dataset.pageId !== exportState.destination.config?.parentPageId) {
+                                    item.style.background = 'var(--bg-tertiary)';
+                                }
+                            });
+                            item.addEventListener('mouseleave', () => {
+                                if (item.dataset.pageId !== exportState.destination.config?.parentPageId) {
+                                    item.style.background = '';
+                                }
+                            });
+                        });
+                    } catch (err) {
+                        listEl.innerHTML = `<div style="padding: 8px; font-size: 11px; color: var(--error);">${err.message || 'Search failed'}</div>`;
+                    }
+                }
+            }
+
+            async function executeExport() {
+                const nextBtn = document.getElementById('exportNextBtn');
+                nextBtn.textContent = 'Exporting...';
+                nextBtn.disabled = true;
+
+                const progressArea = document.getElementById('exportProgressArea');
+                const progressFill = document.getElementById('exportProgressFill');
+                const progressText = document.getElementById('exportProgressText');
+                if (progressArea) progressArea.style.display = '';
+
+                const updateProgress = (pct, text) => {
+                    if (progressFill) progressFill.style.width = `${pct}%`;
+                    if (progressText) progressText.textContent = text || '';
+                };
+
+                // Listen for WebSocket progress
+                const originalWsHandler = window._batchExportProgressHandler;
+                window._batchExportProgressHandler = (data) => updateProgress(data.percent || 0, data.detail || '');
+
+                try {
+                    const isNotion = exportState.destination.type === 'notion';
+                    const docs = exportState.documents || {};
+                    const hasDocuments = Object.keys(docs).length > 0;
+                    const parentPageId = exportState.destination.config?.parentPageId;
+
+                    if (isNotion && hasDocuments && parentPageId) {
+                        // Use new Notion API document export
+                        let successCount = 0;
+                        const totalProjects = projectDetails.length;
+
+                        for (let i = 0; i < totalProjects; i++) {
+                            const p = projectDetails[i];
+                            updateProgress(Math.round((i / totalProjects) * 100), `Creating page ${i + 1}/${totalProjects}: ${p.marketingTitle || p.name}`);
+
+                            // Use the per-project document (already customized in compose step)
+                            const doc = docs[p.id] || exportState.document;
+                            if (!doc) continue;
+
+                            // Update title/description from step 1
+                            doc.title = exportState.projects[i]?.title || doc.title;
+                            const descSection = doc.sections.find(s => s.type === 'paragraph');
+                            if (descSection) descSection.text = exportState.projects[i]?.description || descSection.text;
+
+                            const resp = await fetch('/api/export/notion-page', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ document: doc, parentPageId }),
+                            });
+                            const result = await resp.json();
+
+                            if (result.success) {
+                                successCount++;
+                                if (result.pageUrl && totalProjects === 1) {
+                                    window.open(result.pageUrl, '_blank');
+                                }
+                            }
+                        }
+
+                        updateProgress(100, 'Done');
+                        if (successCount > 0) {
+                            showToast(`Created ${successCount} Notion page${successCount > 1 ? 's' : ''}`, 'success');
+                            document.getElementById('batchExportModal')?.remove();
+                            exitSelectMode();
+                            loadProjects();
+                        } else {
+                            showToast('Export failed', 'error');
+                        }
+                    } else {
+                        // Fallback to batch pipeline for non-Notion or no document
+                        const resp = await fetch('/api/export/batch', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(exportState)
+                        });
+                        const result = await resp.json();
+
+                        if (result.success || (result.results && result.results.some(r => r.success))) {
+                            const successCount = result.results?.filter(r => r.success).length || 0;
+                            showToast(`Exported ${successCount} project${successCount > 1 ? 's' : ''} successfully`, 'success');
+                            const urls = (result.results || []).filter(r => r.destinationUrl).map(r => r.destinationUrl);
+                            if (urls.length === 1) window.open(urls[0], '_blank');
+                            document.getElementById('batchExportModal')?.remove();
+                            exitSelectMode();
+                            loadProjects();
+                        } else {
+                            showToast(result.errors?.join(', ') || result.error || 'Export failed', 'error');
+                        }
+                    }
+                } catch (err) {
+                    showToast('Export failed: ' + (err.message || 'Unknown error'), 'error');
+                } finally {
+                    nextBtn.textContent = 'Export';
+                    nextBtn.disabled = false;
+                    window._batchExportProgressHandler = originalWsHandler;
+                }
+            }
+
+            // Navigation
+            document.getElementById('exportNextBtn').addEventListener('click', () => {
+                if (currentStep < 3) {
+                    renderStep(currentStep + 1);
+                } else {
+                    executeExport();
+                }
+            });
+
+            document.getElementById('exportPrevBtn').addEventListener('click', () => {
+                if (currentStep > 1) renderStep(currentStep - 1);
+            });
+
+            // Click on stepper to navigate
+            modal.querySelectorAll('.export-step').forEach(s => {
+                s.addEventListener('click', () => {
+                    const step = parseInt(s.dataset.step);
+                    if (step <= currentStep + 1) renderStep(step);
+                });
+            });
+
+            // Initialize
+            renderStep(1);
+        }
 
         document.getElementById('deleteSelectedBtn').addEventListener('click', async () => {
             if (selectedProjects.size === 0) return;
@@ -11447,6 +12259,11 @@
 
         document.getElementById('refreshProjects').addEventListener('click', loadProjects);
         document.getElementById('importProjectsBtn')?.addEventListener('click', openImportPicker);
+
+        document.getElementById('exportSelectedBtn').addEventListener('click', () => {
+            if (selectedProjects.size === 0) return;
+            openBatchExportModal([...selectedProjects]);
+        });
 
         // Delete all projects
         document.getElementById('deleteAllProjects').addEventListener('click', async () => {
@@ -11576,7 +12393,12 @@
                 <div class="analysis-grid">
                     <!-- Project Info Card -->
                     <div class="card analysis-info-card">
-                        <div class="card-title">${currentProject.name}</div>
+                        <div class="card-title" id="projectTitleEditable" style="cursor: pointer; display: flex; align-items: center; gap: 6px;" title="Click to edit">
+                            <span id="projectTitleText">${currentProject.name}</span>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.3; flex-shrink: 0;">
+                                <path d="M17 3a2.85 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5z"/>
+                            </svg>
+                        </div>
                         <div class="analysis-stats">
                             ${hasVideo ? `<span class="stat"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Video</span>` : ''}
                             ${hasFrames ? `<span class="stat"><strong>${currentProject.frames.length}</strong> screenshots</span>` : ''}
@@ -11760,6 +12582,47 @@
                         </div>
                     ` : ''}
 
+                    ${(currentProject.status === 'analyzed' || currentProject.aiSummary) && (currentProject.frameCount > 0 || (currentProject.frames && currentProject.frames.length > 0)) ? `
+                        <div class="analysis-section">
+                            <div class="analysis-section-title" style="display: flex; align-items: center; justify-content: space-between;">
+                                <span>Interactive Visualizations</span>
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <select id="vizTemplateSelect" style="font-size: 11px; padding: 3px 8px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary);">
+                                        <option value="flow-diagram">Flow Diagram</option>
+                                        <option value="device-showcase">Device Showcase</option>
+                                        <option value="metrics-dashboard">Metrics Dashboard</option>
+                                        <option value="app-flow-map">App Flow Map</option>
+                                    </select>
+                                    <button class="icon-btn" id="vizDownloadInlineBtn" title="Download PNG" style="width: 28px; height: 28px; font-size: 9px; font-weight: 600;">
+                                        PNG
+                                    </button>
+                                    <button class="icon-btn" id="vizDownloadGifInlineBtn" title="Download GIF (animated)" style="width: 28px; height: 28px; font-size: 9px; font-weight: 600;">
+                                        GIF
+                                    </button>
+                                    <button class="icon-btn" id="vizFullscreenBtn" title="Fullscreen" style="width: 28px; height: 28px;">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="vizContainer" style="border-radius: 12px; overflow: hidden; border: 1px solid var(--border); margin-top: 8px; position: relative;">
+                                <div id="vizLoadingOverlay" style="position: absolute; inset: 0; background: #0f0f23; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 2; transition: opacity 0.3s;">
+                                    <div style="width: 200px; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; margin-bottom: 10px;">
+                                        <div id="vizLoadingBar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #6366f1, #818cf8); border-radius: 3px; transition: width 0.5s;"></div>
+                                    </div>
+                                    <div id="vizLoadingText" style="font-size: 11px; color: rgba(255,255,255,0.35);">Loading visualization...</div>
+                                    <div id="vizLoadingModel" style="font-size: 9px; color: rgba(255,255,255,0.2); margin-top: 4px;"></div>
+                                </div>
+                                <iframe id="vizIframe"
+                                    src="/api/visualization/${currentProject.id}/flow-diagram"
+                                    style="width: 100%; height: 400px; border: none; background: #0f0f23;"
+                                    sandbox="allow-scripts allow-same-origin"
+                                ></iframe>
+                            </div>
+                        </div>
+                    ` : ''}
+
                     ${currentProject.ocrText ? `
                         <div class="analysis-section">
                             <div class="analysis-section-title">OCR Text</div>
@@ -11772,6 +12635,166 @@
                     ` : ''}
                 </div>
             `;
+
+            // Setup project title inline edit
+            document.getElementById('projectTitleEditable')?.addEventListener('click', () => {
+                const titleEl = document.getElementById('projectTitleEditable');
+                const textEl = document.getElementById('projectTitleText');
+                if (!titleEl || !textEl || titleEl.querySelector('input')) return;
+
+                const currentName = currentProject.name || '';
+                const pencilSvg = titleEl.querySelector('svg');
+                if (pencilSvg) pencilSvg.style.display = 'none';
+
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.value = currentName;
+                input.style.cssText = 'flex: 1; background: var(--bg-primary); border: 1px solid var(--accent); border-radius: 4px; color: var(--text-primary); font-size: inherit; font-weight: inherit; padding: 2px 6px; outline: none;';
+                textEl.replaceWith(input);
+                input.focus();
+                input.select();
+
+                const save = async () => {
+                    const newName = input.value.trim();
+                    if (newName && newName !== currentName) {
+                        try {
+                            await fetch(`/api/projects/${currentProject.id}`, {
+                                method: 'PATCH',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ name: newName, marketingTitle: newName }),
+                            });
+                            currentProject.name = newName;
+                            // Update in projects list too
+                            const p = projects.find(pr => pr.id === currentProject.id);
+                            if (p) p.name = newName;
+                            renderProjects();
+                            showToast('Title updated', 'success');
+                        } catch { showToast('Failed to update title', 'error'); }
+                    }
+                    const span = document.createElement('span');
+                    span.id = 'projectTitleText';
+                    span.textContent = newName || currentName;
+                    input.replaceWith(span);
+                    if (pencilSvg) pencilSvg.style.display = '';
+                };
+
+                input.addEventListener('blur', save);
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+                    if (e.key === 'Escape') { input.value = currentName; input.blur(); }
+                });
+            });
+
+            // Setup visualization template switcher + fullscreen + loading
+            const vizSelect = document.getElementById('vizTemplateSelect');
+            const vizIframe = document.getElementById('vizIframe');
+            const vizOverlay = document.getElementById('vizLoadingOverlay');
+            const vizBar = document.getElementById('vizLoadingBar');
+            const vizLoadText = document.getElementById('vizLoadingText');
+            const vizLoadModel = document.getElementById('vizLoadingModel');
+
+            function showVizLoading(templateId) {
+                if (!vizOverlay) return;
+                vizOverlay.style.display = 'flex';
+                vizOverlay.style.opacity = '1';
+                if (vizBar) vizBar.style.width = '0%';
+
+                const isAiTemplate = templateId === 'app-flow-map';
+                if (vizLoadText) vizLoadText.textContent = isAiTemplate ? 'AI analyzing flow...' : 'Loading...';
+
+                // Show model name
+                if (vizLoadModel && isAiTemplate) {
+                    vizLoadModel.textContent = globalProviderLabel || '';
+                } else if (vizLoadModel) {
+                    vizLoadModel.textContent = '';
+                }
+
+                // Animate progress bar
+                let pct = 0;
+                const interval = setInterval(() => {
+                    pct += isAiTemplate ? 2 : 8;
+                    if (pct > 90) { clearInterval(interval); return; }
+                    if (vizBar) vizBar.style.width = pct + '%';
+                    if (isAiTemplate && pct > 30 && vizLoadText) vizLoadText.textContent = 'Generating narrative...';
+                    if (isAiTemplate && pct > 60 && vizLoadText) vizLoadText.textContent = 'Building flow map...';
+                }, 300);
+
+                vizIframe._loadingInterval = interval;
+            }
+
+            function hideVizLoading() {
+                if (vizIframe?._loadingInterval) clearInterval(vizIframe._loadingInterval);
+                if (vizBar) vizBar.style.width = '100%';
+                setTimeout(() => {
+                    if (vizOverlay) { vizOverlay.style.opacity = '0'; setTimeout(() => { vizOverlay.style.display = 'none'; }, 300); }
+                }, 200);
+            }
+
+            if (vizIframe) {
+                vizIframe.addEventListener('load', hideVizLoading);
+                showVizLoading('flow-diagram');
+            }
+
+            if (vizSelect && vizIframe) {
+                vizSelect.addEventListener('change', () => {
+                    showVizLoading(vizSelect.value);
+                    vizIframe.src = `/api/visualization/${currentProject.id}/${vizSelect.value}`;
+                });
+            }
+            document.getElementById('vizFullscreenBtn')?.addEventListener('click', () => {
+                openVizFullscreen(currentProject.id, vizSelect?.value || 'flow-diagram');
+            });
+            document.getElementById('vizDownloadInlineBtn')?.addEventListener('click', async () => {
+                const btn = document.getElementById('vizDownloadInlineBtn');
+                btn.style.opacity = '0.4';
+                btn.disabled = true;
+                try {
+                    const resp = await fetch('/api/visualization/screenshot', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ projectId: currentProject.id, templateId: vizSelect?.value || 'flow-diagram', format: 'png' }),
+                    });
+                    const data = await resp.json();
+                    if (data.success && data.downloadUrl) {
+                        const a = document.createElement('a');
+                        a.href = data.downloadUrl;
+                        a.download = `viz-${vizSelect?.value || 'flow-diagram'}.png`;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        showToast('PNG downloaded', 'success');
+                    } else {
+                        showToast(data.error || 'Screenshot failed', 'error');
+                    }
+                } catch { showToast('Download failed', 'error'); }
+                finally { btn.style.opacity = ''; btn.disabled = false; }
+            });
+            document.getElementById('vizDownloadGifInlineBtn')?.addEventListener('click', async () => {
+                const btn = document.getElementById('vizDownloadGifInlineBtn');
+                btn.textContent = '...';
+                btn.style.opacity = '0.4';
+                btn.disabled = true;
+                try {
+                    const resp = await fetch('/api/visualization/screenshot', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ projectId: currentProject.id, templateId: vizSelect?.value || 'flow-diagram', format: 'gif' }),
+                    });
+                    const data = await resp.json();
+                    if (data.success && data.downloadUrl) {
+                        const a = document.createElement('a');
+                        a.href = data.downloadUrl;
+                        a.download = `viz-${vizSelect?.value || 'flow-diagram'}.${data.format || 'gif'}`;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        showToast(`${(data.format || 'gif').toUpperCase()} downloaded`, 'success');
+                    } else {
+                        showToast(data.error || 'GIF capture failed', 'error');
+                    }
+                } catch { showToast('Download failed', 'error'); }
+                finally { btn.textContent = 'GIF'; btn.style.opacity = ''; btn.disabled = false; }
+            });
 
             // Setup video drag and drop after DOM update
             setTimeout(setupVideoDragAndDrop, 0);
@@ -12644,6 +13667,108 @@
             }).catch(() => {
                 showToast('Failed to copy link', 'error');
             });
+        }
+
+        function openVizFullscreen(projectId, templateId) {
+            const existing = document.getElementById('vizFullscreenOverlay');
+            if (existing) existing.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'vizFullscreenOverlay';
+            overlay.style.cssText = 'position: fixed; inset: 0; z-index: 10000; background: #0f0f23; display: flex; flex-direction: column;';
+            overlay.innerHTML = `
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: rgba(0,0,0,0.3); border-bottom: 1px solid rgba(255,255,255,0.08);">
+                    <select id="vizFsTemplateSelect" style="font-size: 12px; padding: 5px 10px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; color: #fff;">
+                        <option value="flow-diagram" ${templateId === 'flow-diagram' ? 'selected' : ''}>Flow Diagram</option>
+                        <option value="device-showcase" ${templateId === 'device-showcase' ? 'selected' : ''}>Device Showcase</option>
+                        <option value="metrics-dashboard" ${templateId === 'metrics-dashboard' ? 'selected' : ''}>Metrics Dashboard</option>
+                        <option value="app-flow-map" ${templateId === 'app-flow-map' ? 'selected' : ''}>App Flow Map</option>
+                    </select>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <button id="vizFsDownloadPng" title="Download PNG" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: rgba(255,255,255,0.7); cursor: pointer; padding: 5px 10px; border-radius: 6px; font-size: 11px; display: flex; align-items: center; gap: 4px;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            PNG
+                        </button>
+                        <button id="vizFsDownloadGif" title="Download GIF (animated)" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: rgba(255,255,255,0.7); cursor: pointer; padding: 5px 10px; border-radius: 6px; font-size: 11px; display: flex; align-items: center; gap: 4px;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            GIF
+                        </button>
+                        <button style="background: none; border: none; color: rgba(255,255,255,0.6); cursor: pointer; padding: 6px; border-radius: 6px; display: flex; align-items: center;" id="vizFsCloseBtn" title="Close (Esc)">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <iframe id="vizFsIframe"
+                    src="/api/visualization/${projectId}/${templateId}"
+                    style="flex: 1; width: 100%; border: none; background: #0f0f23;"
+                    sandbox="allow-scripts allow-same-origin"
+                ></iframe>
+            `;
+            document.body.appendChild(overlay);
+
+            const fsIframe = document.getElementById('vizFsIframe');
+            const fsSelect = document.getElementById('vizFsTemplateSelect');
+
+            fsSelect.addEventListener('change', () => {
+                fsIframe.src = `/api/visualization/${projectId}/${fsSelect.value}`;
+                // Sync back to inline selector
+                const inlineSelect = document.getElementById('vizTemplateSelect');
+                if (inlineSelect) inlineSelect.value = fsSelect.value;
+                const inlineIframe = document.getElementById('vizIframe');
+                if (inlineIframe) inlineIframe.src = fsIframe.src;
+            });
+
+            document.getElementById('vizFsCloseBtn').addEventListener('click', () => overlay.remove());
+
+            // Download handlers
+            async function downloadViz(fmt) {
+                const btn = document.getElementById(fmt === 'gif' ? 'vizFsDownloadGif' : 'vizFsDownloadPng');
+                const origText = btn.textContent;
+                btn.textContent = fmt === 'gif' ? 'Capturing...' : 'Capturing...';
+                btn.disabled = true;
+                btn.style.opacity = '0.5';
+
+                try {
+                    const resp = await fetch('/api/visualization/screenshot', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            projectId,
+                            templateId: fsSelect.value,
+                            format: fmt,
+                        }),
+                    });
+                    const data = await resp.json();
+                    if (data.success && data.downloadUrl) {
+                        // Trigger download
+                        const a = document.createElement('a');
+                        a.href = data.downloadUrl;
+                        a.download = `viz-${fsSelect.value}.${data.format || fmt}`;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        showToast(`${(data.format || fmt).toUpperCase()} downloaded`, 'success');
+                    } else {
+                        showToast(data.error || 'Screenshot failed', 'error');
+                    }
+                } catch (err) {
+                    showToast('Download failed: ' + (err.message || 'Unknown error'), 'error');
+                } finally {
+                    btn.innerHTML = origText;
+                    btn.disabled = false;
+                    btn.style.opacity = '';
+                }
+            }
+
+            document.getElementById('vizFsDownloadPng').addEventListener('click', () => downloadViz('png'));
+            document.getElementById('vizFsDownloadGif').addEventListener('click', () => downloadViz('gif'));
+
+            const escHandler = (e) => {
+                if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); }
+            };
+            document.addEventListener('keydown', escHandler);
         }
 
         async function shareProjectVideo() {
@@ -15554,6 +16679,11 @@
                 case 'templateRenderProgress':
                 case 'templateRenderComplete':
                     handleTemplateWsMessage(data);
+                    break;
+                case 'batchExportProgress':
+                    if (window._batchExportProgressHandler) {
+                        window._batchExportProgressHandler(payload);
+                    }
                     break;
             }
         }
@@ -21139,6 +22269,14 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
         }
 
         function setupGridEventListeners() {
+            // Back button to return to project
+            document.getElementById('gridBackBtn')?.addEventListener('click', () => {
+                switchView('projects');
+                if (currentProject) {
+                    setTimeout(() => selectProject(currentProject.id), 100);
+                }
+            });
+
             // Aspect ratio buttons
             document.querySelectorAll('.aspect-btn').forEach(btn => {
                 btn.addEventListener('click', () => {
@@ -21664,16 +22802,58 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
             }
             previewAbortController = new AbortController();
 
-            // Only show skeleton on first load, otherwise keep current image
+            const isSmartLayout = ['flow-horizontal', 'flow-vertical', 'infographic'].includes(gridConfig.layout);
             const existingImg = canvas.querySelector('.grid-preview-img');
+
+            // Remove any previous loading overlay
+            canvas.querySelector('.grid-loading-overlay')?.remove();
+
             if (!existingImg) {
                 const aspectRatios = { '9:16': 0.5625, '1:1': 1, '16:9': 1.7778 };
                 const ratio = aspectRatios[gridConfig.aspectRatio] || 0.5625;
                 const skeletonHeight = Math.round(300 / ratio);
-                canvas.innerHTML = `<div class="grid-canvas-skeleton" style="width: 300px; height: ${skeletonHeight}px;"></div>`;
+                canvas.innerHTML = `
+                    <div class="grid-canvas-skeleton" style="width: 300px; height: ${skeletonHeight}px; position: relative;">
+                        ${isSmartLayout ? `
+                            <div style="position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+                                <div style="width: 140px; height: 4px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; margin-bottom: 8px;">
+                                    <div class="grid-loading-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #6366f1, #818cf8); border-radius: 2px; transition: width 0.4s;"></div>
+                                </div>
+                                <div class="grid-loading-text" style="font-size: 10px; color: var(--text-muted);">AI generating layout...</div>
+                                <div style="font-size: 9px; color: rgba(255,255,255,0.15); margin-top: 3px;">${globalProviderLabel || ''}</div>
+                            </div>
+                        ` : ''}
+                    </div>`;
             } else {
-                // Add loading indicator to existing image
-                existingImg.style.opacity = '0.7';
+                if (isSmartLayout) existingImg.style.opacity = '0.5';
+                // Add loading overlay on top of existing image
+                if (isSmartLayout) {
+                    const overlay = document.createElement('div');
+                    overlay.className = 'grid-loading-overlay';
+                    overlay.style.cssText = 'position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(0,0,0,0.4); border-radius: 8px; z-index: 2;';
+                    overlay.innerHTML = `
+                        <div style="width: 140px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; margin-bottom: 8px;">
+                            <div class="grid-loading-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #6366f1, #818cf8); border-radius: 2px; transition: width 0.4s;"></div>
+                        </div>
+                        <div class="grid-loading-text" style="font-size: 10px; color: rgba(255,255,255,0.7);">AI generating layout...</div>
+                        <div style="font-size: 9px; color: rgba(255,255,255,0.3); margin-top: 3px;">${globalProviderLabel || ''}</div>
+                    `;
+                    canvas.style.position = 'relative';
+                    canvas.appendChild(overlay);
+                }
+            }
+
+            // Animate progress bar for smart layouts
+            let gridLoadingInterval;
+            if (isSmartLayout) {
+                let pct = 0;
+                gridLoadingInterval = setInterval(() => {
+                    pct += 1.5;
+                    if (pct > 90) { clearInterval(gridLoadingInterval); return; }
+                    canvas.querySelectorAll('.grid-loading-bar').forEach(b => b.style.width = pct + '%');
+                    if (pct > 40) canvas.querySelectorAll('.grid-loading-text').forEach(t => t.textContent = 'Building annotations...');
+                    if (pct > 70) canvas.querySelectorAll('.grid-loading-text').forEach(t => t.textContent = 'Composing image...');
+                }, 400);
             }
 
             try {
@@ -21682,8 +22862,9 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        images: gridImages.map(img => ({ path: img.path })),
+                        images: gridImages.map(img => ({ path: img.path, label: img.name })),
                         config: { ...gridConfig, outputWidth },
+                        projectId: currentProject?.id || null,
                     }),
                     signal: previewAbortController.signal,
                 });
@@ -21694,10 +22875,13 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     gridPreviewUrl = data.previewUrl;
                     const newUrl = `${data.previewUrl}&t=${Date.now()}`;
 
+                    // Clean up loading state
+                    if (gridLoadingInterval) clearInterval(gridLoadingInterval);
+                    canvas.querySelector('.grid-loading-overlay')?.remove();
+
                     // Update existing image or create new one
                     const currentImg = canvas.querySelector('.grid-preview-img');
                     if (currentImg) {
-                        // Preload image then swap
                         const tempImg = new Image();
                         tempImg.onload = () => {
                             currentImg.src = newUrl;
@@ -21709,6 +22893,10 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     }
                     isFirstPreview = false;
                 } else {
+                    if (gridLoadingInterval) clearInterval(gridLoadingInterval);
+                    canvas.querySelector('.grid-loading-overlay')?.remove();
+                    const resetImg = canvas.querySelector('.grid-preview-img');
+                    if (resetImg) { resetImg.style.opacity = '1'; }
                     setStatus(data.error || 'Preview failed', 'error');
                 }
             } catch (err) {

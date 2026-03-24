@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Metrics Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0f0f1a;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  .dashboard { max-width: 960px; margin: 0 auto; }
+  .header { margin-bottom: 24px; }
+  .header h1 { font-size: 22px; font-weight: 700; }
+  .header p { font-size: 13px; color: rgba(255,255,255,0.4); margin-top: 4px; }
+
+  /* Metrics cards */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .metric-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 16px;
+    opacity: 0;
+    transform: scale(0.95);
+    animation: popIn 0.4s forwards;
+  }
+  .metric-card:nth-child(1) { animation-delay: 0.1s; }
+  .metric-card:nth-child(2) { animation-delay: 0.2s; }
+  .metric-card:nth-child(3) { animation-delay: 0.3s; }
+  .metric-card:nth-child(4) { animation-delay: 0.4s; }
+  @keyframes popIn { to { opacity: 1; transform: scale(1); } }
+  .metric-value {
+    font-size: 32px; font-weight: 800;
+    background: linear-gradient(135deg, #6366f1, #a78bfa);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .metric-label { font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 2px; }
+
+  /* Two-column layout for charts + screens */
+  .content-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  @media (max-width: 700px) { .content-grid { grid-template-columns: 1fr; } }
+
+  .section-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .section-title { font-size: 13px; font-weight: 600; margin-bottom: 12px; color: rgba(255,255,255,0.8); }
+
+  /* Bar chart */
+  .bar-chart { display: flex; flex-direction: column; gap: 6px; }
+  .bar-row {
+    display: grid; grid-template-columns: 90px 1fr 32px;
+    gap: 8px; align-items: center;
+    opacity: 0; animation: slideIn 0.5s forwards;
+  }
+  .bar-row:nth-child(1) { animation-delay: 0.5s; }
+  .bar-row:nth-child(2) { animation-delay: 0.6s; }
+  .bar-row:nth-child(3) { animation-delay: 0.7s; }
+  .bar-row:nth-child(4) { animation-delay: 0.8s; }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: translateX(0); } }
+  .bar-label { font-size: 10px; color: rgba(255,255,255,0.6); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-track { height: 20px; background: rgba(255,255,255,0.06); border-radius: 5px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #6366f1, #818cf8); transition: width 1s ease; width: 0; }
+  .bar-value { font-size: 11px; color: rgba(255,255,255,0.7); font-weight: 600; }
+
+  /* Screen thumbnails strip */
+  .screens-strip {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 4px 0;
+  }
+  .screen-thumb {
+    flex-shrink: 0;
+    width: 80px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.1);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    opacity: 0;
+    animation: thumbIn 0.4s forwards;
+    position: relative;
+    transition: transform 0.2s;
+  }
+  .screen-thumb:hover { transform: scale(1.08); }
+  .screen-thumb img { width: 100%; height: auto; display: block; }
+  .screen-thumb-label {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: linear-gradient(transparent, rgba(0,0,0,0.8));
+    padding: 12px 4px 4px;
+    font-size: 8px; color: rgba(255,255,255,0.8);
+    text-align: center;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .screen-thumb:nth-child(1) { animation-delay: 0.3s; }
+  .screen-thumb:nth-child(2) { animation-delay: 0.4s; }
+  .screen-thumb:nth-child(3) { animation-delay: 0.5s; }
+  .screen-thumb:nth-child(4) { animation-delay: 0.6s; }
+  .screen-thumb:nth-child(5) { animation-delay: 0.7s; }
+  .screen-thumb:nth-child(6) { animation-delay: 0.8s; }
+  @keyframes thumbIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* Flow steps with thumbnails */
+  .flow-steps { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .flow-step {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px;
+    background: rgba(99,102,241,0.06);
+    border: 1px solid rgba(99,102,241,0.12);
+    border-radius: 10px;
+    opacity: 0;
+    animation: fadeIn 0.3s forwards;
+  }
+  @keyframes fadeIn { to { opacity: 1; } }
+  .flow-step-num {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #6366f1; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; flex-shrink: 0;
+  }
+  .flow-step-thumb {
+    width: 36px; height: 64px; border-radius: 4px;
+    overflow: hidden; flex-shrink: 0;
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .flow-step-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .flow-step-label { font-size: 11px; color: rgba(255,255,255,0.7); flex: 1; }
+
+  .footer {
+    text-align: center; margin-top: 24px;
+    font-size: 10px; color: rgba(255,255,255,0.2);
+  }
+</style>
+</head>
+<body>
+<div class="dashboard">
+  <div class="header">
+    <h1 id="vizTitle">Analysis Dashboard</h1>
+    <p id="vizSubtitle"></p>
+  </div>
+
+  <div class="metrics-grid" id="metricsGrid"></div>
+
+  <!-- Screen thumbnails strip -->
+  <div class="section-card" style="margin-bottom: 16px;" id="screensSection">
+    <div class="section-title">Screens Captured</div>
+    <div class="screens-strip" id="screensStrip"></div>
+  </div>
+
+  <div class="content-grid">
+    <!-- Left: Bar chart -->
+    <div class="section-card">
+      <div class="section-title">UI Elements Distribution</div>
+      <div class="bar-chart" id="barChart"></div>
+    </div>
+
+    <!-- Right: Flow steps with thumbnails -->
+    <div class="section-card">
+      <div class="section-title">User Flow</div>
+      <div class="flow-steps" id="flowSteps"></div>
+    </div>
+  </div>
+
+  <div class="footer" id="vizFooter">Generated by DiscoveryLab</div>
+</div>
+<script>
+  const DATA = window.__VISUALIZATION_DATA__ || {};
+  const screens = DATA.screens || [];
+
+  if (DATA.title) document.getElementById('vizTitle').textContent = DATA.title;
+  if (DATA.subtitle) document.getElementById('vizSubtitle').textContent = DATA.subtitle;
+
+  // Metrics cards
+  const metrics = DATA.metrics || [
+    { value: DATA.screenCount || 0, label: 'Screens Analyzed' },
+    { value: DATA.flowSteps || 0, label: 'Flow Steps' },
+    { value: DATA.uiElements || 0, label: 'UI Elements' },
+    { value: DATA.platform || 'N/A', label: 'Platform' },
+  ];
+  const metricsGrid = document.getElementById('metricsGrid');
+  metrics.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'metric-card';
+    card.innerHTML = `
+      <div class="metric-value">${m.value}</div>
+      <div class="metric-label">${m.label}</div>
+    `;
+    metricsGrid.appendChild(card);
+  });
+
+  // Screen thumbnails strip
+  const screensStrip = document.getElementById('screensStrip');
+  const screensSection = document.getElementById('screensSection');
+  if (screens.length > 0) {
+    screens.forEach((screen, i) => {
+      const el = document.createElement('div');
+      el.className = 'screen-thumb';
+      el.style.animationDelay = (0.3 + i * 0.1) + 's';
+      el.innerHTML = `
+        <img src="${screen.imageUrl}" alt="Screen ${i + 1}">
+        <div class="screen-thumb-label">${screen.label || 'Screen ' + (i + 1)}</div>
+      `;
+      screensStrip.appendChild(el);
+    });
+  } else {
+    screensSection.style.display = 'none';
+  }
+
+  // Bar chart
+  const categories = DATA.categories || [];
+  const barChart = document.getElementById('barChart');
+  const maxVal = Math.max(...categories.map(c => c.count), 1);
+  categories.forEach(cat => {
+    const pct = Math.round((cat.count / maxVal) * 100);
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+    row.innerHTML = `
+      <div class="bar-label" title="${cat.name}">${cat.name}</div>
+      <div class="bar-track"><div class="bar-fill" style="width: 0%"></div></div>
+      <div class="bar-value">${cat.count}</div>
+    `;
+    barChart.appendChild(row);
+    requestAnimationFrame(() => {
+      setTimeout(() => { row.querySelector('.bar-fill').style.width = pct + '%'; }, 800);
+    });
+  });
+
+  // Flow steps with thumbnails
+  const steps = DATA.steps || [];
+  const flowSteps = document.getElementById('flowSteps');
+  steps.forEach((step, i) => {
+    const screen = screens[i];
+    const el = document.createElement('div');
+    el.className = 'flow-step';
+    el.style.animationDelay = (0.8 + i * 0.1) + 's';
+    el.innerHTML = `
+      <div class="flow-step-num">${i + 1}</div>
+      ${screen ? `<div class="flow-step-thumb"><img src="${screen.imageUrl}" alt=""></div>` : ''}
+      <div class="flow-step-label">${step.label || step}</div>
+    `;
+    flowSteps.appendChild(el);
+  });
+</script>
+</body>
+</html>

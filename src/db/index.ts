@@ -108,6 +108,23 @@ function createTables(sqlite: Database.Database): void {
   } catch (e) {
     // Column already exists, ignore
   }
+  try {
+    sqlite.exec(`ALTER TABLE projects ADD COLUMN marketing_title TEXT`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+  try {
+    sqlite.exec(`ALTER TABLE projects ADD COLUMN marketing_description TEXT`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
+  // Backfill: copy name → marketing_title for existing projects that don't have it
+  try {
+    sqlite.exec(`UPDATE projects SET marketing_title = name WHERE marketing_title IS NULL`);
+  } catch (e) {
+    // Ignore if fails
+  }
 
   // Project exports table
   sqlite.exec(`

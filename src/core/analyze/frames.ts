@@ -220,6 +220,56 @@ function listExtractedFrames(framesDir: string, videoFps: number, extractFps: nu
 }
 
 // ============================================================================
+// BLANK FRAME DETECTION
+// ============================================================================
+export interface BlankFrameResult {
+  isBlank: boolean;
+  brightness: number; // 0-255 (YAVG luminance of center crop)
+}
+
+/**
+ * Detect if a frame is blank (white or black).
+ * Crops to the center 80% of the image to ignore scrollbars and browser chrome,
+ * then checks average luminance of the cropped area.
+ * Center YAVG > 240 → white/blank, < 15 → black/blank.
+ */
+export function isBlankFrame(imagePath: string): BlankFrameResult {
+  try {
+    // Crop to center 80% to avoid scrollbar/edge artifacts, then measure luminance
+    const output = execSync(
+      `ffmpeg -i "${imagePath}" -vf "crop=iw*0.8:ih*0.8:iw*0.1:ih*0.1,signalstats" -f null - 2>&1`,
+      { encoding: 'utf-8', timeout: 5000 }
+    );
+    const match = output.match(/YAVG:\s*([\d.]+)/);
+    if (!match) return { isBlank: false, brightness: 128 };
+    const brightness = parseFloat(match[1]);
+    return {
+      isBlank: brightness > 240 || brightness < 15,
+      brightness,
+    };
+  } catch {
+    return { isBlank: false, brightness: 128 };
+  }
+}
+
+/**
+ * Filter out blank frames from a list, deleting them from disk.
+ * Returns the remaining non-blank frames.
+ */
+export function filterBlankFrames(frames: FrameInfo[]): FrameInfo[] {
+  const { unlinkSync } = require('node:fs');
+  return frames.filter((frame) => {
+    if (!existsSync(frame.path)) return false;
+    const { isBlank } = isBlankFrame(frame.path);
+    if (isBlank) {
+      try { unlinkSync(frame.path); } catch { /* ignore */ }
+      return false;
+    }
+    return true;
+  });
+}
+
+// ============================================================================
 // KEY FRAME DETECTION
 // ============================================================================
 export interface KeyFrameInfo extends FrameInfo {

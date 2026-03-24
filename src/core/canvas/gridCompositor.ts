@@ -15,16 +15,19 @@ import { join, basename } from 'node:path';
 export type AspectRatio = '9:16' | '1:1' | '16:9';
 
 export type GridLayout =
-  | 'single'      // 1 image
-  | 'duo-h'       // 2 images horizontal
-  | 'duo-v'       // 2 images vertical
-  | 'trio-h'      // 3 images horizontal
-  | 'trio-v'      // 3 images vertical
-  | 'quad'        // 2x2 grid
-  | 'featured'    // 1 large + 2 small
-  | 'masonry'     // Pinterest-style 3 columns
-  | 'carousel'    // Overlapping cards
-  | 'stacked';    // 3D perspective stack
+  | 'single'           // 1 image
+  | 'duo-h'            // 2 images horizontal
+  | 'duo-v'            // 2 images vertical
+  | 'trio-h'           // 3 images horizontal
+  | 'trio-v'           // 3 images vertical
+  | 'quad'             // 2x2 grid
+  | 'featured'         // 1 large + 2 small
+  | 'masonry'          // Pinterest-style 3 columns
+  | 'carousel'         // Overlapping cards
+  | 'stacked'          // 3D perspective stack
+  | 'flow-horizontal'  // Screenshots in a row with arrows between
+  | 'flow-vertical'    // Screenshots in a column with arrows between
+  | 'infographic';     // Magazine-style with header, screenshots, and footer
 
 export type BackgroundType = 'solid' | 'gradient' | 'image';
 
@@ -53,6 +56,10 @@ export interface GridConfig {
 export interface GridCell {
   imagePath: string;
   label?: string;
+  stepNumber?: number;
+  annotation?: string;
+  flowArrow?: 'right' | 'down' | 'none';
+  highlight?: { x: number; y: number; w: number; h: number; color: string };
 }
 
 export interface GridResult {
@@ -261,6 +268,70 @@ function calculateCells(
       break;
     }
 
+    case 'flow-horizontal': {
+      // Screenshots in a row with compact arrow space, leave room for annotations below
+      const arrowGap = 30;
+      const count = Math.min(imageCount, 5);
+      const totalArrowGap = arrowGap * (count - 1);
+      const annotationSpace = 32; // Space below cells for annotation pills
+      const cellWidth = (contentWidth - totalArrowGap) / count;
+      const cellHeight = contentHeight - annotationSpace;
+      for (let i = 0; i < count; i++) {
+        cells.push({
+          x: padding + i * (cellWidth + arrowGap),
+          y: padding,
+          width: cellWidth,
+          height: cellHeight,
+        });
+      }
+      break;
+    }
+
+    case 'flow-vertical': {
+      // Screenshots in a column with compact arrow space
+      const arrowGap = 30;
+      const count = Math.min(imageCount, 5);
+      const totalArrowGap = arrowGap * (count - 1);
+      const annotationSpace = 28;
+      const cellHeight = (contentHeight - totalArrowGap - annotationSpace * count) / count;
+      for (let i = 0; i < count; i++) {
+        const yOffset = i * (cellHeight + arrowGap + annotationSpace);
+        cells.push({
+          x: padding + contentWidth * 0.15,
+          y: padding + yOffset,
+          width: contentWidth * 0.7,
+          height: cellHeight,
+        });
+      }
+      break;
+    }
+
+    case 'infographic': {
+      // Clean grid: header area (10%), content grid (80%), footer (10%)
+      const headerH = contentHeight * 0.08;
+      const footerH = contentHeight * 0.06;
+      const annotationH = 28;
+      const bodyH = contentHeight - headerH - footerH;
+      const count = Math.min(imageCount, 6);
+
+      const cols = count <= 2 ? count : count <= 4 ? 2 : 3;
+      const rows = Math.ceil(count / cols);
+      const cellW = (contentWidth - cellPadding * (cols - 1)) / cols;
+      const cellH = (bodyH - cellPadding * (rows - 1) - annotationH * rows) / rows;
+
+      for (let i = 0; i < count; i++) {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        cells.push({
+          x: padding + col * (cellW + cellPadding),
+          y: padding + headerH + row * (cellH + cellPadding + annotationH),
+          width: cellW,
+          height: cellH,
+        });
+      }
+      break;
+    }
+
     default:
       // Default to single
       cells.push({
@@ -456,6 +527,327 @@ function drawImageInCell(
 }
 
 // ============================================================================
+// INFOGRAPHIC DRAWING HELPERS
+// ============================================================================
+
+function drawStepBadge(
+  ctx: CanvasRenderingContext2D,
+  cell: CellRect,
+  stepNumber: number,
+  scale: number = 1,
+): void {
+  // Compact pill badge at top-left, overlapping the cell edge
+  const h = 20 * scale;
+  const w = 20 * scale;
+  const x = cell.x - 2 * scale;
+  const y = cell.y - 2 * scale;
+
+  ctx.save();
+  // Dark background circle
+  ctx.beginPath();
+  ctx.arc(x + w / 2, y + h / 2, w / 2 + 1 * scale, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fill();
+
+  // Accent circle
+  ctx.beginPath();
+  ctx.arc(x + w / 2, y + h / 2, w / 2, 0, Math.PI * 2);
+  ctx.fillStyle = '#6366f1';
+  ctx.fill();
+
+  // Number
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${11 * scale}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(stepNumber), x + w / 2, y + h / 2 + 0.5 * scale);
+  ctx.restore();
+}
+
+function drawFlowArrow(
+  ctx: CanvasRenderingContext2D,
+  fromCell: CellRect,
+  toCell: CellRect,
+  direction: 'right' | 'down',
+  scale: number = 1,
+): void {
+  ctx.save();
+
+  const arrowSize = 6 * scale;
+  const lineColor = 'rgba(255, 255, 255, 0.3)';
+
+  if (direction === 'right') {
+    const startX = fromCell.x + fromCell.width + 2 * scale;
+    const endX = toCell.x - 2 * scale;
+    const y = fromCell.y + fromCell.height / 2;
+    const midX = (startX + endX) / 2;
+
+    // Dashed line
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 1.5 * scale;
+    ctx.setLineDash([4 * scale, 3 * scale]);
+    ctx.beginPath();
+    ctx.moveTo(startX, y);
+    ctx.lineTo(endX - arrowSize, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Small chevron arrowhead
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.lineWidth = 2 * scale;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(endX - arrowSize, y - arrowSize);
+    ctx.lineTo(endX, y);
+    ctx.lineTo(endX - arrowSize, y + arrowSize);
+    ctx.stroke();
+  } else {
+    const x = fromCell.x + fromCell.width / 2;
+    const startY = fromCell.y + fromCell.height + 2 * scale;
+    const endY = toCell.y - 2 * scale;
+
+    // Dashed line
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 1.5 * scale;
+    ctx.setLineDash([4 * scale, 3 * scale]);
+    ctx.beginPath();
+    ctx.moveTo(x, startY);
+    ctx.lineTo(x, endY - arrowSize);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Chevron
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.lineWidth = 2 * scale;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x - arrowSize, endY - arrowSize);
+    ctx.lineTo(x, endY);
+    ctx.lineTo(x + arrowSize, endY - arrowSize);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawAnnotation(
+  ctx: CanvasRenderingContext2D,
+  cell: CellRect,
+  text: string,
+  position: 'below' | 'above',
+  scale: number = 1,
+): void {
+  ctx.save();
+  const fontSize = 11 * scale;
+  ctx.font = `500 ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.textAlign = 'center';
+
+  // Truncate
+  const maxWidth = cell.width + 20 * scale;
+  let displayText = text;
+  if (ctx.measureText(text).width > maxWidth) {
+    while (ctx.measureText(displayText + '...').width > maxWidth && displayText.length > 0) {
+      displayText = displayText.slice(0, -1);
+    }
+    displayText += '...';
+  }
+
+  const textWidth = ctx.measureText(displayText).width;
+  const cx = cell.x + cell.width / 2;
+  const cy = position === 'below'
+    ? cell.y + cell.height + 14 * scale
+    : cell.y - 10 * scale;
+
+  // Pill background
+  const pillPadX = 8 * scale;
+  const pillPadY = 3 * scale;
+  const pillW = textWidth + pillPadX * 2;
+  const pillH = fontSize + pillPadY * 2;
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+  drawRoundedRect(ctx, cx - pillW / 2, cy - pillH / 2, pillW, pillH, pillH / 2);
+  ctx.fill();
+
+  // Text
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(displayText, cx, cy);
+  ctx.restore();
+}
+
+function drawInfoHeader(
+  ctx: CanvasRenderingContext2D,
+  title: string,
+  subtitle: string,
+  canvasWidth: number,
+  padding: number,
+  headerHeight: number,
+  scale: number = 1,
+): void {
+  ctx.save();
+
+  // Title - clean, left aligned
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${20 * scale}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.fillText(title, padding, padding + 6 * scale);
+
+  // Thin accent line below title
+  const titleWidth = Math.min(ctx.measureText(title).width, canvasWidth * 0.3);
+  ctx.strokeStyle = 'rgba(99, 102, 241, 0.5)';
+  ctx.lineWidth = 2 * scale;
+  ctx.beginPath();
+  ctx.moveTo(padding, padding + 30 * scale);
+  ctx.lineTo(padding + titleWidth, padding + 30 * scale);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawInfoFooter(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  canvasWidth: number,
+  canvasHeight: number,
+  padding: number,
+  scale: number = 1,
+): void {
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+  ctx.font = `${10 * scale}px -apple-system, BlinkMacSystemFont, sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(text, canvasWidth - padding, canvasHeight - padding / 2);
+  ctx.restore();
+}
+
+// ============================================================================
+// INFOGRAPHIC COMPOSITOR
+// ============================================================================
+
+export interface InfographicConfig {
+  title: string;
+  subtitle?: string;
+  footerText?: string;
+  layout: 'flow-horizontal' | 'flow-vertical' | 'infographic';
+  aspectRatio?: AspectRatio;
+  background?: BackgroundConfig;
+  outputWidth?: number;
+}
+
+export async function composeInfographic(
+  images: GridCell[],
+  config: InfographicConfig,
+  outputPath: string,
+): Promise<GridResult> {
+  const gridConfig: Partial<GridConfig> = {
+    layout: config.layout,
+    aspectRatio: config.aspectRatio || (config.layout === 'flow-horizontal' ? '16:9' : '9:16'),
+    background: config.background || {
+      type: 'gradient',
+      gradientStart: '#0f0f23',
+      gradientEnd: '#1a1a3e',
+      gradientAngle: 160,
+    },
+    outputWidth: config.outputWidth || 1920,
+    padding: 60,
+    cellPadding: 20,
+    cornerRadius: 12,
+    shadowEnabled: true,
+    shadowBlur: 16,
+    imageFit: 'contain',
+  };
+
+  const cfg: GridConfig = { ...DEFAULT_CONFIG, ...gridConfig };
+  const aspectDef = ASPECT_RATIOS[cfg.aspectRatio];
+  const scale = cfg.outputWidth / aspectDef.width;
+  const canvasWidth = Math.round(aspectDef.width * scale);
+  const canvasHeight = Math.round(aspectDef.height * scale);
+
+  const canvas = createCanvas(canvasWidth, canvasHeight);
+  const ctx = canvas.getContext('2d');
+
+  // Background
+  let bgImage: Image | undefined;
+  if (cfg.background.type === 'image' && cfg.background.imagePath && existsSync(cfg.background.imagePath)) {
+    bgImage = await loadImage(cfg.background.imagePath);
+  }
+  drawBackground(ctx, canvasWidth, canvasHeight, cfg.background, bgImage);
+
+  // Dark overlay for readability when using image backgrounds with flow/infographic layouts
+  if (cfg.background.type === 'image' && bgImage) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    ctx.restore();
+  }
+
+  // Header for infographic layout
+  const headerHeight = canvasHeight * 0.12;
+  if (config.layout === 'infographic') {
+    drawInfoHeader(ctx, config.title, config.subtitle || '', canvasWidth, cfg.padding, headerHeight, scale);
+  }
+
+  // Calculate cells
+  const cells = calculateCells(cfg.layout, canvasWidth, canvasHeight, cfg.padding, cfg.cellPadding, images.length);
+
+  // Draw images with infographic overlays
+  for (let i = 0; i < Math.min(images.length, cells.length); i++) {
+    const cell = cells[i];
+    const imageCell = images[i];
+
+    if (!existsSync(imageCell.imagePath)) continue;
+
+    const image = await loadImage(imageCell.imagePath);
+
+    // Shadow
+    if (cfg.shadowEnabled && cfg.imageFit === 'cover') {
+      drawShadow(ctx, cell.x, cell.y, cell.width, cell.height, cfg.cornerRadius, cfg.shadowBlur);
+    }
+
+    // Image
+    drawImageInCell(ctx, image, cell, cfg.cornerRadius, cfg.imageFit, cfg.shadowEnabled, cfg.shadowBlur);
+
+    // Step badge
+    if (imageCell.stepNumber !== undefined) {
+      drawStepBadge(ctx, cell, imageCell.stepNumber, scale);
+    }
+
+    // Annotation
+    if (imageCell.annotation) {
+      drawAnnotation(ctx, cell, imageCell.annotation, 'below', scale);
+    }
+
+    // Flow arrow to next cell
+    if (imageCell.flowArrow && imageCell.flowArrow !== 'none' && i < cells.length - 1) {
+      drawFlowArrow(ctx, cell, cells[i + 1], imageCell.flowArrow, scale);
+    }
+  }
+
+  // Footer
+  if (config.footerText || config.layout === 'infographic') {
+    const footerText = config.footerText || `Generated by DiscoveryLab • ${images.length} screens`;
+    drawInfoFooter(ctx, footerText, canvasWidth, canvasHeight, cfg.padding, scale);
+  }
+
+  // Export
+  try {
+    const buffer = canvas.toBuffer('image/png');
+    const outputDir = outputPath.substring(0, outputPath.lastIndexOf('/'));
+    if (outputDir && !existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true });
+    }
+    writeFileSync(outputPath, buffer);
+
+    return { success: true, outputPath, width: canvasWidth, height: canvasHeight };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : 'Infographic export failed' };
+  }
+}
+
+// ============================================================================
 // MAIN COMPOSITOR
 // ============================================================================
 
@@ -568,12 +960,15 @@ export function getLayoutInfo(layout: GridLayout): { name: string; maxImages: nu
     'masonry': { name: 'Masonry', maxImages: 6, description: 'Pinterest-style columns' },
     'carousel': { name: 'Carousel', maxImages: 3, description: 'Overlapping cards' },
     'stacked': { name: '3D Stack', maxImages: 4, description: 'Perspective stack effect' },
+    'flow-horizontal': { name: 'Flow →', maxImages: 5, description: 'Steps left to right with arrows' },
+    'flow-vertical': { name: 'Flow ↓', maxImages: 5, description: 'Steps top to bottom with arrows' },
+    'infographic': { name: 'Infographic', maxImages: 6, description: 'Magazine-style with header' },
   };
   return layouts[layout];
 }
 
 export function getAllLayouts(): GridLayout[] {
-  return ['single', 'duo-h', 'duo-v', 'trio-h', 'trio-v', 'quad', 'featured', 'masonry', 'carousel', 'stacked'];
+  return ['single', 'duo-h', 'duo-v', 'trio-h', 'trio-v', 'quad', 'featured', 'masonry', 'carousel', 'stacked', 'flow-horizontal', 'flow-vertical', 'infographic'];
 }
 
 // ============================================================================

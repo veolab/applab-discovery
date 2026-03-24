@@ -191,6 +191,17 @@ export class PlaywrightRecorder extends EventEmitter {
 
       this.context = await this.browser.newContext(contextOptions);
 
+      // Hide scrollbars in all pages so they don't appear in video capture
+      await this.context.addInitScript({ content: `
+        function __hideScrollbars() {
+          var s = document.createElement('style');
+          s.textContent = '::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}html,body,*{scrollbar-width:none!important}';
+          (document.head || document.documentElement).appendChild(s);
+        }
+        if (document.head || document.body) { __hideScrollbars(); }
+        else { document.addEventListener('DOMContentLoaded', __hideScrollbars); }
+      ` });
+
       this.page = await this.context.newPage();
       this.nameHelperInjected = false;
       this.networkCaptureDetach = attachPlaywrightNetworkCapture(this.page, {
