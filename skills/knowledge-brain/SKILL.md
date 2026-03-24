@@ -15,50 +15,67 @@ tags:
 
 # DiscoveryLab Knowledge Brain
 
-When the user asks about app flows, screens, UI elements, or how something works in an app they've captured, use DiscoveryLab's knowledge base to find answers.
+DiscoveryLab captures app recordings and analyzes them with OCR + AI, building a knowledge base of every flow, screen, and UI element. This skill lets you query that knowledge.
 
 ## When to Use
 
-Use `dlab.knowledge.search` when the user:
-- Asks about a specific app screen ("how does the login work?")
-- Asks about UI elements ("what buttons are on the paywall?")
-- Asks about user flows ("what's the onboarding flow?")
-- References an app by name ("in StyliApp, what does the closet screen show?")
-- Needs context about captured recordings
-- Compares flows or screens
+Use this whenever the user asks about:
+- How a specific screen or flow works in their app
+- What UI elements exist on a page (buttons, inputs, labels)
+- The user journey through a feature (onboarding, checkout, settings)
+- Comparing different captures of the same flow
+- Any reference to app screens, recordings, or captured content
+- Context about what was tested or recorded
+
+Also use proactively when:
+- The user is working on code related to a feature that was captured
+- You need visual context about the app to give better answers
+- The user mentions a Jira ticket that might be linked to a project
 
 ## Tools
 
 ### `dlab.knowledge.search`
-Search across all captured projects. Matches against project names, AI analysis, OCR text, tags, and linked tickets.
+Semantic search across all captured projects. Matches against: project names, AI analysis summaries, OCR text from every screen, tags, and linked tickets.
 
 ```
-dlab.knowledge.search { query: "login StyliApp" }
-dlab.knowledge.search { query: "paywall premium" }
+dlab.knowledge.search { query: "login" }
+dlab.knowledge.search { query: "paywall" }
 dlab.knowledge.search { query: "onboarding flow" }
+dlab.knowledge.search { query: "PROJ-123" }
+dlab.knowledge.search { query: "settings profile" }
 ```
 
-Returns: project overview, user flow steps, UI elements found, OCR text sample, and project ID for deeper lookup.
+Returns per match:
+- App overview (what the screen/flow does)
+- User flow steps (numbered sequence)
+- UI elements found (buttons, inputs, navigation)
+- OCR text sample (actual text visible on screens)
+- Project ID for deeper lookup
 
 ### `dlab.knowledge.summary`
-Get a high-level overview of all captured app knowledge.
+High-level overview of the entire knowledge base - all projects grouped by app with stats.
 
 ```
 dlab.knowledge.summary {}
 ```
 
-Returns: all projects grouped by app, with stats (flows count, screens, analysis status).
+Use this when:
+- The user asks "what do we have captured?"
+- You need to orient yourself on what apps/flows exist
+- Starting a new conversation and need context
 
 ### `dlab.project.get`
-For full details on a specific project found via search.
+Full details on a specific project found via search. Use when the search result summary is not enough.
 
 ```
-dlab.project.get { projectId: "abc123" }
+dlab.project.get { projectId: "<id from search results>" }
 ```
 
-## Behavior
+## How to Respond
 
-1. Always search first before saying you don't know about an app flow
-2. If no match, show available projects so the user knows what's captured
-3. Use `dlab.project.get` for full details when the search result needs more depth
-4. Multiple projects may cover the same flow (different versions) - present the most recent first
+1. **Search first** - never say "I don't have information about that" without searching
+2. **No match?** - run `dlab.knowledge.summary` to show the user what's available
+3. **Multiple results** - present the most recent first, note if there are different versions
+4. **Cite the source** - mention which project/recording the information comes from
+5. **Suggest captures** - if the user asks about a flow that doesn't exist, suggest they capture it with DiscoveryLab
+6. **Be specific** - use the OCR text and UI elements from results to give precise answers, not generic ones
