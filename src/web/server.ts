@@ -5509,12 +5509,13 @@ Rules:
     }
 
     // Read HTML template and inject data
-    const templatePath = join(__dirname, '..', 'core', 'visualizations', 'templates', `${templateId}.html`);
-    // Fallback paths for different build structures
+    // Look for HTML templates in multiple locations (dist, src, cwd)
     const possiblePaths = [
-      templatePath,
-      join(__dirname, '..', '..', 'src', 'core', 'visualizations', 'templates', `${templateId}.html`),
-      join(process.cwd(), 'src', 'core', 'visualizations', 'templates', `${templateId}.html`),
+      join(__dirname, '..', 'visualizations', `${templateId}.html`),              // dist/visualizations/
+      join(__dirname, 'visualizations', `${templateId}.html`),                     // dist/visualizations/ (alt)
+      join(__dirname, '..', 'core', 'visualizations', 'templates', `${templateId}.html`), // dist/core/...
+      join(process.cwd(), 'dist', 'visualizations', `${templateId}.html`),        // cwd/dist/visualizations/
+      join(process.cwd(), 'src', 'core', 'visualizations', 'templates', `${templateId}.html`), // dev: src/
     ];
 
     let htmlContent = '';

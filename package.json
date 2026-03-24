@@ -1,6 +1,6 @@
 {
   "name": "@veolab/discoverylab",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "AI-powered app testing & evidence generator - Claude Code Plugin",
   "type": "module",
   "main": "dist/index.js",
@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/cli.ts serve",
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && cp src/web/index.html dist/index.html && node scripts/build-host-runtime.mjs --best-effort",
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean && cp src/web/index.html dist/index.html && mkdir -p dist/visualizations && cp src/core/visualizations/templates/*.html dist/visualizations/ && node scripts/build-host-runtime.mjs --best-effort",
     "build:host-runtime": "node scripts/build-host-runtime.mjs",
     "pack:local": "npm run build && npm run build:host-runtime && node scripts/verify-host-runtime-bundle.mjs && npm pack",
     "prepack": "npm run build && npm run build:host-runtime && node scripts/verify-host-runtime-bundle.mjs",
@@ -68,7 +68,7 @@
   "claude-plugin": {
     "name": "DiscoveryLab",
     "description": "AI-powered app testing & evidence generator",
-    "version": "1.4.3",
+    "version": "1.4.4",
     "tools": [
       "dlab.capture.screen",
       "dlab.capture.emulator",
