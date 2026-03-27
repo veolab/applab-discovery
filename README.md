@@ -9,80 +9,117 @@
 [![npm](https://img.shields.io/npm/v/@veolab/discoverylab.svg?style=flat-square)](https://www.npmjs.com/package/@veolab/discoverylab)
 [![npm downloads](https://img.shields.io/npm/dm/@veolab/discoverylab.svg?style=flat-square)](https://www.npmjs.com/package/@veolab/discoverylab)
 [![GitHub stars](https://img.shields.io/github/stars/veolab/applab-discovery?style=flat-square)](https://github.com/veolab/applab-discovery/stargazers)
-[![GitHub issues](https://img.shields.io/github/issues/veolab/applab-discovery?style=flat-square)](https://github.com/veolab/applab-discovery/issues)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](https://opensource.org/licenses/MIT)
 
-> AI-powered app testing & marketing asset generator. A Claude Code plugin.
+> AI-powered app testing, documentation & knowledge base. A plugin for Claude Code and Claude Desktop.
 
 ![DiscoveryLab](assets/applab-discovery.jpeg)
-
-## How It Works
-
-```mermaid
-flowchart LR
-    subgraph Input
-        A[Mobile App] --> R[Record]
-        B[Web App] --> R
-        C[Video File] --> U[Upload]
-    end
-
-    subgraph DiscoveryLab
-        R --> P[Process]
-        U --> P
-        P --> AI[AI Analysis]
-        AI --> O[OCR + Features]
-    end
-
-    subgraph Output
-        O --> E1[Screenshots]
-        O --> E2[GIF / MP4]
-        O --> E3[Test Reports]
-    end
-```
 
 ## Quick Start
 
 ```bash
 npm install -g @veolab/discoverylab
-discoverylab install   # configures Claude Code MCP
-discoverylab serve     # opens web UI
+discoverylab install   # auto-detects Claude Code + Claude Desktop
+discoverylab serve     # opens web UI at localhost:3847
 ```
 
-`applab serve` works as an alias — both `discoverylab` and `applab` are interchangeable.
-`serve` and `server` are also interchangeable.
+`applab` works as an alias for `discoverylab`.
+
+## What It Does
+
+Record app flows. AI analyzes every screen. Ask Claude about any flow in natural language.
+
+```mermaid
+flowchart LR
+    subgraph Capture
+        A[Mobile App] --> R[Record]
+        B[Web App] --> R
+        C[Video File] --> U[Upload]
+    end
+
+    subgraph Analyze
+        R --> P[Process]
+        U --> P
+        P --> AI[AI Analysis]
+        AI --> K[Knowledge Base]
+    end
+
+    subgraph Use
+        K --> Q[Ask Claude]
+        K --> E[Export Assets]
+        K --> S[Share .applab]
+    end
+```
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
 | **Screen Capture** | Record iOS/Android emulators or web apps |
+| **AI Analysis** | OCR, feature detection, smart summaries (Anthropic, OpenAI, Ollama, Claude CLI) |
+| **Knowledge Brain** | Ask Claude about any captured flow — visual answers with interactive infographics |
+| **Interactive Visualizations** | Flow Diagram, Device Showcase, Metrics Dashboard, App Flow Map |
+| **Grid Assets** | Infographic grids with AI annotations, step badges, flow arrows |
+| **Export** | PNG, GIF, MP4, HTML infographic, .applab bundle |
+| **Document Composer** | Build rich Notion pages with preview before export |
 | **Maestro Testing** | Automated mobile app testing with screenshots |
 | **Playwright Testing** | Web testing using your installed Chrome |
-| **AI Analysis** | OCR, feature detection, smart summaries |
-| **Export** | PNG, GIF, MP4 with professional quality |
 | **Task Hub** | Jira, Notion, Figma, GitHub integration |
-| **ESVP Protocol** | Mobile sessions, replay, iOS Sim, and network traces via ESVP control-plane |
+| **ESVP Protocol** | Mobile sessions, replay, and network traces ([docs](doc/esvp-protocol.md)) |
+| **Share** | Export .applab bundles → import on another machine with full context |
 
-> [!NOTE]
-> **ESVP Protocol** — DiscoveryLab includes a built-in ESVP client for mobile session management, automated replay, iOS Simulator control, and HTTP network tracing. Set `ESVP_BASE_URL` for a remote control-plane or let DiscoveryLab boot an embedded local runtime automatically.
+## Claude Integration
 
-## Skills
+### Claude Code (CLI)
 
-After installing, use these in Claude Code:
+Skills available after install:
 
 ```
 /discoverylab:open-ui        → Open web interface
 /discoverylab:quick-capture  → Capture emulator screen
 /discoverylab:mobile-test    → Mobile testing with Maestro
 /discoverylab:web-test       → Web testing with Playwright
+/discoverylab:generate-assets → Create marketing assets
+```
+
+### Claude Desktop
+
+Ask in natural language — Claude opens interactive visuals automatically:
+
+```
+"how does the login flow work?"     → opens infographic canvas
+"what screens do we have captured?" → lists all projects
+"show me the onboarding"            → visual flow map
+```
+
+### MCP Tools
+
+```
+dlab.knowledge.open     → visual infographic of a flow (HTML canvas)
+dlab.knowledge.search   → text search across all projects
+dlab.knowledge.summary  → overview of all captured knowledge
+dlab.export.infographic → export self-contained HTML file
+dlab.project.import     → import shared .applab bundle
+```
+
+## CLI Commands
+
+```bash
+discoverylab serve                              # start web UI
+discoverylab install                            # auto-detect + configure MCP
+discoverylab install --target desktop           # Claude Desktop only
+discoverylab export <project-id> --format infographic --open
+discoverylab import <file.applab>               # import shared project
+discoverylab setup                              # check dependencies
+discoverylab info                               # version info
 ```
 
 ## Requirements
 
 - Node.js 20+
 - FFmpeg (for video/GIF export)
-- Maestro CLI (optional)
-- Playwright (optional)
+- Maestro CLI (optional, for mobile testing)
+- Playwright (optional, for web testing)
 
 ## Platform Support
 
@@ -93,6 +130,7 @@ After installing, use these in Claude Code:
 | Android Capture | ✓ | ✓ | ✓ |
 | Web Recording | ✓ | ✓ | ✓ |
 | Apple Vision OCR | ✓ | — | — |
+| Claude Desktop | ✓ | ✓ | — |
 
 ## License
 
