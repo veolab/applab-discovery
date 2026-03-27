@@ -235,6 +235,23 @@ export function buildInfographicData(
 }
 
 /**
+ * Generate infographic HTML as a string (for inline rendering in Claude Desktop)
+ */
+export function generateInfographicHtmlString(data: InfographicData): string | null {
+  const templatePath = findTemplate();
+  if (!templatePath) return null;
+
+  let html = readFileSync(templatePath, 'utf-8');
+  html = html.replace('__TITLE__', data.name);
+  const dataJson = JSON.stringify(data);
+  html = html.replace(
+    'window.FLOW_DATA || { name: \'Flow\', frames: [] }',
+    `window.FLOW_DATA || ${dataJson}`
+  );
+  return html;
+}
+
+/**
  * Generate the self-contained HTML infographic file
  */
 export function generateInfographicHtml(

@@ -5713,6 +5713,32 @@ app.post('/api/export/infographic', async (c) => {
   }
 });
 
+// Import .applab project bundle
+app.post('/api/import', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { filePath } = body;
+    if (!filePath) return c.json({ error: 'filePath required' }, 400);
+
+    const { importApplabBundle } = await import('../core/export/import.js');
+    const { FRAMES_DIR: fDir, PROJECTS_DIR: pDir } = await import('../db/index.js');
+
+    const db = getDatabase();
+    const result = await importApplabBundle(filePath, db, { projects, frames }, {
+      dataDir: DATA_DIR,
+      framesDir: fDir,
+      projectsDir: pDir,
+    });
+
+    if (!result.success) return c.json({ error: result.error }, 400);
+
+    return c.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
 // Build default document from project data
 app.get('/api/export/document/:projectId', async (c) => {
   try {

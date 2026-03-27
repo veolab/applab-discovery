@@ -191,9 +191,98 @@ export const knowledgeSummaryTool: MCPTool = {
 };
 
 // ============================================================================
+// dlab.knowledge.open
+// ============================================================================
+export const knowledgeOpenTool: MCPTool = {
+  name: 'dlab.knowledge.open',
+  description: `Open an interactive visual infographic of an app flow. Returns self-contained HTML that Claude Desktop renders as a canvas/artifact. Use this when the user wants to SEE a flow visually, not just read about it. The HTML includes animated frame player, annotations, and navigation.`,
+  inputSchema: z.object({
+    query: z.string().optional().describe('Search query to find the project (e.g. "login flow", "onboarding")'),
+    projectId: z.string().optional().describe('Direct project ID if known'),
+  }),
+  handler: async (params) => {
+    try {
+      const db = getDatabase();
+
+      let project: any = null;
+
+      // Find project by ID or search
+      if (params.projectId) {
+        const { eq } = await import('drizzle-orm');
+        const [p] = await db.select().from(projects).where(eq(projects.id, params.projectId)).limit(1);
+        project = p;
+      } else if (params.query) {
+        // Reuse search logic
+        const allProjects = await db.select().from(projects).orderBy(desc(projects.updatedAt));
+        const query = params.query.toLowerCase();
+        const queryTerms = query.split(/\s+/).filter(t => t.length > 1);
+
+        let bestScore = 0;
+        for (const p of allProjects) {
+          let score = 0;
+          const fields = [p.name, p.marketingTitle, p.aiSummary, p.ocrText, p.tags, p.linkedTicket].filter(Boolean);
+          for (const field of fields) {
+            const text = (field as string).toLowerCase();
+            for (const term of queryTerms) {
+              if (text.includes(term)) score += 1;
+            }
+            if (text.includes(query)) score += 3;
+          }
+          if (score > bestScore) { bestScore = score; project = p; }
+        }
+      }
+
+      if (!project) {
+        return createErrorResult(`No project found${params.query ? ` for "${params.query}"` : ''}. Use dlab.knowledge.summary to see available projects.`);
+      }
+
+      // Get frames
+      const { eq } = await import('drizzle-orm');
+      const { FRAMES_DIR, PROJECTS_DIR } = await import('../../db/index.js');
+      const { join } = await import('node:path');
+      const dbFrames = await db.select().from(frames)
+        .where(eq(frames.projectId, project.id))
+        .orderBy(frames.frameNumber)
+        .limit(15);
+
+      let frameFiles: string[];
+      let frameOcr: Array<{ ocrText?: string | null }>;
+
+      if (dbFrames.length > 0) {
+        frameFiles = dbFrames.map((f: any) => f.imagePath);
+        frameOcr = dbFrames;
+      } else {
+        const { collectFrameImages } = await import('../../core/export/infographic.js');
+        frameFiles = collectFrameImages(join(FRAMES_DIR, project.id), project.videoPath, PROJECTS_DIR, project.id);
+        frameOcr = frameFiles.map(() => ({ ocrText: null }));
+      }
+
+      if (frameFiles.length === 0) {
+        return createTextResult(`Project "${project.marketingTitle || project.name}" has no frames. Run the analyzer first, then try again.`);
+      }
+
+      // Build and generate HTML inline
+      const { buildInfographicData, generateInfographicHtmlString } = await import('../../core/export/infographic.js');
+      const data = buildInfographicData(project, frameFiles, frameOcr);
+      const html = generateInfographicHtmlString(data);
+
+      if (!html) {
+        return createErrorResult('Failed to generate infographic HTML (template not found)');
+      }
+
+      // Return HTML + summary for Claude to render
+      return createTextResult(html);
+    } catch (error) {
+      return createErrorResult(`Failed to open flow: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  },
+};
+
+// ============================================================================
 // Export
 // ============================================================================
 export const knowledgeTools: MCPTool[] = [
   knowledgeSearchTool,
   knowledgeSummaryTool,
+  knowledgeOpenTool,
 ];

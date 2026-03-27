@@ -881,6 +881,42 @@ program
   });
 
 // ============================================================================
+// IMPORT COMMAND
+// ============================================================================
+program
+  .command('import')
+  .description('Import a shared .applab project bundle')
+  .argument('<file>', 'Path to .applab file')
+  .action(async (file: string) => {
+    try {
+      const { resolve } = await import('node:path');
+      const filePath = resolve(file);
+
+      console.log(chalk.cyan(`\n  Importing: ${filePath}\n`));
+
+      const { getDatabase, projects, frames: framesTable, DATA_DIR, FRAMES_DIR, PROJECTS_DIR } = await import('./db/index.js');
+      const { importApplabBundle } = await import('./core/export/import.js');
+
+      const db = getDatabase();
+      const result = await importApplabBundle(filePath, db, { projects, frames: framesTable }, {
+        dataDir: DATA_DIR,
+        framesDir: FRAMES_DIR,
+        projectsDir: PROJECTS_DIR,
+      });
+
+      if (result.success) {
+        console.log(chalk.green(`  ✔ Imported: ${result.projectName}`));
+        console.log(chalk.green(`  ✔ ${result.frameCount} frames`));
+        console.log(chalk.gray(`  ID: ${result.projectId}\n`));
+      } else {
+        console.log(chalk.red(`  Import failed: ${result.error}\n`));
+      }
+    } catch (error) {
+      console.log(chalk.red(`  Import failed: ${error instanceof Error ? error.message : String(error)}\n`));
+    }
+  });
+
+// ============================================================================
 // PARSE ARGS
 // ============================================================================
 program.parse();

@@ -683,6 +683,36 @@ export const exportInfographicTool: MCPTool = {
 };
 
 // ============================================================================
+// dlab.project.import
+// ============================================================================
+export const importProjectTool: MCPTool = {
+  name: 'dlab.project.import',
+  description: 'Import a shared .applab project bundle file. Use this when someone shares a .applab file with you.',
+  inputSchema: z.object({
+    filePath: z.string().describe('Path to the .applab file'),
+  }),
+  handler: async (params) => {
+    try {
+      const { projects: projectsTable, frames: framesTable, DATA_DIR, FRAMES_DIR, PROJECTS_DIR } = await import('../../db/index.js');
+      const { importApplabBundle } = await import('../../core/export/import.js');
+
+      const db = getDatabase();
+      const result = await importApplabBundle(params.filePath, db, { projects: projectsTable, frames: framesTable }, {
+        dataDir: DATA_DIR,
+        framesDir: FRAMES_DIR,
+        projectsDir: PROJECTS_DIR,
+      });
+
+      if (!result.success) return createErrorResult(`Import failed: ${result.error}`);
+
+      return createTextResult(`Project imported!\n\nName: ${result.projectName}\nID: ${result.projectId}\nFrames: ${result.frameCount}\n\nUse dlab.knowledge.search to query this project.`);
+    } catch (error) {
+      return createErrorResult(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  },
+};
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 export const exportTools: MCPTool[] = [
@@ -699,4 +729,5 @@ export const exportTools: MCPTool[] = [
   exportRevealTool,
   exportSequenceTool,
   exportInfographicTool,
+  importProjectTool,
 ];

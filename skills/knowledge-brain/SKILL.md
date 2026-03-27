@@ -1,6 +1,6 @@
 ---
 name: knowledge-brain
-description: Search app knowledge from captured flows - UI, screens, behaviors
+description: Search and visualize app knowledge from captured flows
 context: fork
 agent: general-purpose
 always: true
@@ -11,71 +11,72 @@ tags:
   - app-flow
   - ui
   - screens
+  - brain
 ---
 
 # DiscoveryLab Knowledge Brain
 
-DiscoveryLab captures app recordings and analyzes them with OCR + AI, building a knowledge base of every flow, screen, and UI element. This skill lets you query that knowledge.
+DiscoveryLab captures app recordings and analyzes them with AI, building a knowledge base of every flow, screen, and UI element. This skill lets you query and visualize that knowledge.
 
-## When to Use
+## Default behavior: Visual first
 
-Use this whenever the user asks about:
-- How a specific screen or flow works in their app
-- What UI elements exist on a page (buttons, inputs, labels)
-- The user journey through a feature (onboarding, checkout, settings)
-- Comparing different captures of the same flow
-- Any reference to app screens, recordings, or captured content
-- Context about what was tested or recorded
-
-Also use proactively when:
-- The user is working on code related to a feature that was captured
-- You need visual context about the app to give better answers
-- The user mentions a Jira ticket that might be linked to a project
+When the user asks about an app flow, **show it visually by default** using `dlab.knowledge.open`. The returned HTML renders as an interactive canvas with animated frame player, annotations, and navigation. Only fall back to text if the user explicitly asks for text or if no frames are available.
 
 ## Tools
 
-### `dlab.knowledge.search`
-Semantic search across all captured projects. Matches against: project names, AI analysis summaries, OCR text from every screen, tags, and linked tickets.
+### `dlab.knowledge.open` (primary - visual)
+Opens an interactive infographic of an app flow. Returns self-contained HTML.
 
 ```
-dlab.knowledge.search { query: "login" }
-dlab.knowledge.search { query: "paywall" }
-dlab.knowledge.search { query: "onboarding flow" }
+dlab.knowledge.open { query: "login" }
+dlab.knowledge.open { query: "onboarding flow" }
+dlab.knowledge.open { projectId: "abc123" }
+```
+
+Use when:
+- User asks "how does the login work?"
+- User asks "show me the onboarding"
+- User says "what does the settings screen look like?"
+- Any question about a captured flow where visual context helps
+
+### `dlab.knowledge.search` (text answers)
+Search across all projects. Returns text with overview, flow steps, UI elements.
+
+```
+dlab.knowledge.search { query: "checkout" }
 dlab.knowledge.search { query: "PROJ-123" }
-dlab.knowledge.search { query: "settings profile" }
 ```
 
-Returns per match:
-- App overview (what the screen/flow does)
-- User flow steps (numbered sequence)
-- UI elements found (buttons, inputs, navigation)
-- OCR text sample (actual text visible on screens)
-- Project ID for deeper lookup
+Use when:
+- User asks a specific factual question ("what buttons are on the paywall?")
+- User references a Jira ticket
+- You need quick context without opening a visual
 
-### `dlab.knowledge.summary`
-High-level overview of the entire knowledge base - all projects grouped by app with stats.
+### `dlab.knowledge.summary` (overview)
+Lists all captured knowledge grouped by app.
 
 ```
 dlab.knowledge.summary {}
 ```
 
-Use this when:
-- The user asks "what do we have captured?"
-- You need to orient yourself on what apps/flows exist
-- Starting a new conversation and need context
+Use when:
+- User asks "what do we have captured?"
+- Starting a new conversation
+- Need to orient on available projects
 
-### `dlab.project.get`
-Full details on a specific project found via search. Use when the search result summary is not enough.
+### `dlab.project.import` (sharing)
+Import a shared .applab project file.
 
 ```
-dlab.project.get { projectId: "<id from search results>" }
+dlab.project.import { filePath: "/path/to/project.applab" }
 ```
 
-## How to Respond
+Use when someone shares a .applab file.
 
-1. **Search first** - never say "I don't have information about that" without searching
-2. **No match?** - run `dlab.knowledge.summary` to show the user what's available
-3. **Multiple results** - present the most recent first, note if there are different versions
-4. **Cite the source** - mention which project/recording the information comes from
-5. **Suggest captures** - if the user asks about a flow that doesn't exist, suggest they capture it with DiscoveryLab
-6. **Be specific** - use the OCR text and UI elements from results to give precise answers, not generic ones
+## How to respond
+
+1. **Visual first** - use `dlab.knowledge.open` by default for flow questions
+2. **Search first** - never say "I don't know" without searching
+3. **No match?** - run `dlab.knowledge.summary` to show what's available
+4. **Cite the source** - mention which project the information comes from
+5. **Suggest captures** - if a flow doesn't exist, suggest capturing it
