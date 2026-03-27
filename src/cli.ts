@@ -854,9 +854,10 @@ program
         const data = buildInfographicData(project, frameFiles, frameOcr);
         console.log(chalk.green(`  ✔ ${project.aiSummary ? 'AI analysis loaded' : 'No analysis (basic labels)'}`));
 
+        const slug = (project.marketingTitle || project.name || project.id).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
         const outputPath = opts.output
-          ? pathJoin(opts.output, `${project.id}-infographic.html`)
-          : pathJoin(EXPORTS_DIR, `${project.id}-infographic.html`);
+          ? pathJoin(opts.output, `${slug}-infographic.html`)
+          : pathJoin(EXPORTS_DIR, `${slug}-infographic.html`);
 
         const result = generateInfographicHtml(data, outputPath);
 

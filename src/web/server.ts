@@ -5689,7 +5689,8 @@ app.post('/api/export/infographic', async (c) => {
     const annotations = cached?.steps?.map((s: string) => ({ label: s }));
 
     const data = buildInfographicData(project, frameFiles, frameOcr, annotations);
-    const outputPath = join(eDir, `${projectId}-infographic.html`);
+    const slug = (project.marketingTitle || project.name || projectId).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+    const outputPath = join(eDir, `${slug}-infographic.html`);
     const result = generateInfographicHtml(data, outputPath);
 
     if (!result.success) return c.json({ error: result.error }, 500);

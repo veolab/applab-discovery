@@ -658,9 +658,10 @@ export const exportInfographicTool: MCPTool = {
       }
 
       const data = buildInfographicData(project, frameFiles, frameOcr);
+      const slug = (project.marketingTitle || project.name || project.id).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
       const outputFilePath = params.outputPath
-        ? path.join(params.outputPath, `${project.id}-infographic.html`)
-        : path.join(EXPORTS_DIR, `${project.id}-infographic.html`);
+        ? path.join(params.outputPath, `${slug}-infographic.html`)
+        : path.join(EXPORTS_DIR, `${slug}-infographic.html`);
 
       const result = generateInfographicHtml(data, outputFilePath);
 
