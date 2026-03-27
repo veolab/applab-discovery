@@ -5033,6 +5033,28 @@ app.post('/api/export', async (c) => {
         if (esvpSnapshot) {
           writeExportJson(join(bundleRoot, 'esvp', 'snapshot.json'), esvpSnapshot);
         }
+
+        // Include template renders and generated assets from exports dir
+        const projectExportsDir = join(EXPORTS_DIR, projectId);
+        if (existsSync(projectExportsDir) && statSync(projectExportsDir).isDirectory()) {
+          const rendersDir = join(bundleRoot, 'renders');
+          mkdirSync(rendersDir, { recursive: true });
+          const exportFiles = readdirSync(projectExportsDir);
+          for (const f of exportFiles) {
+            const src = join(projectExportsDir, f);
+            if (statSync(src).isFile()) {
+              cpSync(src, join(rendersDir, f));
+            }
+          }
+        }
+
+        // Include template content (custom titles, scripts) if saved
+        const templateContentPath = join(PROJECTS_DIR, projectId, 'template-content.json');
+        if (existsSync(templateContentPath)) {
+          mkdirSync(join(bundleRoot, 'templates'), { recursive: true });
+          cpSync(templateContentPath, join(bundleRoot, 'templates', 'content.json'));
+        }
+
         writeExportText(join(bundleRoot, 'README.txt'), [
           `${rawProject.name}`,
           `Exported from DiscoveryLab ${APP_VERSION} on ${new Date(timestamp).toISOString()}.`,
@@ -12451,6 +12473,22 @@ app.post('/api/templates/render', async (c) => {
     }
 
     const { props } = templateState;
+
+    // Check if a cached render exists (skip re-render if no changes)
+    const forceRender = body.force === true;
+    if (!forceRender) {
+      const cached = getCachedRender(projectId, templateId as TemplateId);
+      if (cached && existsSync(cached)) {
+        return c.json({
+          jobId: 'cached',
+          status: 'completed',
+          outputPath: cached,
+          downloadUrl: `/api/file?path=${encodeURIComponent(cached)}&download=true`,
+          previewUrl: `/api/file?path=${encodeURIComponent(cached)}`,
+          cached: true,
+        });
+      }
+    }
 
     const job = await startRender(projectId, templateId as TemplateId, props, (progress) => {
       broadcastToClients({

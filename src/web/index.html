@@ -12864,6 +12864,23 @@
 
                 if (favoriteTemplate && currentTemplateProps?.templatesAllowed !== false) {
                     switchTemplate(favoriteTemplate);
+                } else if (currentTemplateProps?.templatesAllowed !== false) {
+                    // Auto-select cached template if available (no re-render needed)
+                    const templates = templateStatus.templates || [];
+                    for (const t of templates) {
+                        try {
+                            const checkRes = await fetch('/api/templates/render', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ projectId: currentProject?.id, templateId: t.id }),
+                            });
+                            const checkData = await checkRes.json();
+                            if (checkData.cached) {
+                                switchTemplate(t.id);
+                                break;
+                            }
+                        } catch { /* skip */ }
+                    }
                 }
             } catch (e) {
                 console.log('[Templates] Init error:', e);
@@ -12983,7 +13000,7 @@
             }
         }
 
-        async function switchTemplate(templateId) {
+        async function switchTemplate(templateId, force = false) {
             // Skip if already on this template
             if (templateId === activeTemplate) return;
             if (templateId !== 'raw' && currentTemplateProps?.templatesAllowed === false) {
@@ -13028,13 +13045,27 @@
                 const res = await fetch('/api/templates/render', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ projectId: currentProject.id, templateId }),
+                    body: JSON.stringify({ projectId: currentProject.id, templateId, force }),
                 });
                 const data = await res.json();
 
                 if (data.error) {
                     showToast(data.error, 'error');
                     switchTemplate('raw');
+                    return;
+                }
+
+                // Cached render - show immediately without polling
+                if (data.cached && data.previewUrl) {
+                    const skeleton = document.getElementById('templateSkeleton');
+                    const templateContainer = document.getElementById('templatePreviewContainer');
+                    const templateVideo = document.getElementById('templateVideo');
+                    if (skeleton) skeleton.style.display = 'none';
+                    if (templateVideo) {
+                        templateVideo.src = data.previewUrl + '&t=' + Date.now();
+                        templateVideo.load();
+                    }
+                    if (templateContainer) templateContainer.style.display = '';
                     return;
                 }
 
@@ -13490,11 +13521,11 @@
                     deviceMockup: data.content?.deviceMockup || deviceMockup,
                 };
 
-                // Force re-render
+                // Force re-render after content edit
                 if (activeTemplate !== 'raw') {
                     const prevTemplate = activeTemplate;
                     activeTemplate = '__force_rerender__';
-                    switchTemplate(prevTemplate);
+                    switchTemplate(prevTemplate, true);
                 }
             } catch {
                 showToast('Failed to save content', 'error');

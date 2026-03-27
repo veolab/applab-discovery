@@ -1,7 +1,7 @@
 {
   "name": "discoverylab",
   "description": "AI-powered app testing & marketing asset generator. Record mobile/web apps, run automated tests with Maestro & Playwright, and generate professional screenshots, GIFs, and test reports.",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "author": {
     "name": "Anderson Melo",
     "email": "anderson.90@gmail.com"
