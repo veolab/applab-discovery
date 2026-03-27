@@ -5650,6 +5650,68 @@ app.post('/api/visualization/screenshot', async (c) => {
 // BATCH EXPORT PIPELINE
 // ============================================================================
 
+// Export project as self-contained HTML infographic
+app.post('/api/export/infographic', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { projectId, open } = body;
+    if (!projectId) return c.json({ error: 'projectId required' }, 400);
+
+    const db = getDatabase();
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+    if (!project) return c.json({ error: 'Project not found' }, 404);
+
+    const { FRAMES_DIR: fDir, EXPORTS_DIR: eDir, PROJECTS_DIR: pDir } = await import('../db/index.js');
+    const { collectFrameImages, buildInfographicData, generateInfographicHtml } = await import('../core/export/infographic.js');
+
+    const dbFrames = await db.select().from(frames)
+      .where(eq(frames.projectId, projectId))
+      .orderBy(frames.frameNumber)
+      .limit(20);
+
+    let frameFiles: string[];
+    let frameOcr: Array<{ ocrText?: string | null }>;
+
+    if (dbFrames.length > 0) {
+      frameFiles = dbFrames.map(f => f.imagePath);
+      frameOcr = dbFrames;
+    } else {
+      frameFiles = collectFrameImages(join(fDir, projectId), project.videoPath, pDir, projectId);
+      frameOcr = frameFiles.map(() => ({ ocrText: null }));
+    }
+
+    if (frameFiles.length === 0) {
+      return c.json({ error: 'No frames found. Run analyzer first.' }, 400);
+    }
+
+    // Use cached smart annotations if available
+    const cached = annotationCache.get(projectId);
+    const annotations = cached?.steps?.map((s: string) => ({ label: s }));
+
+    const data = buildInfographicData(project, frameFiles, frameOcr, annotations);
+    const outputPath = join(eDir, `${projectId}-infographic.html`);
+    const result = generateInfographicHtml(data, outputPath);
+
+    if (!result.success) return c.json({ error: result.error }, 500);
+
+    if (open) {
+      const { exec } = await import('node:child_process');
+      exec(`open "${result.outputPath}"`);
+    }
+
+    return c.json({
+      success: true,
+      path: result.outputPath,
+      downloadUrl: `/api/file?path=${encodeURIComponent(result.outputPath!)}&download=true`,
+      size: result.size,
+      frameCount: result.frameCount,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
 // Build default document from project data
 app.get('/api/export/document/:projectId', async (c) => {
   try {

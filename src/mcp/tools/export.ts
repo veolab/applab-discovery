@@ -612,6 +612,76 @@ export const exportSequenceTool: MCPTool = {
 };
 
 // ============================================================================
+// dlab.export.infographic
+// ============================================================================
+export const exportInfographicTool: MCPTool = {
+  name: 'dlab.export.infographic',
+  description: 'Export a DiscoveryLab project as an interactive HTML infographic. Generates a self-contained offline HTML file with animated frame player, hotspots, annotations, and baseline status.',
+  inputSchema: z.object({
+    projectId: z.string().describe('Project ID'),
+    open: z.boolean().optional().describe('Open in browser after export'),
+    outputPath: z.string().optional().describe('Custom output directory'),
+  }),
+  handler: async (params) => {
+    try {
+      const { projects: projectsTable, frames: framesTable, FRAMES_DIR, PROJECTS_DIR } = await import('../../db/index.js');
+      const { eq } = await import('drizzle-orm');
+      const { collectFrameImages, buildInfographicData, generateInfographicHtml } = await import('../../core/export/infographic.js');
+
+      const db = getDatabase();
+      const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, params.projectId)).limit(1);
+      if (!project) return createErrorResult(`Project not found: ${params.projectId}`);
+
+      const dbFrames = await db.select().from(framesTable)
+        .where(eq(framesTable.projectId, project.id))
+        .orderBy(framesTable.frameNumber)
+        .limit(20);
+
+      let frameFiles: string[];
+      let frameOcr: Array<{ ocrText?: string | null }>;
+
+      if (dbFrames.length > 0) {
+        frameFiles = dbFrames.map(f => f.imagePath);
+        frameOcr = dbFrames;
+      } else {
+        frameFiles = collectFrameImages(
+          path.join(FRAMES_DIR, project.id),
+          project.videoPath,
+          PROJECTS_DIR,
+          project.id,
+        );
+        frameOcr = frameFiles.map(() => ({ ocrText: null }));
+      }
+
+      if (frameFiles.length === 0) {
+        return createErrorResult('No frames found. Run analyzer first.');
+      }
+
+      const data = buildInfographicData(project, frameFiles, frameOcr);
+      const outputFilePath = params.outputPath
+        ? path.join(params.outputPath, `${project.id}-infographic.html`)
+        : path.join(EXPORTS_DIR, `${project.id}-infographic.html`);
+
+      const result = generateInfographicHtml(data, outputFilePath);
+
+      if (!result.success) {
+        return createErrorResult(`Export failed: ${result.error}`);
+      }
+
+      if (params.open) {
+        const { exec } = await import('node:child_process');
+        exec(`open "${result.outputPath}"`);
+      }
+
+      const sizeKb = ((result.size || 0) / 1024).toFixed(1);
+      return createTextResult(`Infographic exported!\n\nPath: ${result.outputPath}\nSize: ${sizeKb}KB\nFrames: ${result.frameCount}\n\nOpen in any browser to view.`);
+    } catch (error) {
+      return createErrorResult(`Export failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  },
+};
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 export const exportTools: MCPTool[] = [
@@ -627,4 +697,5 @@ export const exportTools: MCPTool[] = [
   exportClipboardTool,
   exportRevealTool,
   exportSequenceTool,
+  exportInfographicTool,
 ];

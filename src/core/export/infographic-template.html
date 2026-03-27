@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>__TITLE__</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root { --accent: #6366f1; --bg: #0f0f17; --bg2: #16161f; --bg3: #1e1e2a; --text: #e4e4e7; --muted: #71717a; --ok: #22c55e; --warn: #eab308; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; min-height: 100vh; overflow-x: hidden; }
+
+  /* Header */
+  .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .header-title { font-size: 16px; font-weight: 700; }
+  .header-platform { font-size: 10px; padding: 2px 8px; background: rgba(99,102,241,0.12); color: var(--accent); border-radius: 10px; }
+  .header-date { font-size: 11px; color: var(--muted); }
+
+  /* Step chips */
+  .chips { display: flex; gap: 4px; padding: 10px 24px; overflow-x: auto; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip { font-size: 10px; padding: 4px 12px; border-radius: 16px; background: var(--bg2); border: 1px solid rgba(255,255,255,0.06); cursor: pointer; white-space: nowrap; transition: all 0.25s; color: var(--muted); font-weight: 500; }
+  .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .chip:hover:not(.active) { border-color: rgba(255,255,255,0.15); }
+
+  /* Main layout */
+  .main { display: grid; grid-template-columns: 1fr 300px; height: calc(100vh - 100px); overflow: hidden; }
+  @media (max-width: 768px) { .main { grid-template-columns: 1fr; } .panel { border-left: none; border-top: 1px solid rgba(255,255,255,0.05); max-height: 200px; } }
+
+  /* Viewer */
+  .viewer { display: flex; align-items: center; justify-content: center; position: relative; padding: 20px; }
+  .device-area { position: relative; display: flex; align-items: center; }
+  .phone { width: 320px; background: #000; border-radius: 28px; overflow: hidden; box-shadow: 0 16px 48px rgba(0,0,0,0.5); border: 1.5px solid rgba(255,255,255,0.06); position: relative; }
+  .phone img { width: 100%; display: block; transition: opacity 0.35s ease; }
+  .phone img.out { opacity: 0; position: absolute; top: 0; left: 0; }
+  .phone img.in { opacity: 1; position: relative; }
+
+  /* Side annotations (appear when paused) */
+  .side-annots { position: absolute; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 8px; opacity: 0; transition: opacity 0.35s; pointer-events: none; width: 160px; }
+  .side-annots.show { opacity: 1; pointer-events: auto; }
+  .side-annots.left { right: calc(100% + 16px); }
+  .side-annots.right { left: calc(100% + 16px); }
+  .side-annot { padding: 8px 10px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; position: relative; }
+  .side-annot::before { content: ''; position: absolute; top: 50%; width: 12px; height: 1px; background: rgba(255,255,255,0.15); }
+  .side-annots.left .side-annot::before { right: -13px; }
+  .side-annots.right .side-annot::before { left: -13px; }
+  .side-annot-title { font-size: 10px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 5px; }
+  .side-annot-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+  .side-annot-desc { font-size: 9px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+
+  /* Controls */
+  .controls { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); padding: 6px 14px; border-radius: 20px; }
+  .play-btn { width: 28px; height: 28px; border-radius: 50%; background: transparent; border: 1.5px solid rgba(255,255,255,0.3); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+  .play-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .dots { display: flex; gap: 5px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.15); cursor: pointer; transition: all 0.25s; }
+  .dot.active { background: var(--accent); width: 16px; border-radius: 3px; }
+  .status-text { font-size: 9px; color: rgba(255,255,255,0.35); }
+
+  /* Panel */
+  .panel { padding: 16px; border-left: 1px solid rgba(255,255,255,0.05); overflow-y: auto; background: var(--bg2); display: flex; flex-direction: column; gap: 16px; }
+  .panel-section { }
+  .panel-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 6px; }
+  .step-number { font-size: 11px; color: var(--accent); font-weight: 700; margin-bottom: 2px; }
+  .step-title { font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .step-desc { font-size: 12px; color: var(--muted); line-height: 1.5; margin-top: 4px; }
+
+  /* Annotation cards in panel */
+  .annot-cards { display: flex; flex-direction: column; gap: 6px; }
+  .annot-card { padding: 8px 10px; background: var(--bg3); border-radius: 8px; border-left: 3px solid var(--accent); cursor: pointer; transition: all 0.2s; }
+  .annot-card:hover { background: rgba(99,102,241,0.08); }
+  .annot-card-title { font-size: 11px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .annot-card-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .annot-card-desc { font-size: 10px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+
+  .baseline-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 3px 10px; border-radius: 12px; background: rgba(113,113,122,0.1); color: var(--muted); }
+  .baseline-badge.ok { background: rgba(34,197,94,0.1); color: var(--ok); }
+  .baseline-badge.warn { background: rgba(234,179,8,0.1); color: var(--warn); }
+  .bl-dot { width: 5px; height: 5px; border-radius: 50%; }
+
+  .footer { text-align: center; padding: 6px; font-size: 8px; color: rgba(255,255,255,0.12); }
+
+  /* Transitions */
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .fade-in { animation: fadeIn 0.3s ease forwards; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-left">
+    <div class="header-title" id="title"></div>
+    <div class="header-platform" id="platform"></div>
+  </div>
+  <div class="header-date" id="date"></div>
+</div>
+<div class="chips" id="chips"></div>
+<div class="main">
+  <div class="viewer">
+    <div class="device-area" id="deviceArea" style="position: relative;">
+      <div class="side-annots left" id="annotsLeft"></div>
+      <div class="phone" id="phone"></div>
+      <div class="side-annots right" id="annotsRight"></div>
+    </div>
+    <div class="controls">
+      <button class="play-btn" id="playBtn">
+        <svg id="playIco" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21"/></svg>
+        <svg id="pauseIco" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+      <div class="dots" id="dots"></div>
+      <div class="status-text" id="statusText">playing</div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-section">
+      <div class="panel-label">Step</div>
+      <div class="step-number" id="stepNum"></div>
+      <div class="step-title" id="stepTitle"></div>
+      <div class="step-desc" id="stepDesc"></div>
+    </div>
+    <div class="panel-section">
+      <div class="panel-label">Annotations</div>
+      <div class="annot-cards" id="annotCards"></div>
+    </div>
+    <div class="panel-section">
+      <div class="panel-label">Baseline</div>
+      <div class="baseline-badge" id="blBadge"><div class="bl-dot"></div><span></span></div>
+    </div>
+  </div>
+</div>
+<div class="footer">Generated by DiscoveryLab</div>
+
+<script>
+const D = window.FLOW_DATA || { name: 'Flow', frames: [] };
+const F = D.frames || [];
+let cur = 0, playing = true, timer = null;
+
+document.getElementById('title').textContent = D.name || 'App Flow';
+document.getElementById('platform').textContent = D.platform || '';
+document.getElementById('date').textContent = D.recorded_at ? new Date(D.recorded_at).toLocaleDateString() : '';
+
+// Create images
+const phone = document.getElementById('phone');
+F.forEach((f, i) => {
+  const img = document.createElement('img');
+  img.src = f.base64;
+  img.className = i === 0 ? 'in' : 'out';
+  img.dataset.i = i;
+  phone.appendChild(img);
+});
+
+// Chips
+const chips = document.getElementById('chips');
+F.forEach((f, i) => {
+  const c = document.createElement('div');
+  c.className = `chip ${i===0?'active':''}`;
+  c.textContent = `${i+1}. ${f.step_name}`;
+  c.onclick = () => { go(i); stop(); };
+  chips.appendChild(c);
+});
+
+// Dots
+const dots = document.getElementById('dots');
+F.forEach((_, i) => {
+  const d = document.createElement('div');
+  d.className = `dot ${i===0?'active':''}`;
+  d.onclick = () => { go(i); stop(); };
+  dots.appendChild(d);
+});
+
+function go(i) {
+  cur = i;
+  phone.querySelectorAll('img').forEach((img, j) => { img.className = j===i?'in':'out'; });
+  chips.querySelectorAll('.chip').forEach((c, j) => c.classList.toggle('active', j===i));
+  dots.querySelectorAll('.dot').forEach((d, j) => d.classList.toggle('active', j===i));
+  updatePanel();
+  updateAnnotations();
+}
+
+function updatePanel() {
+  const f = F[cur]; if (!f) return;
+  document.getElementById('stepNum').textContent = `${cur+1} of ${F.length}`;
+  document.getElementById('stepTitle').textContent = f.step_name;
+  document.getElementById('stepDesc').textContent = f.description;
+
+  // Annotation cards
+  const cards = document.getElementById('annotCards');
+  cards.innerHTML = '';
+  (f.hotspots || []).forEach(h => {
+    const card = document.createElement('div');
+    card.className = 'annot-card fade-in';
+    card.style.borderLeftColor = h.color;
+    card.innerHTML = `<div class="annot-card-title"><div class="annot-card-dot" style="background:${h.color}"></div>${h.title}</div><div class="annot-card-desc">${h.description}</div>`;
+    cards.appendChild(card);
+  });
+
+  // Baseline
+  const bl = document.getElementById('blBadge');
+  const s = f.baseline_status || 'not_validated';
+  bl.className = `baseline-badge ${s==='ok'?'ok':s==='changed'?'warn':''}`;
+  bl.querySelector('.bl-dot').style.background = s==='ok'?'var(--ok)':s==='changed'?'var(--warn)':'var(--muted)';
+  bl.querySelector('span').textContent = s==='ok'?'Validated':s==='changed'?'Changed':'No baseline';
+}
+
+function updateAnnotations() {
+  const left = document.getElementById('annotsLeft');
+  const right = document.getElementById('annotsRight');
+  left.innerHTML = ''; right.innerHTML = '';
+
+  if (playing) {
+    left.classList.remove('show'); right.classList.remove('show');
+    return;
+  }
+  left.classList.add('show'); right.classList.add('show');
+
+  const f = F[cur]; if (!f?.hotspots?.length) return;
+
+  f.hotspots.forEach((h, j) => {
+    const container = j % 2 === 0 ? left : right;
+    const el = document.createElement('div');
+    el.className = 'side-annot fade-in';
+    el.style.animationDelay = (j * 0.1) + 's';
+    el.innerHTML = `
+      <div class="side-annot-title"><div class="side-annot-dot" style="background:${h.color}"></div>${h.label}</div>
+      ${h.description !== h.label ? `<div class="side-annot-desc">${h.description.slice(0, 60)}</div>` : ''}
+    `;
+    container.appendChild(el);
+  });
+}
+
+function play() {
+  playing = true;
+  document.getElementById('playIco').style.display = 'none';
+  document.getElementById('pauseIco').style.display = '';
+  document.getElementById('statusText').textContent = 'playing';
+  document.getElementById('annotsLeft').classList.remove('show');
+  document.getElementById('annotsRight').classList.remove('show');
+  timer = setInterval(() => { cur = (cur+1)%F.length; go(cur); }, 2200);
+}
+
+function stop() {
+  playing = false; clearInterval(timer);
+  document.getElementById('playIco').style.display = '';
+  document.getElementById('pauseIco').style.display = 'none';
+  document.getElementById('statusText').textContent = 'paused';
+  updateAnnotations();
+}
+
+document.getElementById('playBtn').onclick = () => playing ? stop() : play();
+
+updatePanel();
+play();
+</script>
+</body>
+</html>

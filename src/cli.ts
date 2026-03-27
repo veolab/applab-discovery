@@ -793,6 +793,93 @@ program
   });
 
 // ============================================================================
+// EXPORT COMMAND
+// ============================================================================
+program
+  .command('export')
+  .description('Export project in various formats')
+  .argument('<project-id>', 'Project ID or slug')
+  .option('--format <format>', 'Export format (infographic, applab, esvp)', 'infographic')
+  .option('--output <path>', 'Custom output path')
+  .option('--open', 'Open file after generation')
+  .option('--compress', 'Force image compression')
+  .option('--no-baseline', 'Omit baseline info')
+  .action(async (projectId: string, opts: { format: string; output?: string; open?: boolean; compress?: boolean; baseline?: boolean }) => {
+    try {
+      if (opts.format === 'infographic') {
+        console.log(chalk.cyan(`\n  Exporting infographic for: ${projectId}\n`));
+
+        const { join: pathJoin } = await import('node:path');
+        const { getDatabase, projects, frames: framesTable, FRAMES_DIR, EXPORTS_DIR, PROJECTS_DIR } = await import('./db/index.js');
+        const { eq } = await import('drizzle-orm');
+        const { collectFrameImages, buildInfographicData, generateInfographicHtml } = await import('./core/export/infographic.js');
+
+        const db = getDatabase();
+        const allProjects = await db.select().from(projects);
+        const project = allProjects.find(p => p.id === projectId || p.id.startsWith(projectId) || p.name.toLowerCase().includes(projectId.toLowerCase()));
+
+        if (!project) {
+          console.log(chalk.red(`  Project not found: ${projectId}`));
+          console.log(chalk.gray('  Available projects:'));
+          for (const p of allProjects.slice(0, 10)) {
+            console.log(chalk.gray(`    ${p.id.slice(0, 12)} - ${p.marketingTitle || p.name}`));
+          }
+          return;
+        }
+
+        console.log(chalk.green(`  ✔ Found project: ${project.marketingTitle || project.name}`));
+
+        // Get frames
+        const dbFrames = await db.select().from(framesTable).where(eq(framesTable.projectId, project.id)).orderBy(framesTable.frameNumber).limit(20);
+        let frameFiles: string[];
+        let frameOcr: Array<{ ocrText?: string | null }>;
+
+        if (dbFrames.length > 0) {
+          frameFiles = dbFrames.map(f => f.imagePath);
+          frameOcr = dbFrames;
+        } else {
+          frameFiles = collectFrameImages(pathJoin(FRAMES_DIR, project.id), project.videoPath, PROJECTS_DIR, project.id);
+          frameOcr = frameFiles.map(() => ({ ocrText: null }));
+        }
+
+        console.log(chalk.green(`  ✔ ${frameFiles.length} frames found`));
+
+        if (frameFiles.length === 0) {
+          console.log(chalk.red('  No frames found. Run analyzer first.'));
+          return;
+        }
+
+        // Annotations not available in CLI context (server not running)
+
+        const data = buildInfographicData(project, frameFiles, frameOcr);
+        console.log(chalk.green(`  ✔ ${project.aiSummary ? 'AI analysis loaded' : 'No analysis (basic labels)'}`));
+
+        const outputPath = opts.output
+          ? pathJoin(opts.output, `${project.id}-infographic.html`)
+          : pathJoin(EXPORTS_DIR, `${project.id}-infographic.html`);
+
+        const result = generateInfographicHtml(data, outputPath);
+
+        if (result.success) {
+          const sizeKb = ((result.size || 0) / 1024).toFixed(1);
+          console.log(chalk.green(`  ✔ Exported: ${result.outputPath} (${sizeKb}KB, ${result.frameCount} frames)`));
+
+          if (opts.open) {
+            const { exec } = await import('node:child_process');
+            exec(`open "${result.outputPath}"`);
+          }
+        } else {
+          console.log(chalk.red(`  Export failed: ${result.error}`));
+        }
+      } else {
+        console.log(chalk.yellow(`  Format "${opts.format}" - use the web UI for applab/esvp exports.`));
+      }
+    } catch (error) {
+      console.log(chalk.red(`  Export failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
+  });
+
+// ============================================================================
 // PARSE ARGS
 // ============================================================================
 program.parse();

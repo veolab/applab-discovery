@@ -22043,11 +22043,35 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                         <div id="exportFormatHelp" style="margin-top: 8px; font-size: 12px; color: var(--text-muted); line-height: 1.5;"></div>
                     </div>
 
-                    <button class="btn btn-primary" onclick="exportProject()">Export</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-primary" onclick="exportProject()">Export</button>
+                        <button class="btn btn-secondary" onclick="exportInfographicHtml()" style="font-size: 11px;">Infographic HTML</button>
+                    </div>
                 </div>
             `;
 
             updateExportFormatHelp();
+        }
+
+        async function exportInfographicHtml() {
+            if (!currentProject) return;
+            showToast('Generating infographic...', 'info');
+            try {
+                const resp = await fetch('/api/export/infographic', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ projectId: currentProject.id, open: true }),
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    const sizeKb = ((data.size || 0) / 1024).toFixed(1);
+                    showToast(`Infographic exported (${sizeKb}KB, ${data.frameCount} frames)`, 'success');
+                } else {
+                    showToast(data.error || 'Export failed', 'error');
+                }
+            } catch (err) {
+                showToast('Export failed', 'error');
+            }
         }
 
         async function exportProject() {
