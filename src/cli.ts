@@ -674,46 +674,94 @@ program
 // ============================================================================
 program
   .command('install')
-  .description('Install DiscoveryLab as Claude Code MCP server')
-  .action(async () => {
-    const { homedir } = await import('node:os');
-    const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
+  .description('Install DiscoveryLab as MCP server for Claude Code and/or Claude Desktop')
+  .option('--target <target>', 'Installation target: code, desktop, all (default: auto-detect)', '')
+  .action(async (opts: { target: string }) => {
+    const { homedir, platform } = await import('node:os');
+    const { existsSync, readFileSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
 
-    const claudeConfigPath = join(homedir(), '.claude.json');
-    console.log(chalk.cyan('\n  Installing DiscoveryLab MCP...\n'));
+    const home = homedir();
+    const mcpEntry = {
+      command: 'npx',
+      args: ['-y', '@veolab/discoverylab@latest', 'mcp'],
+    };
 
-    try {
-      // Read existing config or create new one
-      let config: { mcpServers?: Record<string, unknown> } = {};
-      if (existsSync(claudeConfigPath)) {
-        const content = readFileSync(claudeConfigPath, 'utf-8');
-        config = JSON.parse(content);
+    // Config paths for each target
+    const targets: Record<string, { name: string; path: string; restart: string }> = {
+      code: {
+        name: 'Claude Code',
+        path: join(home, '.claude.json'),
+        restart: 'Restart Claude Code to activate.',
+      },
+      desktop: {
+        name: 'Claude Desktop',
+        path: platform() === 'win32'
+          ? join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), 'Claude', 'claude_desktop_config.json')
+          : join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
+        restart: 'Restart Claude Desktop to activate.',
+      },
+    };
+
+    // Determine which targets to install
+    let selectedTargets: string[] = [];
+    const target = opts.target?.toLowerCase() || '';
+
+    if (target === 'code') {
+      selectedTargets = ['code'];
+    } else if (target === 'desktop') {
+      selectedTargets = ['desktop'];
+    } else if (target === 'all') {
+      selectedTargets = ['code', 'desktop'];
+    } else {
+      // Auto-detect: always install for Claude Code, add Desktop if its config dir exists
+      selectedTargets = ['code'];
+      const desktopDir = dirname(targets.desktop.path);
+      if (existsSync(desktopDir)) {
+        selectedTargets.push('desktop');
       }
-
-      // Ensure mcpServers exists
-      if (!config.mcpServers) {
-        config.mcpServers = {};
-      }
-
-      // Add discoverylab server
-      config.mcpServers.discoverylab = {
-        command: 'npx',
-        args: ['-y', '@veolab/discoverylab@latest', 'mcp']
-      };
-
-      // Write back
-      writeFileSync(claudeConfigPath, JSON.stringify(config, null, 2));
-
-      console.log(chalk.green('  ✓ Added to ~/.claude.json'));
-      console.log();
-      console.log(chalk.white('  Restart Claude Code to activate.'));
-      console.log(chalk.gray('  Or run: discoverylab serve'));
-      console.log();
-    } catch (error) {
-      console.error(chalk.red(`  Failed to install: ${error}`));
-      process.exit(1);
     }
+
+    console.log(chalk.cyan('\n  Installing DiscoveryLab MCP...\n'));
+    let installed = 0;
+
+    for (const key of selectedTargets) {
+      const t = targets[key];
+      try {
+        // Ensure directory exists
+        const dir = dirname(t.path);
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+        // Read existing config or create new one
+        let config: { mcpServers?: Record<string, unknown> } = {};
+        if (existsSync(t.path)) {
+          const content = readFileSync(t.path, 'utf-8');
+          try { config = JSON.parse(content); } catch { config = {}; }
+        }
+
+        // Merge - don't overwrite other mcpServers
+        if (!config.mcpServers) config.mcpServers = {};
+        config.mcpServers.discoverylab = mcpEntry;
+
+        writeFileSync(t.path, JSON.stringify(config, null, 2));
+        console.log(chalk.green(`  ✓ ${t.name} configured`));
+        console.log(chalk.gray(`    ${t.path}`));
+        installed++;
+      } catch (error) {
+        console.log(chalk.yellow(`  ✗ ${t.name} skipped: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    }
+
+    console.log();
+    if (installed > 0) {
+      for (const key of selectedTargets) {
+        console.log(chalk.white(`  ${targets[key].restart}`));
+      }
+      console.log(chalk.gray('  Or run: discoverylab serve'));
+    } else {
+      console.log(chalk.red('  No targets configured.'));
+    }
+    console.log();
   });
 
 // ============================================================================
