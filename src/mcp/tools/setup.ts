@@ -11,6 +11,8 @@ import { platform, homedir } from 'node:os';
 import type { MCPTool } from '../server.js';
 import { createTextResult, createJsonResult } from '../server.js';
 import { DATA_DIR, DB_PATH } from '../../db/index.js';
+import { getESVPHealth, listESVPDevices } from '../../core/integrations/esvp.js';
+import { LOCAL_ESVP_SERVER_URL } from '../../core/integrations/esvp-local-runtime.js';
 const requireFromHere = createRequire(import.meta.url);
 
 // ============================================================================
@@ -170,6 +172,45 @@ function checkMaestro(dep: Dependency): { installed: boolean; version: string | 
   };
 }
 
+type ReplayExecutorStatus = {
+  available: boolean;
+  dependencyReady: boolean;
+  deviceCount: number;
+  devices: Array<{ id: string; name: string; platform: string; status: string }>;
+  missing: string[];
+};
+
+function buildReplayExecutorStatus(input: {
+  devices: Array<{ id: string; name: string; platform: string; status: string }>;
+  dependencyReady: boolean;
+  missing: string[];
+}): ReplayExecutorStatus {
+  return {
+    available: input.dependencyReady && input.devices.length > 0,
+    dependencyReady: input.dependencyReady,
+    deviceCount: input.devices.length,
+    devices: input.devices,
+    missing: input.missing,
+  };
+}
+
+function createLocalReplayMessage(input: {
+  ready: boolean;
+  recommendedExecutor: 'adb' | 'ios-sim' | 'maestro-ios' | null;
+  androidReady: boolean;
+  iosReady: boolean;
+}): string {
+  if (input.ready && input.recommendedExecutor) {
+    return `Local replay is ready. Recommended executor: ${input.recommendedExecutor}.`;
+  }
+
+  if (input.androidReady || input.iosReady) {
+    return 'A mobile runtime is partially available, but the full local replay path still needs one or more dependencies.';
+  }
+
+  return 'Local replay is not ready yet. Install the missing mobile dependencies and boot at least one iOS Simulator or Android device/emulator.';
+}
+
 // ============================================================================
 // dlab.setup.status
 // ============================================================================
@@ -258,6 +299,103 @@ export const setupCheckTool: MCPTool = {
     } else {
       return createTextResult(`${dep.name} is NOT installed.\nInstall with: ${dep.installHint}`);
     }
+  },
+};
+
+// ============================================================================
+// dlab.setup.replay.status
+// ============================================================================
+export const setupReplayStatusTool: MCPTool = {
+  name: 'dlab.setup.replay.status',
+  description: 'Check whether this machine can run local ESVP replay for Claude Desktop using iOS Simulator or Android.',
+  inputSchema: z.object({}),
+  handler: async () => {
+    const adbStatus = checkDependency(dependencies[4]);
+    const xcodeStatus = platform() === 'darwin'
+      ? checkDependency(dependencies[3])
+      : { installed: false, version: null, error: 'Xcode CLI Tools are only available on macOS' };
+    const maestroStatus = checkDependency(dependencies[1]);
+
+    const deviceEnvelope = await listESVPDevices('all').catch((error) => ({
+      adb: { devices: [], error: error instanceof Error ? error.message : String(error) },
+      iosSim: { devices: [], error: error instanceof Error ? error.message : String(error) },
+      maestroIos: { devices: [], error: error instanceof Error ? error.message : String(error) },
+    }));
+    const localEntropyHealth = await getESVPHealth(LOCAL_ESVP_SERVER_URL).catch((error) => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+
+    const androidDevices = Array.isArray(deviceEnvelope?.adb?.devices) ? deviceEnvelope.adb.devices : [];
+    const iosSimDevices = Array.isArray(deviceEnvelope?.iosSim?.devices) ? deviceEnvelope.iosSim.devices : [];
+    const maestroIosDevices = Array.isArray(deviceEnvelope?.maestroIos?.devices) ? deviceEnvelope.maestroIos.devices : [];
+
+    const android = buildReplayExecutorStatus({
+      devices: androidDevices,
+      dependencyReady: adbStatus.installed,
+      missing: adbStatus.installed ? [] : ['adb'],
+    });
+    const iosSimulator = buildReplayExecutorStatus({
+      devices: iosSimDevices,
+      dependencyReady: xcodeStatus.installed,
+      missing: xcodeStatus.installed ? [] : ['xcode'],
+    });
+    const iosMaestro = buildReplayExecutorStatus({
+      devices: maestroIosDevices,
+      dependencyReady: maestroStatus.installed && xcodeStatus.installed,
+      missing: [
+        ...(maestroStatus.installed ? [] : ['maestro']),
+        ...(xcodeStatus.installed ? [] : ['xcode']),
+      ],
+    });
+
+    const recommendedExecutor: 'adb' | 'ios-sim' | 'maestro-ios' | null =
+      android.available ? 'adb' : iosSimulator.available ? 'ios-sim' : iosMaestro.available ? 'maestro-ios' : null;
+    const ready = Boolean(localEntropyHealth?.ok) && Boolean(recommendedExecutor);
+
+    return createJsonResult({
+      ready,
+      minimumMobileReady: android.available || iosSimulator.available || iosMaestro.available,
+      recommendedExecutor,
+      message: createLocalReplayMessage({
+        ready,
+        recommendedExecutor,
+        androidReady: android.available,
+        iosReady: iosSimulator.available || iosMaestro.available,
+      }),
+      entropyLocal: {
+        available: localEntropyHealth?.ok === true,
+        kind: 'embedded-app-lab-runtime',
+        serverUrl: LOCAL_ESVP_SERVER_URL,
+        service: typeof localEntropyHealth?.service === 'string' ? localEntropyHealth.service : 'applab-esvp-local',
+        version: typeof localEntropyHealth?.version === 'string' ? localEntropyHealth.version : null,
+        note: 'Entropy local is the in-process AppLab ESVP runtime. It runs on this machine, stores runs under the local data directory, and uses local emulators/devices instead of a remote control-plane.',
+        error: localEntropyHealth?.ok === true ? null : (typeof localEntropyHealth?.error === 'string' ? localEntropyHealth.error : null),
+      },
+      executors: {
+        android,
+        iosSimulator,
+        iosMaestro,
+      },
+      dependencies: {
+        adb: {
+          installed: adbStatus.installed,
+          version: adbStatus.version,
+          installHint: adbStatus.installed ? null : dependencies[4].installHint,
+        },
+        xcode: {
+          installed: xcodeStatus.installed,
+          version: xcodeStatus.version,
+          installHint: xcodeStatus.installed ? null : dependencies[3].installHint,
+        },
+        maestro: {
+          installed: maestroStatus.installed,
+          version: maestroStatus.version,
+          installHint: maestroStatus.installed ? null : dependencies[1].installHint,
+        },
+      },
+      dataDirectory: DATA_DIR,
+    });
   },
 };
 
@@ -389,4 +527,4 @@ export const setupInstallTool: MCPTool = {
 // ============================================================================
 // EXPORTS
 // ============================================================================
-export const setupTools: MCPTool[] = [setupStatusTool, setupCheckTool, setupInitTool, setupInstallTool];
+export const setupTools: MCPTool[] = [setupStatusTool, setupCheckTool, setupReplayStatusTool, setupInitTool, setupInstallTool];

@@ -20,7 +20,7 @@ export { knowledgeTools } from './knowledge.js';
 // Re-export individual tools if needed
 export { uiOpenTool, uiStatusTool } from './ui.js';
 export { projectListTool, projectCreateTool, projectGetTool, projectSaveTool, projectDeleteTool } from './project.js';
-export { setupStatusTool, setupCheckTool, setupInitTool } from './setup.js';
+export { setupStatusTool, setupCheckTool, setupReplayStatusTool, setupInitTool } from './setup.js';
 export {
   captureScreenTool,
   startRecordingTool,

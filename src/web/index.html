@@ -806,6 +806,10 @@
             opacity: 1;
         }
 
+        .project-card.select-mode .project-claude-action {
+            display: none;
+        }
+
         .project-card.select-mode.checked .checkbox-circle {
             opacity: 0;
         }
@@ -920,6 +924,37 @@
             object-fit: cover;
         }
 
+        .project-claude-action {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: rgba(11, 16, 24, 0.78);
+            color: #f5f0e6;
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.22);
+            z-index: 2;
+            cursor: pointer;
+            transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+            backdrop-filter: blur(10px);
+        }
+
+        .project-claude-action:hover {
+            transform: translateY(-1px);
+            border-color: rgba(245, 240, 230, 0.5);
+            background: rgba(17, 24, 32, 0.92);
+        }
+
+        .project-claude-action svg {
+            width: 16px;
+            height: 16px;
+        }
+
         .project-info {
             padding: 12px;
         }
@@ -985,6 +1020,82 @@
             align-items: center;
             justify-content: center;
             font-weight: 700;
+        }
+
+        .claude-integration-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border);
+        }
+
+        .claude-integration-meta {
+            min-width: 0;
+        }
+
+        .claude-integration-title {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            margin-bottom: 4px;
+        }
+
+        .claude-integration-copy {
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.45;
+        }
+
+        .claude-integration-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .claude-action-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border: 1px solid rgba(236, 229, 215, 0.18);
+            background: linear-gradient(135deg, rgba(34, 25, 18, 0.96), rgba(17, 12, 9, 0.96));
+            color: #f5f0e6;
+            padding: 9px 12px;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: transform 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+            font-size: 12px;
+            font-weight: 600;
+            box-shadow: 0 14px 28px rgba(0, 0, 0, 0.18);
+        }
+
+        .claude-action-btn:hover {
+            transform: translateY(-1px);
+            border-color: rgba(245, 240, 230, 0.34);
+        }
+
+        .claude-action-btn.secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            box-shadow: none;
+            border-color: var(--border);
+        }
+
+        .claude-action-btn:disabled {
+            opacity: 0.56;
+            cursor: default;
+            transform: none;
+        }
+
+        .claude-action-btn svg {
+            width: 14px;
+            height: 14px;
+            flex-shrink: 0;
         }
 
         .project-meta {
@@ -8109,6 +8220,223 @@
             }
         }
 
+        let claudeDesktopStatus = {
+            ready: false,
+            appDetected: false,
+            launcherSupported: false,
+            mcpConfigured: false,
+            serverName: null,
+            installCommand: 'npx -y @veolab/discoverylab@latest install --target desktop',
+            message: 'Checking Claude Desktop...',
+            checking: false,
+            error: null,
+            lastCheckedAt: null
+        };
+
+        function getClaudeIconSvg() {
+            return `
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M12 3.5c-2.1 0-3.8 1-4.9 2.8C4.9 6.5 3.5 8.4 3.5 11c0 3.9 2.9 6.8 7.1 8.7a3 3 0 0 0 2.8 0c4.1-1.9 7.1-4.8 7.1-8.7 0-2.6-1.4-4.5-3.6-4.7C15.8 4.5 14.1 3.5 12 3.5Z" stroke="currentColor" stroke-width="1.5"/>
+                    <path d="M8.5 10.5c.9-1 2.1-1.5 3.5-1.5s2.6.5 3.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <path d="M9.2 13.8c.8.7 1.7 1.1 2.8 1.1 1 0 2-.4 2.8-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+            `;
+        }
+
+        function isProjectReadyForClaude(project) {
+            if (!project) return false;
+            if (isProjectAnalyzing(project.status || '')) return false;
+            return Boolean(
+                (project.aiSummary && project.aiSummary.trim()) ||
+                (project.ocrText && project.ocrText.trim()) ||
+                (Array.isArray(project.frames) && project.frames.length > 0) ||
+                project.frameCount > 0
+            );
+        }
+
+        function buildClaudeDesktopPrompt(project) {
+            const projectId = project?.id || '';
+            const projectName = project?.name || 'this DiscoveryLab project';
+            return [
+                `Use DiscoveryLab local tools to open project "${projectName}" (projectId: "${projectId}") in an interactive flow canvas.`,
+                `Call dlab.knowledge.open with projectId "${projectId}".`,
+                'After opening the canvas, explain the flow, key screens, and important risks or opportunities.',
+            ].join(' ');
+        }
+
+        function renderClaudeProjectQuickAction(project) {
+            if (!claudeDesktopStatus.ready || !isProjectReadyForClaude(project)) {
+                return '';
+            }
+
+            const promptTitle = `Copy prompt and open ${project.name} in Claude Desktop`;
+            return `
+                <button
+                    class="project-claude-action"
+                    type="button"
+                    data-project-id="${escapeAttr(project.id)}"
+                    title="${escapeAttr(promptTitle)}"
+                    aria-label="${escapeAttr(promptTitle)}"
+                    onclick="event.stopPropagation(); openProjectInClaudeById(this.dataset.projectId);"
+                >
+                    ${getClaudeIconSvg()}
+                </button>
+            `;
+        }
+
+        function renderClaudeProjectLaunchRow(project) {
+            const projectReady = isProjectReadyForClaude(project);
+            const statusCopy = !projectReady
+                ? 'Finish analysis or capture enough frames before opening this project in Claude Desktop.'
+                : claudeDesktopStatus.error
+                    ? claudeDesktopStatus.error
+                    : claudeDesktopStatus.message || 'Claude Desktop status unavailable.';
+            const ready = claudeDesktopStatus.ready && projectReady;
+            const setupNeeded = claudeDesktopStatus.appDetected && !claudeDesktopStatus.mcpConfigured;
+            const buttonLabel = ready
+                ? 'Open in Claude Desktop'
+                : !projectReady
+                    ? 'Analyze first'
+                    : setupNeeded
+                        ? 'Copy install command'
+                        : 'Reload';
+            const buttonClass = ready ? 'claude-action-btn' : 'claude-action-btn secondary';
+            const action = ready
+                ? 'openCurrentProjectInClaude()'
+                : !projectReady
+                    ? ''
+                    : setupNeeded
+                    ? 'copyClaudeDesktopInstallCommand()'
+                    : 'refreshClaudeDesktopStatus()';
+
+            return `
+                <div class="claude-integration-row">
+                    <div class="claude-integration-meta">
+                        <div class="claude-integration-title">Claude Desktop</div>
+                        <div class="claude-integration-copy">${escapeHtml(statusCopy)}</div>
+                    </div>
+                    <div class="claude-integration-actions">
+                        <button class="${buttonClass}" type="button" ${action ? `onclick="${action}"` : 'disabled'}>
+                            ${getClaudeIconSvg()}
+                            <span>${escapeHtml(buttonLabel)}</span>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function rerenderClaudeDesktopAffordances() {
+            if (currentView === 'projects') {
+                renderProjects();
+            } else if (currentView === 'analysis' && currentProject) {
+                updateAnalysisTab();
+            } else if (currentView === 'export' && currentProject) {
+                updateExportTab();
+            }
+        }
+
+        async function refreshClaudeDesktopStatus(options = {}) {
+            const { silent = false } = options;
+            claudeDesktopStatus.checking = true;
+
+            try {
+                const response = await fetch('/api/integrations/claude-desktop/status');
+                const data = await response.json();
+                if (data?.error) {
+                    throw new Error(data.error);
+                }
+
+                claudeDesktopStatus = {
+                    ...claudeDesktopStatus,
+                    ready: !!data.ready,
+                    appDetected: !!data.appDetected,
+                    launcherSupported: !!data.launcherSupported,
+                    mcpConfigured: !!data.mcpConfigured,
+                    serverName: data.serverName || null,
+                    installCommand: data.installCommand || claudeDesktopStatus.installCommand,
+                    message: data.message || 'Claude Desktop status loaded.',
+                    checking: false,
+                    error: null,
+                    lastCheckedAt: new Date().toISOString()
+                };
+            } catch (error) {
+                claudeDesktopStatus = {
+                    ...claudeDesktopStatus,
+                    checking: false,
+                    error: error instanceof Error ? error.message : 'Failed to check Claude Desktop status',
+                    message: 'Could not check Claude Desktop status.'
+                };
+                if (!silent) {
+                    showToast('Failed to check Claude Desktop status', 'error');
+                }
+            }
+
+            rerenderClaudeDesktopAffordances();
+        }
+
+        function copyClaudeDesktopInstallCommand() {
+            void copyToClipboard(
+                claudeDesktopStatus.installCommand || 'npx -y @veolab/discoverylab@latest install --target desktop',
+                { silent: true }
+            ).then((copied) => {
+                showToast(copied ? 'Claude Desktop install command copied' : 'Failed to copy install command', copied ? 'success' : 'error');
+            });
+        }
+
+        async function launchClaudeDesktop() {
+            const response = await fetch('/api/integrations/claude-desktop/launch', { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok || data?.success === false) {
+                throw new Error(data?.error || 'Failed to open Claude Desktop');
+            }
+        }
+
+        async function copyPromptAndLaunchClaude(project) {
+            if (!project) return;
+
+            const copied = await copyToClipboard(buildClaudeDesktopPrompt(project), { silent: true });
+            if (!copied) {
+                showToast('Failed to copy Claude Desktop prompt', 'error');
+                return;
+            }
+
+            try {
+                await launchClaudeDesktop();
+                showToast('Prompt copied and Claude Desktop opened', 'success');
+            } catch (error) {
+                showToast(error instanceof Error ? error.message : 'Prompt copied, but Claude Desktop could not be opened', 'warning');
+            }
+        }
+
+        async function openProjectInClaudeById(projectId) {
+            const project = projects.find((item) => item.id === projectId) || (currentProject?.id === projectId ? currentProject : null);
+            if (!project) {
+                showToast('Project not found', 'error');
+                return;
+            }
+
+            if (!claudeDesktopStatus.ready) {
+                if (claudeDesktopStatus.appDetected && !claudeDesktopStatus.mcpConfigured) {
+                    copyClaudeDesktopInstallCommand();
+                    return;
+                }
+
+                showToast(claudeDesktopStatus.message || 'Claude Desktop is not ready yet.', 'warning');
+                return;
+            }
+
+            await copyPromptAndLaunchClaude(project);
+        }
+
+        async function openCurrentProjectInClaude() {
+            if (!currentProject?.id) {
+                showToast('Select a project first', 'warning');
+                return;
+            }
+
+            await openProjectInClaudeById(currentProject.id);
+        }
+
         let jiraMcpStatus = {
             available: false,
             configured: false,
@@ -11288,6 +11616,7 @@
                         <div class="processing-text">${processingText}</div>
                     </div>
                     <div class="project-thumb">
+                        ${renderClaudeProjectQuickAction(p)}
                         ${getProjectThumb(p)}
                     </div>
                     <div class="project-info">
@@ -12418,6 +12747,7 @@
                                 <button class="btn btn-primary btn-small" onclick="retryProjectAnalysis()" id="retryProjectAnalysisBtn">Retry Analysis</button>
                             </div>
                         ` : ''}
+                        ${renderClaudeProjectLaunchRow(currentProject)}
                         <div class="project-integration-row">
                             <div class="project-integration-label">Jira MCP</div>
                             <div class="project-integration-status">
@@ -15602,9 +15932,34 @@
             showToast(`Copied "${command}" - paste in Claude Code`, 'success', 5000);
         }
 
-        function copyToClipboard(text) {
-            navigator.clipboard.writeText(text);
-            showToast('Copied to clipboard', 'success');
+        async function copyToClipboard(text, options = {}) {
+            const { silent = false } = options;
+
+            try {
+                if (navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.setAttribute('readonly', 'true');
+                    textarea.style.position = 'absolute';
+                    textarea.style.left = '-9999px';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    textarea.remove();
+                }
+
+                if (!silent) {
+                    showToast('Copied to clipboard', 'success');
+                }
+                return true;
+            } catch (error) {
+                if (!silent) {
+                    showToast('Failed to copy to clipboard', 'error');
+                }
+                return false;
+            }
         }
 
         async function openMaestroStudio() {
@@ -15899,6 +16254,7 @@
                 if (el && data.version) el.textContent = 'v' + data.version;
             }).catch(() => {});
             void loadProxySafetySettings().catch(() => null);
+            void refreshClaudeDesktopStatus({ silent: true });
 
             // Auto-check dependencies on first load — open Settings if critical deps missing
             fetch('/api/setup/status').then(r => r.json()).then(data => {

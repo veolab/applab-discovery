@@ -6190,9 +6190,195 @@ app.get('/api/testing/status', async (c) => {
   }
 });
 
+function getClaudeDesktopConfigPath(): string {
+  const home = homedir();
+  return process.platform === 'win32'
+    ? join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), 'Claude', 'claude_desktop_config.json')
+    : join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
+}
+
+function getClaudeDesktopAppCandidates(): string[] {
+  const home = homedir();
+
+  if (process.platform === 'darwin') {
+    return [
+      '/Applications/Claude.app',
+      join(home, 'Applications', 'Claude.app'),
+    ];
+  }
+
+  if (process.platform === 'win32') {
+    return [
+      process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs', 'Claude', 'Claude.exe') : '',
+      process.env.PROGRAMFILES ? join(process.env.PROGRAMFILES, 'Claude', 'Claude.exe') : '',
+      process.env['PROGRAMFILES(X86)'] ? join(process.env['PROGRAMFILES(X86)'] as string, 'Claude', 'Claude.exe') : '',
+      process.env.APPDATA ? join(process.env.APPDATA, 'Claude', 'Claude.exe') : '',
+    ].filter(Boolean);
+  }
+
+  return [];
+}
+
+function findClaudeDesktopApp(): { detected: boolean; launchTarget: string | null; installPath: string | null } {
+  if (process.platform === 'darwin') {
+    try {
+      execSync('open -Ra "Claude"', { stdio: 'pipe', timeout: 2000 });
+      return {
+        detected: true,
+        launchTarget: 'Claude',
+        installPath: getClaudeDesktopAppCandidates().find((candidate) => existsSync(candidate)) || null,
+      };
+    } catch {
+      const candidate = getClaudeDesktopAppCandidates().find((path) => existsSync(path));
+      return {
+        detected: Boolean(candidate),
+        launchTarget: candidate ? 'Claude' : null,
+        installPath: candidate || null,
+      };
+    }
+  }
+
+  const candidate = getClaudeDesktopAppCandidates().find((path) => existsSync(path));
+  return {
+    detected: Boolean(candidate),
+    launchTarget: candidate || null,
+    installPath: candidate || null,
+  };
+}
+
+function detectDiscoveryLabClaudeDesktopMcp(): {
+  configured: boolean;
+  serverName: string | null;
+  source: 'settings' | 'none';
+  configPath: string;
+} {
+  const configPath = getClaudeDesktopConfigPath();
+  if (!existsSync(configPath)) {
+    return {
+      configured: false,
+      serverName: null,
+      source: 'none',
+      configPath,
+    };
+  }
+
+  try {
+    const raw = readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const servers = parsed?.mcpServers;
+    if (!servers || typeof servers !== 'object') {
+      return {
+        configured: false,
+        serverName: null,
+        source: 'none',
+        configPath,
+      };
+    }
+
+    for (const [name, config] of Object.entries<any>(servers)) {
+      const configString = [
+        name,
+        config?.command || '',
+        ...(Array.isArray(config?.args) ? config.args : []),
+        config?.url || '',
+      ].join(' ').toLowerCase();
+
+      if (
+        name === 'discoverylab' ||
+        configString.includes('@veolab/discoverylab') ||
+        configString.includes('discoverylab') ||
+        configString.includes('applab-discovery')
+      ) {
+        return {
+          configured: true,
+          serverName: name || 'discoverylab',
+          source: 'settings',
+          configPath,
+        };
+      }
+    }
+  } catch {
+    // Ignore invalid config and fall through to not-configured response.
+  }
+
+  return {
+    configured: false,
+    serverName: null,
+    source: 'none',
+    configPath,
+  };
+}
+
 // ============================================================================
 // INTEGRATIONS API
 // ============================================================================
+app.get('/api/integrations/claude-desktop/status', async (c) => {
+  try {
+    const { platform } = await import('node:os');
+
+    const app = findClaudeDesktopApp();
+    const mcp = detectDiscoveryLabClaudeDesktopMcp();
+    const launcherSupported = platform() === 'darwin' || platform() === 'win32';
+    const ready = app.detected && launcherSupported && mcp.configured;
+
+    let message = 'Claude Desktop launcher unavailable on this platform.';
+    if (platform() === 'darwin' || platform() === 'win32') {
+      if (!app.detected) {
+        message = 'Claude Desktop was not detected on this machine.';
+      } else if (!mcp.configured) {
+        message = 'Claude Desktop is installed, but the DiscoveryLab local MCP is not configured yet.';
+      } else {
+        message = 'Claude Desktop is ready to open this project with the local DiscoveryLab MCP.';
+      }
+    }
+
+    return c.json({
+      ready,
+      appDetected: app.detected,
+      launcherSupported,
+      launchTarget: app.launchTarget,
+      installPath: app.installPath,
+      mcpConfigured: mcp.configured,
+      serverName: mcp.serverName,
+      source: mcp.source,
+      configPath: mcp.configPath,
+      installCommand: 'npx -y @veolab/discoverylab@latest install --target desktop',
+      message,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/integrations/claude-desktop/launch', async (c) => {
+  try {
+    const { platform } = await import('node:os');
+    const { exec } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+
+    const app = findClaudeDesktopApp();
+    if (!app.detected || !app.launchTarget) {
+      return c.json({ success: false, error: 'Claude Desktop was not detected on this machine.' }, 404);
+    }
+
+    const execAsync = promisify(exec);
+
+    if (platform() === 'darwin') {
+      await execAsync(`open -a "${app.launchTarget}"`);
+    } else if (platform() === 'win32') {
+      await execAsync(`cmd /c start "" "${app.launchTarget}"`);
+    } else {
+      return c.json({ success: false, error: 'Claude Desktop launcher is not supported on this platform.' }, 400);
+    }
+
+    return c.json({ success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ success: false, error: message }, 500);
+  }
+});
+
 app.get('/api/integrations/jira-mcp/status', async (c) => {
   try {
     const { execSync } = await import('node:child_process');
