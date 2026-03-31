@@ -927,7 +927,7 @@
         .project-claude-action {
             position: absolute;
             top: 8px;
-            left: 8px;
+            right: 8px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -942,6 +942,12 @@
             cursor: pointer;
             transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
             backdrop-filter: blur(10px);
+        }
+
+        .project-claude-action.secondary {
+            background: rgba(18, 24, 34, 0.6);
+            border-color: rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
         }
 
         .project-claude-action:hover {
@@ -8242,6 +8248,15 @@
             `;
         }
 
+        function projectHasRenderableThumb(project) {
+            if (!project) return false;
+            if (project.thumbnailPath) return true;
+            if (!project.videoPath) return false;
+
+            const ext = String(project.videoPath).toLowerCase().split('.').pop();
+            return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm'].includes(ext);
+        }
+
         function isProjectReadyForClaude(project) {
             if (!project) return false;
             if (isProjectAnalyzing(project.status || '')) return false;
@@ -8264,14 +8279,22 @@
         }
 
         function renderClaudeProjectQuickAction(project) {
-            if (!claudeDesktopStatus.ready || !isProjectReadyForClaude(project)) {
+            if (!isProjectReadyForClaude(project) || !claudeDesktopStatus.launcherSupported || !projectHasRenderableThumb(project)) {
                 return '';
             }
 
-            const promptTitle = `Copy prompt and open ${project.name} in Claude Desktop`;
+            const setupNeeded = claudeDesktopStatus.appDetected && !claudeDesktopStatus.mcpConfigured;
+            const ready = claudeDesktopStatus.ready;
+            const promptTitle = ready
+                ? `Copy prompt and open ${project.name} in Claude Desktop`
+                : setupNeeded
+                    ? `Copy the DiscoveryLab install command for Claude Desktop`
+                    : `Check Claude Desktop and prepare ${project.name} to open there`;
+            const buttonClass = ready ? 'project-claude-action' : 'project-claude-action secondary';
+
             return `
                 <button
-                    class="project-claude-action"
+                    class="${buttonClass}"
                     type="button"
                     data-project-id="${escapeAttr(project.id)}"
                     title="${escapeAttr(promptTitle)}"
