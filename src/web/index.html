@@ -22422,8 +22422,8 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                 jpg: 'Exports the current capture as JPEG images.',
                 mp4: 'Exports the current capture as an MP4 video.',
                 gif: 'Exports the current capture as an animated GIF.',
-                applab: 'Packages everything App Lab has locally for this project: media, recording session, test script, network trace, OCR, app intelligence, Task Hub data, and prior export artifacts like grids.',
-                esvp: 'Packages the full local project plus the attached ESVP session snapshot when available, so you can share trace, scripts, media, OCR, and app intelligence together.',
+                applab: 'Packages a Claude-friendly App Lab bundle: analyzed frames, thumbnail, OCR, app intelligence, network trace, ESVP snapshot, and Task Hub metadata without heavy renders or long recordings.',
+                esvp: 'Packages a lightweight ESVP-ready bundle with analyzed frames, OCR, app intelligence, network trace, and the attached ESVP snapshot when available.',
             };
 
             help.textContent = descriptions[select.value] || '';

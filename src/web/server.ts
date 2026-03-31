@@ -4878,7 +4878,6 @@ app.post('/api/export', async (c) => {
         .orderBy(desc(projectExports.createdAt));
 
       const recordingBaseDir = resolveProjectBundleRecordingDir(rawProject.videoPath, resolvedVideoPath);
-      const exportArtifactsDir = join(EXPORTS_DIR, projectId);
       const sessionPath = recordingBaseDir ? join(recordingBaseDir, 'session.json') : null;
 
       let sessionData: Record<string, unknown> | null = null;
@@ -4911,7 +4910,6 @@ app.post('/api/export', async (c) => {
         const summaryPath = rawProject.aiSummary ? 'analysis/app-intelligence.md' : null;
         const ocrPath = rawProject.ocrText ? 'analysis/ocr.txt' : null;
         const thumbnailName = rawProject.thumbnailPath ? basename(rawProject.thumbnailPath) : null;
-        const resolvedMediaName = resolvedVideoPath ? basename(resolvedVideoPath) : null;
 
         const bundledFrames = projectFrames.map((frame) => {
           const extensionMatch = basename(frame.imagePath).match(/(\.[^.]+)$/);
@@ -4925,21 +4923,14 @@ app.post('/api/export', async (c) => {
         });
 
         const mediaFiles: Array<{ role: string; path: string }> = [];
-        if (resolvedVideoPath && existsSync(resolvedVideoPath) && !statSync(resolvedVideoPath).isDirectory()) {
-          const relativePath = `media/${resolvedMediaName}`;
-          copyPathIntoExportBundle(resolvedVideoPath, join(bundleRoot, relativePath));
-          mediaFiles.push({ role: 'primary-media', path: relativePath });
-        }
         if (rawProject.thumbnailPath && existsSync(rawProject.thumbnailPath) && thumbnailName) {
           const relativePath = `media/${thumbnailName}`;
           copyPathIntoExportBundle(rawProject.thumbnailPath, join(bundleRoot, relativePath));
           mediaFiles.push({ role: 'thumbnail', path: relativePath });
         }
 
-        const recordingIncluded = recordingBaseDir
-          ? copyPathIntoExportBundle(recordingBaseDir, join(bundleRoot, 'recording'))
-          : false;
-        const exportArtifactCount = copyProjectExportArtifacts(exportArtifactsDir, join(bundleRoot, 'exports'));
+        const recordingIncluded = false;
+        const exportArtifactCount = 0;
 
         const esvpSessionId = resolveProjectESVPSessionId(esvp);
         const esvpServerUrl = resolveProjectESVPServerUrl(esvp);
@@ -4965,7 +4956,7 @@ app.post('/api/export', async (c) => {
 
         const packagedProject = {
           ...normalizedProject,
-          videoPath: resolvedMediaName ? `media/${resolvedMediaName}` : normalizedProject.videoPath,
+          videoPath: null,
           thumbnailPath: thumbnailName ? `media/${thumbnailName}` : normalizedProject.thumbnailPath,
           frames: bundledFrames,
         };
@@ -5034,20 +5025,6 @@ app.post('/api/export', async (c) => {
           writeExportJson(join(bundleRoot, 'esvp', 'snapshot.json'), esvpSnapshot);
         }
 
-        // Include template renders and generated assets from exports dir
-        const projectExportsDir = join(EXPORTS_DIR, projectId);
-        if (existsSync(projectExportsDir) && statSync(projectExportsDir).isDirectory()) {
-          const rendersDir = join(bundleRoot, 'renders');
-          mkdirSync(rendersDir, { recursive: true });
-          const exportFiles = readdirSync(projectExportsDir);
-          for (const f of exportFiles) {
-            const src = join(projectExportsDir, f);
-            if (statSync(src).isFile()) {
-              cpSync(src, join(rendersDir, f));
-            }
-          }
-        }
-
         // Include template content (custom titles, scripts) if saved
         const templateContentPath = join(PROJECTS_DIR, projectId, 'template-content.json');
         if (existsSync(templateContentPath)) {
@@ -5062,12 +5039,16 @@ app.post('/api/export', async (c) => {
           'This package bundles the local project context for sharing or re-analysis.',
           '',
           'Included when available:',
-          '- original media and thumbnail',
-          '- recording folder with session data, screenshots, and test script',
+          '- selected thumbnail and analyzed frames',
+          '- lightweight project/session metadata',
           '- OCR text and app intelligence summary',
           '- network trace, capture metadata, and ESVP snapshot',
-          '- previously generated export assets such as grids and renders',
           '- Task Hub links, requirements, and test map',
+          '',
+          'Excluded by default to keep the bundle Claude-friendly:',
+          '- original long-form media',
+          '- recording folder',
+          '- generated export assets and renders',
         ].join('\n'));
 
         outputPath = join(exportDir, `export-${timestamp}.${format}`);
