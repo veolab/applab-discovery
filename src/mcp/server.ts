@@ -13,17 +13,39 @@ export interface MCPTool {
   name: string;
   description: string;
   inputSchema: z.ZodType<any>;
+  _meta?: Record<string, any>;
   handler: (params: any) => Promise<MCPToolResult>;
 }
 
+export interface MCPToolContent {
+  type: 'text' | 'image';
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
 export interface MCPToolResult {
-  content: Array<{
-    type: 'text' | 'image';
-    text?: string;
-    data?: string;
-    mimeType?: string;
-  }>;
+  content: MCPToolContent[];
   isError?: boolean;
+  structuredContent?: Record<string, any>;
+  _meta?: Record<string, any>;
+}
+
+export interface MCPResourceContents {
+  uri: string;
+  mimeType: string;
+  text?: string;
+  blob?: string;
+  _meta?: Record<string, any>;
+}
+
+export interface MCPResource {
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType: string;
+  contents?: MCPResourceContents[];
 }
 
 export interface MCPRequest {
@@ -49,6 +71,7 @@ export interface MCPResponse {
 // ============================================================================
 export class MCPServer {
   private tools: Map<string, MCPTool> = new Map();
+  private resources: Map<string, MCPResource> = new Map();
   private serverInfo = {
     name: 'discoverylab',
     version: APP_VERSION,
@@ -64,6 +87,17 @@ export class MCPServer {
     }
   }
 
+  registerResource(resource: MCPResource): void {
+    this.resources.set(resource.uri, resource);
+  }
+
+  upsertResourceContents(uri: string, resource: Omit<MCPResource, 'uri'>): void {
+    this.resources.set(uri, {
+      uri,
+      ...resource,
+    });
+  }
+
   async handleRequest(request: MCPRequest): Promise<MCPResponse> {
     const { id, method, params } = request;
 
@@ -77,6 +111,12 @@ export class MCPServer {
 
         case 'tools/call':
           return this.handleToolCall(id, params);
+
+        case 'resources/list':
+          return this.handleResourcesList(id);
+
+        case 'resources/read':
+          return this.handleResourcesRead(id, params);
 
         case 'ping':
           return { jsonrpc: '2.0', id, result: { pong: true } };
@@ -107,6 +147,7 @@ export class MCPServer {
         serverInfo: this.serverInfo,
         capabilities: {
           tools: {},
+          resources: {},
         },
       },
     };
@@ -117,12 +158,55 @@ export class MCPServer {
       name: tool.name,
       description: tool.description,
       inputSchema: this.zodToJsonSchema(tool.inputSchema),
+      ...(tool._meta ? { _meta: tool._meta } : {}),
     }));
 
     return {
       jsonrpc: '2.0',
       id,
       result: { tools },
+    };
+  }
+
+  private handleResourcesList(id: string | number): MCPResponse {
+    const resources = Array.from(this.resources.values()).map((resource) => ({
+      uri: resource.uri,
+      name: resource.name,
+      ...(resource.title ? { title: resource.title } : {}),
+      ...(resource.description ? { description: resource.description } : {}),
+      mimeType: resource.mimeType,
+    }));
+
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: { resources },
+    };
+  }
+
+  private handleResourcesRead(id: string | number, params: any): MCPResponse {
+    const uri = typeof params?.uri === 'string' ? params.uri : '';
+    const resource = this.resources.get(uri);
+
+    if (!resource) {
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32602, message: `Resource not found: ${uri}` },
+      };
+    }
+
+    const contents = Array.isArray(resource.contents) && resource.contents.length > 0
+      ? resource.contents
+      : [{
+          uri: resource.uri,
+          mimeType: resource.mimeType,
+        }];
+
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: { contents },
     };
   }
 

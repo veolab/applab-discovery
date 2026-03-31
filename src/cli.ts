@@ -7,6 +7,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import open from 'open';
+import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from './core/appVersion.js';
 import { buildAppLabNetworkProfile } from './core/integrations/esvp-network-profile.js';
 
@@ -682,10 +683,16 @@ program
     const { join, dirname } = await import('node:path');
 
     const home = homedir();
-    const mcpEntry = {
-      command: 'npx',
-      args: ['-y', '@veolab/discoverylab@latest', 'mcp'],
-    };
+    const localMcpEntrypoint = fileURLToPath(new URL('./index.js', import.meta.url));
+    const mcpEntry = existsSync(localMcpEntrypoint)
+      ? {
+          command: process.execPath,
+          args: [localMcpEntrypoint],
+        }
+      : {
+          command: 'npx',
+          args: ['-y', '@veolab/discoverylab@latest', 'mcp'],
+        };
 
     // Config paths for each target
     const targets: Record<string, { name: string; path: string; restart: string }> = {

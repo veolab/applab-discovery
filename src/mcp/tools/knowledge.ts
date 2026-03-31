@@ -7,8 +7,107 @@
 import { z } from 'zod';
 import { desc } from 'drizzle-orm';
 import type { MCPTool } from '../server.js';
-import { createTextResult, createErrorResult, createJsonResult } from '../server.js';
+import { createTextResult, createErrorResult, createJsonResult, mcpServer } from '../server.js';
 import { getDatabase, projects, frames } from '../../db/index.js';
+
+const KNOWLEDGE_VIEWER_RESOURCE_URI = 'ui://discoverylab/knowledge-viewer.html';
+const KNOWLEDGE_VIEWER_MIME_TYPE = 'text/html;profile=mcp-app';
+
+function buildViewerPlaceholderHtml(message: string): string {
+  const safeMessage = JSON.stringify(message);
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DiscoveryLab Flow Viewer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1117;
+        --panel: rgba(255, 255, 255, 0.04);
+        --border: rgba(255, 255, 255, 0.1);
+        --text: #eff5fb;
+        --muted: #9fb0c2;
+        --accent: #2dd4bf;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at top left, rgba(45, 212, 191, 0.18), transparent 28%),
+          linear-gradient(180deg, #101826, var(--bg));
+        color: var(--text);
+        font: 14px/1.5 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      }
+
+      .card {
+        width: min(720px, 100%);
+        border: 1px solid var(--border);
+        border-radius: 24px;
+        padding: 24px;
+        background: var(--panel);
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 6px 12px;
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
+      h1 {
+        margin: 16px 0 8px;
+        font: 700 32px/1.02 "Space Grotesk", "Avenir Next", system-ui, sans-serif;
+        letter-spacing: -0.03em;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="eyebrow">DiscoveryLab Local Viewer</div>
+      <h1>Open a flow in Claude Desktop</h1>
+      <p id="message"></p>
+    </main>
+    <script>
+      document.getElementById('message').textContent = ${safeMessage};
+    </script>
+  </body>
+</html>`;
+}
+
+mcpServer.registerResource({
+  uri: KNOWLEDGE_VIEWER_RESOURCE_URI,
+  name: 'discoverylab-knowledge-viewer',
+  title: 'DiscoveryLab Flow Viewer',
+  description: 'Interactive local flow viewer for DiscoveryLab projects.',
+  mimeType: KNOWLEDGE_VIEWER_MIME_TYPE,
+  contents: [
+    {
+      uri: KNOWLEDGE_VIEWER_RESOURCE_URI,
+      mimeType: KNOWLEDGE_VIEWER_MIME_TYPE,
+      text: buildViewerPlaceholderHtml('Use dlab.knowledge.open to load a local project into the canvas.'),
+    },
+  ],
+});
 
 // ============================================================================
 // dlab.knowledge.search
@@ -200,6 +299,11 @@ export const knowledgeOpenTool: MCPTool = {
     query: z.string().optional().describe('Search query to find the project (e.g. "login flow", "onboarding")'),
     projectId: z.string().optional().describe('Direct project ID if known'),
   }),
+  _meta: {
+    ui: {
+      resourceUri: KNOWLEDGE_VIEWER_RESOURCE_URI,
+    },
+  },
   handler: async (params) => {
     try {
       const db = getDatabase();
@@ -270,8 +374,39 @@ export const knowledgeOpenTool: MCPTool = {
         return createErrorResult('Failed to generate infographic HTML (template not found)');
       }
 
-      // Return HTML + summary for Claude to render
-      return createTextResult(html);
+      mcpServer.upsertResourceContents(KNOWLEDGE_VIEWER_RESOURCE_URI, {
+        name: 'discoverylab-knowledge-viewer',
+        title: `DiscoveryLab Flow Viewer · ${project.marketingTitle || project.name}`,
+        description: 'Interactive local flow viewer for DiscoveryLab projects.',
+        mimeType: KNOWLEDGE_VIEWER_MIME_TYPE,
+        contents: [
+          {
+            uri: KNOWLEDGE_VIEWER_RESOURCE_URI,
+            mimeType: KNOWLEDGE_VIEWER_MIME_TYPE,
+            text: html,
+          },
+        ],
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Opened the local DiscoveryLab flow viewer for ${project.marketingTitle || project.name}.`,
+          },
+        ],
+        structuredContent: {
+          projectId: project.id,
+          name: project.marketingTitle || project.name,
+          frameCount: frameFiles.length,
+          platform: project.platform || 'unknown',
+        },
+        _meta: {
+          ui: {
+            resourceUri: KNOWLEDGE_VIEWER_RESOURCE_URI,
+          },
+        },
+      };
     } catch (error) {
       return createErrorResult(`Failed to open flow: ${error instanceof Error ? error.message : String(error)}`);
     }
