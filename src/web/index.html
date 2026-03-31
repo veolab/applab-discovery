@@ -8288,8 +8288,8 @@
             const promptTitle = ready
                 ? `Copy prompt and open ${project.name} in Claude Desktop`
                 : setupNeeded
-                    ? `Copy the DiscoveryLab install command for Claude Desktop`
-                    : `Check Claude Desktop and prepare ${project.name} to open there`;
+                    ? `Copy the ${project.name} prompt and open Claude Desktop`
+                    : `Copy the ${project.name} prompt and check Claude Desktop`;
             const buttonClass = ready ? 'project-claude-action' : 'project-claude-action secondary';
 
             return `
@@ -8320,7 +8320,7 @@
                 : !projectReady
                     ? 'Analyze first'
                     : setupNeeded
-                        ? 'Copy install command'
+                        ? 'Copy prompt'
                         : 'Reload';
             const buttonClass = ready ? 'claude-action-btn' : 'claude-action-btn secondary';
             const action = ready
@@ -8328,7 +8328,7 @@
                 : !projectReady
                     ? ''
                     : setupNeeded
-                    ? 'copyClaudeDesktopInstallCommand()'
+                    ? 'copyCurrentProjectClaudePrompt()'
                     : 'refreshClaudeDesktopStatus()';
 
             return `
@@ -8405,6 +8405,30 @@
             });
         }
 
+        async function copyClaudeProjectPrompt(project) {
+            if (!project) return false;
+
+            const copied = await copyToClipboard(buildClaudeDesktopPrompt(project), { silent: true });
+            if (!copied) {
+                showToast('Failed to copy Claude Desktop prompt', 'error');
+                return false;
+            }
+
+            return true;
+        }
+
+        async function copyCurrentProjectClaudePrompt() {
+            if (!currentProject?.id) {
+                showToast('Select a project first', 'warning');
+                return;
+            }
+
+            const copied = await copyClaudeProjectPrompt(currentProject);
+            if (!copied) return;
+
+            showToast('Claude Desktop prompt copied', 'success');
+        }
+
         async function launchClaudeDesktop() {
             const response = await fetch('/api/integrations/claude-desktop/launch', { method: 'POST' });
             const data = await response.json();
@@ -8416,9 +8440,8 @@
         async function copyPromptAndLaunchClaude(project) {
             if (!project) return;
 
-            const copied = await copyToClipboard(buildClaudeDesktopPrompt(project), { silent: true });
+            const copied = await copyClaudeProjectPrompt(project);
             if (!copied) {
-                showToast('Failed to copy Claude Desktop prompt', 'error');
                 return;
             }
 
@@ -8439,11 +8462,17 @@
 
             if (!claudeDesktopStatus.ready) {
                 if (claudeDesktopStatus.appDetected && !claudeDesktopStatus.mcpConfigured) {
-                    copyClaudeDesktopInstallCommand();
+                    const copied = await copyClaudeProjectPrompt(project);
+                    if (copied) {
+                        showToast('Project prompt copied. Enable the DiscoveryLab extension in Claude Desktop to open it there.', 'warning');
+                    }
                     return;
                 }
 
-                showToast(claudeDesktopStatus.message || 'Claude Desktop is not ready yet.', 'warning');
+                const copied = await copyClaudeProjectPrompt(project);
+                if (copied) {
+                    showToast(claudeDesktopStatus.message || 'Project prompt copied. Claude Desktop is not ready yet.', 'warning');
+                }
                 return;
             }
 
