@@ -13,7 +13,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eq, desc, and, inArray } from 'drizzle-orm';
-import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR, EXPORTS_DIR } from '../db/index.js';
+import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR, EXPORTS_DIR, FRAMES_DIR } from '../db/index.js';
 import { isTemplatesInstalled, getAvailableTemplates, getTemplate, getBundlePath } from '../core/templates/loader.js';
 import { startRender, getRenderJob, getCachedRender } from '../core/templates/renderer.js';
 import type { TemplateProps, TemplateId, TerminalTab } from '../core/templates/types.js';
@@ -4654,6 +4654,42 @@ function resolveProjectBundleRecordingDir(originalVideoPath: string | null, reso
   return null;
 }
 
+
+function collectProjectExportFramePaths(projectId: string, recordingBaseDir: string | null): string[] {
+  const candidateDirs = [
+    join(FRAMES_DIR, projectId),
+    join(PROJECTS_DIR, projectId, 'frames'),
+    recordingBaseDir ? join(recordingBaseDir, 'screenshots') : null,
+    recordingBaseDir,
+  ].filter((value, index, items): value is string => !!value && items.indexOf(value) === index);
+
+  const framePaths: string[] = [];
+  const seen = new Set<string>();
+
+  for (const dirPath of candidateDirs) {
+    if (!existsSync(dirPath) || !statSync(dirPath).isDirectory()) {
+      continue;
+    }
+
+    const files = readdirSync(dirPath)
+      .filter((entry) => /\.(png|jpg|jpeg|webp)$/i.test(entry))
+      .filter((entry) => !entry.startsWith('._'))
+      .sort();
+
+    for (const entry of files) {
+      const absolutePath = join(dirPath, entry);
+      if (seen.has(absolutePath)) {
+        continue;
+      }
+
+      seen.add(absolutePath);
+      framePaths.push(absolutePath);
+    }
+  }
+
+  return framePaths;
+}
+
 function copyProjectExportArtifacts(sourceDir: string, destinationDir: string): number {
   if (!existsSync(sourceDir) || !statSync(sourceDir).isDirectory()) {
     return 0;
@@ -4911,7 +4947,7 @@ app.post('/api/export', async (c) => {
         const ocrPath = rawProject.ocrText ? 'analysis/ocr.txt' : null;
         const thumbnailName = rawProject.thumbnailPath ? basename(rawProject.thumbnailPath) : null;
 
-        const bundledFrames = projectFrames.map((frame) => {
+        let bundledFrames = projectFrames.map((frame) => {
           const extensionMatch = basename(frame.imagePath).match(/(\.[^.]+)$/);
           const extension = extensionMatch ? extensionMatch[1] : '.png';
           const relativeImagePath = `frames/frame-${String(frame.frameNumber).padStart(4, '0')}${extension}`;
@@ -4921,6 +4957,26 @@ app.post('/api/export', async (c) => {
             imagePath: relativeImagePath,
           };
         });
+
+        if (bundledFrames.length === 0) {
+          const fallbackFramePaths = collectProjectExportFramePaths(projectId, recordingBaseDir);
+          bundledFrames = fallbackFramePaths.map((framePath, index) => {
+            const extensionMatch = basename(framePath).match(/(\.[^.]+)$/);
+            const extension = extensionMatch ? extensionMatch[1] : '.png';
+            const relativeImagePath = `frames/frame-${String(index + 1).padStart(4, '0')}${extension}`;
+            copyPathIntoExportBundle(framePath, join(bundleRoot, relativeImagePath));
+            return {
+              id: `${projectId}-fallback-frame-${index + 1}`,
+              projectId,
+              frameNumber: index + 1,
+              imagePath: relativeImagePath,
+              ocrText: null,
+              timestamp,
+              createdAt: new Date(timestamp),
+              isKeyFrame: null,
+            };
+          });
+        }
 
         const mediaFiles: Array<{ role: string; path: string }> = [];
         if (rawProject.thumbnailPath && existsSync(rawProject.thumbnailPath) && thumbnailName) {
