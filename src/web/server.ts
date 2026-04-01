@@ -4690,6 +4690,22 @@ function collectProjectExportFramePaths(projectId: string, recordingBaseDir: str
   return framePaths;
 }
 
+function resolveAppLabBundleIconPath(): string | null {
+  const candidates = [
+    join(__dirname, '..', '..', 'assets', 'applab-bundle-icon.png'),
+    join(__dirname, '..', 'assets', 'applab-bundle-icon.png'),
+    join(process.cwd(), 'assets', 'applab-bundle-icon.png'),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function copyProjectExportArtifacts(sourceDir: string, destinationDir: string): number {
   if (!existsSync(sourceDir) || !statSync(sourceDir).isDirectory()) {
     return 0;
@@ -4985,6 +5001,13 @@ app.post('/api/export', async (c) => {
           mediaFiles.push({ role: 'thumbnail', path: relativePath });
         }
 
+        const canonicalBundleIconPath = resolveAppLabBundleIconPath();
+        const bundleIconRelativePath = canonicalBundleIconPath ? 'media/icon.png' : null;
+        if (canonicalBundleIconPath && bundleIconRelativePath) {
+          copyPathIntoExportBundle(canonicalBundleIconPath, join(bundleRoot, bundleIconRelativePath));
+          mediaFiles.push({ role: 'icon', path: bundleIconRelativePath });
+        }
+
         const recordingIncluded = false;
         const exportArtifactCount = 0;
 
@@ -5015,6 +5038,12 @@ app.post('/api/export', async (c) => {
           videoPath: null,
           thumbnailPath: thumbnailName ? `media/${thumbnailName}` : normalizedProject.thumbnailPath,
           frames: bundledFrames,
+          icon: bundleIconRelativePath
+            ? {
+                path: bundleIconRelativePath,
+                kind: 'app-icon',
+              }
+            : null,
         };
 
         writeExportJson(join(bundleRoot, 'manifest.json'), {
@@ -5029,6 +5058,12 @@ app.post('/api/export', async (c) => {
             id: rawProject.id,
             name: rawProject.name,
             platform: rawProject.platform || null,
+            icon: bundleIconRelativePath
+              ? {
+                  path: bundleIconRelativePath,
+                  kind: 'app-icon',
+                }
+              : null,
             frameCount: bundledFrames.length,
             hasRecordingFolder: recordingIncluded,
             hasNetworkTrace: networkEntries.length > 0 || !!networkCapture,
