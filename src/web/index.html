@@ -22505,10 +22505,13 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                     const sizeKb = ((data.size || 0) / 1024).toFixed(1);
                     showToast(`Infographic exported (${sizeKb}KB, ${data.frameCount} frames)`, 'success');
                 } else {
-                    showToast(data.error || 'Export failed', 'error');
+                    const debugHint = data.debug && Number.isFinite(data.debug.frameCandidates) && Number.isFinite(data.debug.validFrames)
+                        ? ` (${data.debug.validFrames}/${data.debug.frameCandidates} readable frames${data.debug.source ? `, ${data.debug.source}` : ''})`
+                        : '';
+                    showToast((data.error || 'Export failed') + debugHint, 'error');
                 }
             } catch (err) {
-                showToast('Export failed', 'error');
+                showToast(err?.message || 'Export failed', 'error');
             }
         }
 

@@ -30,7 +30,27 @@ export interface InfographicData {
   name: string;
   platform: string;
   recorded_at: string;
+  overview?: string;
   frames: InfographicFrame[];
+}
+
+export interface InfographicFrameRecord {
+  imagePath: string;
+  ocrText?: string | null;
+}
+
+export interface FrameValidationIssue {
+  path: string;
+  reason: 'missing' | 'not_file' | 'unreadable';
+}
+
+export interface ResolvedInfographicFrameInputs {
+  frameFiles: string[];
+  frameOcr: Array<{ ocrText?: string | null }>;
+  dataUrls: string[];
+  invalidFrames: FrameValidationIssue[];
+  source: 'db' | 'filesystem' | 'none';
+  candidateCount: number;
 }
 
 export interface InfographicExportOptions {
@@ -69,15 +89,19 @@ function findTemplate(): string | null {
  * Read an image file and convert to base64 data URI
  */
 function imageToBase64(imagePath: string): string {
-  if (!existsSync(imagePath)) return '';
-  const buffer = readFileSync(imagePath);
-  const ext = extname(imagePath).toLowerCase();
-  const mimeTypes: Record<string, string> = {
-    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.webp': 'image/webp', '.gif': 'image/gif',
-  };
-  const mime = mimeTypes[ext] || 'image/png';
-  return `data:${mime};base64,${buffer.toString('base64')}`;
+  try {
+    if (!existsSync(imagePath) || !statSync(imagePath).isFile()) return '';
+    const buffer = readFileSync(imagePath);
+    const ext = extname(imagePath).toLowerCase();
+    const mimeTypes: Record<string, string> = {
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.webp': 'image/webp', '.gif': 'image/gif',
+    };
+    const mime = mimeTypes[ext] || 'image/png';
+    return `data:${mime};base64,${buffer.toString('base64')}`;
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -127,6 +151,110 @@ export function collectFrameImages(
   return [];
 }
 
+function validateFrameInputs(
+  frameFiles: string[],
+  frameOcr: Array<{ ocrText?: string | null }>,
+): Omit<ResolvedInfographicFrameInputs, 'source' | 'candidateCount'> {
+  const validFrameFiles: string[] = [];
+  const validFrameOcr: Array<{ ocrText?: string | null }> = [];
+  const dataUrls: string[] = [];
+  const invalidFrames: FrameValidationIssue[] = [];
+
+  frameFiles.forEach((filePath, index) => {
+    if (!filePath || !existsSync(filePath)) {
+      invalidFrames.push({ path: filePath || `frame-${index + 1}`, reason: 'missing' });
+      return;
+    }
+
+    let stats;
+    try {
+      stats = statSync(filePath);
+    } catch {
+      invalidFrames.push({ path: filePath, reason: 'unreadable' });
+      return;
+    }
+
+    if (!stats.isFile()) {
+      invalidFrames.push({ path: filePath, reason: 'not_file' });
+      return;
+    }
+
+    const dataUrl = imageToBase64(filePath);
+    if (!dataUrl) {
+      invalidFrames.push({ path: filePath, reason: 'unreadable' });
+      return;
+    }
+
+    validFrameFiles.push(filePath);
+    validFrameOcr.push(frameOcr[index] || { ocrText: null });
+    dataUrls.push(dataUrl);
+  });
+
+  return {
+    frameFiles: validFrameFiles,
+    frameOcr: validFrameOcr,
+    dataUrls,
+    invalidFrames,
+  };
+}
+
+export function resolveInfographicFrameInputs(
+  dbFrames: InfographicFrameRecord[],
+  framesDir: string,
+  videoPath?: string | null,
+  projectsDir?: string,
+  projectId?: string,
+): ResolvedInfographicFrameInputs {
+  if (dbFrames.length > 0) {
+    const dbValidation = validateFrameInputs(
+      dbFrames.map((frame) => frame.imagePath),
+      dbFrames.map((frame) => ({ ocrText: frame.ocrText ?? null })),
+    );
+
+    if (dbValidation.frameFiles.length > 0) {
+      return {
+        ...dbValidation,
+        source: 'db',
+        candidateCount: dbFrames.length,
+      };
+    }
+
+    const fallbackFrameFiles = collectFrameImages(framesDir, videoPath, projectsDir, projectId);
+    const fallbackValidation = validateFrameInputs(
+      fallbackFrameFiles,
+      fallbackFrameFiles.map(() => ({ ocrText: null })),
+    );
+
+    if (fallbackValidation.frameFiles.length > 0) {
+      return {
+        ...fallbackValidation,
+        invalidFrames: [...dbValidation.invalidFrames, ...fallbackValidation.invalidFrames],
+        source: 'filesystem',
+        candidateCount: dbFrames.length + fallbackFrameFiles.length,
+      };
+    }
+
+    return {
+      ...fallbackValidation,
+      invalidFrames: [...dbValidation.invalidFrames, ...fallbackValidation.invalidFrames],
+      source: 'none',
+      candidateCount: dbFrames.length + fallbackFrameFiles.length,
+    };
+  }
+
+  const fallbackFrameFiles = collectFrameImages(framesDir, videoPath, projectsDir, projectId);
+  const fallbackValidation = validateFrameInputs(
+    fallbackFrameFiles,
+    fallbackFrameFiles.map(() => ({ ocrText: null })),
+  );
+
+  return {
+    ...fallbackValidation,
+    source: fallbackValidation.frameFiles.length > 0 ? 'filesystem' : 'none',
+    candidateCount: fallbackFrameFiles.length,
+  };
+}
+
 /**
  * Build InfographicData from project database record and frame files
  */
@@ -135,6 +263,7 @@ export function buildInfographicData(
     id: string;
     name: string;
     marketingTitle?: string | null;
+    marketingDescription?: string | null;
     platform?: string | null;
     createdAt?: Date | string | null;
     aiSummary?: string | null;
@@ -143,6 +272,11 @@ export function buildInfographicData(
   frameOcr: Array<{ ocrText?: string | null }>,
   annotations?: Array<{ label: string }>,
 ): InfographicData {
+  const validatedFrames = validateFrameInputs(frameFiles, frameOcr);
+  const usableFrameFiles = validatedFrames.frameFiles;
+  const usableFrameOcr = validatedFrames.frameOcr;
+  const dataUrls = validatedFrames.dataUrls;
+
   // Parse user flow steps from aiSummary
   let flowSteps: string[] = [];
   let uiElements: string[] = [];
@@ -157,8 +291,23 @@ export function buildInfographicData(
     }
   }
 
+  let overview = '';
+  if (project.aiSummary) {
+    const overviewMatch = project.aiSummary.match(/## (?:App Overview|Page \/ App Overview|Overview|Summary)\n([\s\S]*?)(?=\n##|\n$|$)/);
+    if (overviewMatch) {
+      const overviewBody = overviewMatch[1]
+        .split(/\n\s*\n/)
+        .map((chunk) => chunk.trim())
+        .filter(Boolean)[0] || overviewMatch[1];
+      overview = stripMarkdown(overviewBody).slice(0, 240);
+    }
+  }
+  if (!overview && project.marketingDescription) {
+    overview = stripMarkdown(project.marketingDescription).slice(0, 240);
+  }
+
   // Distribute UI elements across frames for hotspots
-  const elementsPerFrame = Math.max(1, Math.ceil(uiElements.length / Math.max(frameFiles.length, 1)));
+  const elementsPerFrame = Math.max(1, Math.ceil(uiElements.length / Math.max(usableFrameFiles.length, 1)));
   const hotspotColors = ['#818CF8', '#34D399', '#F59E0B', '#EC4899', '#06B6D4', '#8B5CF6'];
 
   // Predefined positions for hotspots (distributed around the screen)
@@ -171,10 +320,10 @@ export function buildInfographicData(
     { x: 15, y: 70 },  // bottom left
   ];
 
-  const frames: InfographicFrame[] = frameFiles.map((filePath, i) => {
+  const frames: InfographicFrame[] = usableFrameFiles.map((filePath, i) => {
     const rawStepName = annotations?.[i]?.label || flowSteps[i] || `Step ${i + 1}`;
     const stepName = stripMarkdown(rawStepName);
-    const ocr = frameOcr[i]?.ocrText || '';
+    const ocr = usableFrameOcr[i]?.ocrText || '';
     const rawDesc = flowSteps[i] || ocr.slice(0, 100) || `Screen ${i + 1}`;
     const description = stripMarkdown(rawDesc);
 
@@ -218,7 +367,7 @@ export function buildInfographicData(
       id: `frame-${i}`,
       step_name: stepName,
       description,
-      base64: imageToBase64(filePath),
+      base64: dataUrls[i] || imageToBase64(filePath),
       baseline_status: 'not_validated' as const,
       hotspots,
     };
@@ -230,6 +379,7 @@ export function buildInfographicData(
     recorded_at: project.createdAt instanceof Date
       ? project.createdAt.toISOString()
       : typeof project.createdAt === 'string' ? project.createdAt : new Date().toISOString(),
+    overview,
     frames,
   };
 }

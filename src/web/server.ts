@@ -4800,6 +4800,74 @@ function resolvePersistedLocalESVPServerUrl(serverUrl: unknown, esvp: Record<str
   );
 }
 
+function cloneJsonRecord<T extends Record<string, unknown> | null>(value: T): T {
+  if (!value) return value;
+  try {
+    return JSON.parse(JSON.stringify(value)) as T;
+  } catch {
+    return value;
+  }
+}
+
+function detachPortableESVPForExport(
+  esvp: Record<string, unknown> | null,
+  snapshotAttached = false,
+): { value: Record<string, unknown> | null; detached: boolean } {
+  if (!esvp) {
+    return { value: null, detached: false };
+  }
+
+  const cloned = cloneJsonRecord(esvp) || {};
+  const connectionMode = typeof cloned.connectionMode === 'string' ? cloned.connectionMode.trim().toLowerCase() : '';
+  const serverUrl = typeof cloned.serverUrl === 'string' ? cloned.serverUrl.trim() : '';
+  const shouldDetach = connectionMode === 'local' || !serverUrl;
+
+  if (!shouldDetach) {
+    return { value: cloned, detached: false };
+  }
+
+  cloned.currentSessionId = null;
+  cloned.serverUrl = null;
+  cloned.detachedForExport = true;
+  cloned.snapshotAttached = snapshotAttached;
+
+  if (cloned.network && typeof cloned.network === 'object') {
+    const network = cloned.network as Record<string, unknown>;
+    network.sourceSessionId = null;
+    network.activeCaptureSessionId = null;
+    network.detachedForExport = true;
+  }
+
+  if (cloned.validation && typeof cloned.validation === 'object') {
+    const validation = cloned.validation as Record<string, unknown>;
+    validation.sourceSessionId = null;
+    validation.replaySessionId = null;
+    validation.detachedForExport = true;
+  }
+
+  return { value: cloned, detached: true };
+}
+
+function detachPortableSessionDataForExport(
+  sessionData: Record<string, unknown> | null,
+  detachedEsvp: Record<string, unknown> | null,
+  detached = false,
+): Record<string, unknown> | null {
+  if (!sessionData) return null;
+  const cloned = cloneJsonRecord(sessionData) || {};
+
+  if (detached) {
+    cloned.esvp = detachedEsvp;
+    if (cloned.networkCapture && typeof cloned.networkCapture === 'object') {
+      const networkCapture = cloned.networkCapture as Record<string, unknown>;
+      networkCapture.sessionId = null;
+      networkCapture.detachedForExport = true;
+    }
+  }
+
+  return cloned;
+}
+
 function isESVPReplayValidationSupported(result: Record<string, unknown> | null): boolean {
   if (!result) return true;
   if (result.supported === false) return false;
@@ -5033,6 +5101,15 @@ app.post('/api/export', async (c) => {
           }
         }
 
+        const detachedEsvpResult = detachPortableESVPForExport(esvp, !!esvpSnapshot);
+        const exportedESVP = detachedEsvpResult.value;
+        const exportedSessionData = detachPortableSessionDataForExport(
+          sessionData,
+          exportedESVP,
+          detachedEsvpResult.detached,
+        );
+        const exportedESVPSessionId = detachedEsvpResult.detached ? null : esvpSessionId;
+
         const packagedProject = {
           ...normalizedProject,
           videoPath: null,
@@ -5077,13 +5154,13 @@ app.post('/api/export', async (c) => {
             recordingFolder: recordingIncluded,
             networkEntries: networkEntries.length,
             exportArtifacts: exportArtifactCount,
-            esvpSessionId: esvpSessionId || null,
+            esvpSessionId: exportedESVPSessionId || null,
           },
         });
         writeExportJson(join(bundleRoot, 'metadata', 'project.json'), packagedProject);
         writeExportJson(join(bundleRoot, 'metadata', 'exports.json'), exportRecords);
-        if (sessionData) {
-          writeExportJson(join(bundleRoot, 'metadata', 'session.json'), sessionData);
+        if (exportedSessionData) {
+          writeExportJson(join(bundleRoot, 'metadata', 'session.json'), exportedSessionData);
         }
         if (rawProject.taskHubLinks) {
           writeExportJson(join(bundleRoot, 'taskhub', 'links.json'), normalizedProject.taskHubLinks);
@@ -5109,8 +5186,8 @@ app.post('/api/export', async (c) => {
         if (networkCapture) {
           writeExportJson(join(bundleRoot, 'network', 'capture.json'), networkCapture);
         }
-        if (esvp) {
-          writeExportJson(join(bundleRoot, 'network', 'esvp.json'), esvp);
+        if (exportedESVP) {
+          writeExportJson(join(bundleRoot, 'network', 'esvp.json'), exportedESVP);
         }
         if (esvpSnapshot) {
           writeExportJson(join(bundleRoot, 'esvp', 'snapshot.json'), esvpSnapshot);
@@ -5756,38 +5833,66 @@ app.post('/api/export/infographic', async (c) => {
     if (!project) return c.json({ error: 'Project not found' }, 404);
 
     const { FRAMES_DIR: fDir, EXPORTS_DIR: eDir, PROJECTS_DIR: pDir } = await import('../db/index.js');
-    const { collectFrameImages, buildInfographicData, generateInfographicHtml } = await import('../core/export/infographic.js');
+    const { buildInfographicData, generateInfographicHtml, resolveInfographicFrameInputs } = await import('../core/export/infographic.js');
 
     const dbFrames = await db.select().from(frames)
       .where(eq(frames.projectId, projectId))
       .orderBy(frames.frameNumber)
       .limit(20);
 
-    let frameFiles: string[];
-    let frameOcr: Array<{ ocrText?: string | null }>;
+    const resolvedFrames = resolveInfographicFrameInputs(
+      dbFrames,
+      join(fDir, projectId),
+      project.videoPath,
+      pDir,
+      projectId,
+    );
 
-    if (dbFrames.length > 0) {
-      frameFiles = dbFrames.map(f => f.imagePath);
-      frameOcr = dbFrames;
-    } else {
-      frameFiles = collectFrameImages(join(fDir, projectId), project.videoPath, pDir, projectId);
-      frameOcr = frameFiles.map(() => ({ ocrText: null }));
-    }
-
-    if (frameFiles.length === 0) {
-      return c.json({ error: 'No frames found. Run analyzer first.' }, 400);
+    if (resolvedFrames.frameFiles.length === 0) {
+      return c.json({
+        error: resolvedFrames.candidateCount > 0
+          ? 'No readable frames found for infographic export.'
+          : 'No frames found. Run analyzer first.',
+        debug: {
+          frameCandidates: resolvedFrames.candidateCount,
+          validFrames: 0,
+          source: resolvedFrames.source,
+          invalidFrames: resolvedFrames.invalidFrames.slice(0, 5),
+        },
+      }, 400);
     }
 
     // Use cached smart annotations if available
     const cached = annotationCache.get(projectId);
     const annotations = cached?.steps?.map((s: string) => ({ label: s }));
 
-    const data = buildInfographicData(project, frameFiles, frameOcr, annotations);
+    const data = buildInfographicData(project, resolvedFrames.frameFiles, resolvedFrames.frameOcr, annotations);
+    if (data.frames.length === 0) {
+      return c.json({
+        error: 'Infographic export produced no embeddable frames.',
+        debug: {
+          frameCandidates: resolvedFrames.candidateCount,
+          validFrames: resolvedFrames.frameFiles.length,
+          source: resolvedFrames.source,
+          invalidFrames: resolvedFrames.invalidFrames.slice(0, 5),
+        },
+      }, 400);
+    }
     const slug = (project.marketingTitle || project.name || projectId).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
     const outputPath = join(eDir, `${slug}-infographic.html`);
     const result = generateInfographicHtml(data, outputPath);
 
-    if (!result.success) return c.json({ error: result.error }, 500);
+    if (!result.success) {
+      return c.json({
+        error: result.error,
+        debug: {
+          frameCandidates: resolvedFrames.candidateCount,
+          validFrames: resolvedFrames.frameFiles.length,
+          source: resolvedFrames.source,
+          invalidFrames: resolvedFrames.invalidFrames.slice(0, 5),
+        },
+      }, 500);
+    }
 
     if (open) {
       const { exec } = await import('node:child_process');

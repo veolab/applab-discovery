@@ -867,7 +867,7 @@ program
         const { join: pathJoin } = await import('node:path');
         const { getDatabase, projects, frames: framesTable, FRAMES_DIR, EXPORTS_DIR, PROJECTS_DIR } = await import('./db/index.js');
         const { eq } = await import('drizzle-orm');
-        const { collectFrameImages, buildInfographicData, generateInfographicHtml } = await import('./core/export/infographic.js');
+        const { buildInfographicData, generateInfographicHtml, resolveInfographicFrameInputs } = await import('./core/export/infographic.js');
 
         const db = getDatabase();
         const allProjects = await db.select().from(projects);
@@ -886,27 +886,33 @@ program
 
         // Get frames
         const dbFrames = await db.select().from(framesTable).where(eq(framesTable.projectId, project.id)).orderBy(framesTable.frameNumber).limit(20);
-        let frameFiles: string[];
-        let frameOcr: Array<{ ocrText?: string | null }>;
+        const resolvedFrames = resolveInfographicFrameInputs(
+          dbFrames,
+          pathJoin(FRAMES_DIR, project.id),
+          project.videoPath,
+          PROJECTS_DIR,
+          project.id,
+        );
 
-        if (dbFrames.length > 0) {
-          frameFiles = dbFrames.map(f => f.imagePath);
-          frameOcr = dbFrames;
-        } else {
-          frameFiles = collectFrameImages(pathJoin(FRAMES_DIR, project.id), project.videoPath, PROJECTS_DIR, project.id);
-          frameOcr = frameFiles.map(() => ({ ocrText: null }));
-        }
+        console.log(
+          chalk.green(
+            `  ✔ ${resolvedFrames.frameFiles.length} readable frames found` +
+            (resolvedFrames.candidateCount > 0 ? ` (from ${resolvedFrames.candidateCount} candidates via ${resolvedFrames.source})` : '')
+          )
+        );
 
-        console.log(chalk.green(`  ✔ ${frameFiles.length} frames found`));
-
-        if (frameFiles.length === 0) {
-          console.log(chalk.red('  No frames found. Run analyzer first.'));
+        if (resolvedFrames.frameFiles.length === 0) {
+          console.log(chalk.red('  No readable frames found. Run analyzer first or refresh project screenshots.'));
           return;
         }
 
         // Annotations not available in CLI context (server not running)
 
-        const data = buildInfographicData(project, frameFiles, frameOcr);
+        const data = buildInfographicData(project, resolvedFrames.frameFiles, resolvedFrames.frameOcr);
+        if (data.frames.length === 0) {
+          console.log(chalk.red('  Export failed: infographic payload did not produce embeddable frames.'));
+          return;
+        }
         console.log(chalk.green(`  ✔ ${project.aiSummary ? 'AI analysis loaded' : 'No analysis (basic labels)'}`));
 
         const slug = (project.marketingTitle || project.name || project.id).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);

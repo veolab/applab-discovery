@@ -626,7 +626,7 @@ export const exportInfographicTool: MCPTool = {
     try {
       const { projects: projectsTable, frames: framesTable, FRAMES_DIR, PROJECTS_DIR } = await import('../../db/index.js');
       const { eq } = await import('drizzle-orm');
-      const { collectFrameImages, buildInfographicData, generateInfographicHtml } = await import('../../core/export/infographic.js');
+      const { buildInfographicData, generateInfographicHtml, resolveInfographicFrameInputs } = await import('../../core/export/infographic.js');
 
       const db = getDatabase();
       const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, params.projectId)).limit(1);
@@ -637,27 +637,22 @@ export const exportInfographicTool: MCPTool = {
         .orderBy(framesTable.frameNumber)
         .limit(20);
 
-      let frameFiles: string[];
-      let frameOcr: Array<{ ocrText?: string | null }>;
+      const resolvedFrames = resolveInfographicFrameInputs(
+        dbFrames,
+        path.join(FRAMES_DIR, project.id),
+        project.videoPath,
+        PROJECTS_DIR,
+        project.id,
+      );
 
-      if (dbFrames.length > 0) {
-        frameFiles = dbFrames.map(f => f.imagePath);
-        frameOcr = dbFrames;
-      } else {
-        frameFiles = collectFrameImages(
-          path.join(FRAMES_DIR, project.id),
-          project.videoPath,
-          PROJECTS_DIR,
-          project.id,
-        );
-        frameOcr = frameFiles.map(() => ({ ocrText: null }));
+      if (resolvedFrames.frameFiles.length === 0) {
+        return createErrorResult(`No readable frames found for infographic export. Checked ${resolvedFrames.candidateCount} candidate(s) from ${resolvedFrames.source}.`);
       }
 
-      if (frameFiles.length === 0) {
-        return createErrorResult('No frames found. Run analyzer first.');
+      const data = buildInfographicData(project, resolvedFrames.frameFiles, resolvedFrames.frameOcr);
+      if (data.frames.length === 0) {
+        return createErrorResult('Infographic export produced no embeddable frames.');
       }
-
-      const data = buildInfographicData(project, frameFiles, frameOcr);
       const slug = (project.marketingTitle || project.name || project.id).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
       const outputFilePath = params.outputPath
         ? path.join(params.outputPath, `${slug}-infographic.html`)

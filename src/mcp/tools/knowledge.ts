@@ -349,25 +349,24 @@ export const knowledgeOpenTool: MCPTool = {
         .orderBy(frames.frameNumber)
         .limit(15);
 
-      let frameFiles: string[];
-      let frameOcr: Array<{ ocrText?: string | null }>;
+      const { resolveInfographicFrameInputs, buildInfographicData, generateInfographicHtmlString } = await import('../../core/export/infographic.js');
+      const resolvedFrames = resolveInfographicFrameInputs(
+        dbFrames,
+        join(FRAMES_DIR, project.id),
+        project.videoPath,
+        PROJECTS_DIR,
+        project.id,
+      );
 
-      if (dbFrames.length > 0) {
-        frameFiles = dbFrames.map((f: any) => f.imagePath);
-        frameOcr = dbFrames;
-      } else {
-        const { collectFrameImages } = await import('../../core/export/infographic.js');
-        frameFiles = collectFrameImages(join(FRAMES_DIR, project.id), project.videoPath, PROJECTS_DIR, project.id);
-        frameOcr = frameFiles.map(() => ({ ocrText: null }));
-      }
-
-      if (frameFiles.length === 0) {
-        return createTextResult(`Project "${project.marketingTitle || project.name}" has no frames. Run the analyzer first, then try again.`);
+      if (resolvedFrames.frameFiles.length === 0) {
+        return createTextResult(`Project "${project.marketingTitle || project.name}" has no readable frames. Run the analyzer again, then try again.`);
       }
 
       // Build and generate HTML inline
-      const { buildInfographicData, generateInfographicHtmlString } = await import('../../core/export/infographic.js');
-      const data = buildInfographicData(project, frameFiles, frameOcr);
+      const data = buildInfographicData(project, resolvedFrames.frameFiles, resolvedFrames.frameOcr);
+      if (data.frames.length === 0) {
+        return createErrorResult(`Project "${project.marketingTitle || project.name}" did not produce embeddable infographic frames.`);
+      }
       const html = generateInfographicHtmlString(data);
 
       if (!html) {
@@ -398,7 +397,7 @@ export const knowledgeOpenTool: MCPTool = {
         structuredContent: {
           projectId: project.id,
           name: project.marketingTitle || project.name,
-          frameCount: frameFiles.length,
+          frameCount: resolvedFrames.frameFiles.length,
           platform: project.platform || 'unknown',
         },
         _meta: {
