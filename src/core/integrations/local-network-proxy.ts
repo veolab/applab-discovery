@@ -13,6 +13,13 @@ import {
   shutdownHostRuntime,
   startHostRuntimeCaptureSession,
 } from './esvp-host-runtime.js';
+import {
+  parsePcapToHarLikeTrace,
+  startPhysicalCapture,
+  stopPhysicalCapture,
+  type PhysicalCaptureHandle,
+  type PhysicalPlatform,
+} from './physical-capture.js';
 
 type MobilePlatform = 'ios' | 'android';
 
@@ -36,8 +43,8 @@ export type LocalCaptureProxyState = {
   url: string | null;
   startedAt: string | null;
   entryCount: number;
-  captureMode: 'external-proxy' | 'external-mitm';
-  source: 'applab-external-proxy' | 'applab-external-mitm';
+  captureMode: 'external-proxy' | 'external-mitm' | 'external-capture';
+  source: 'applab-external-proxy' | 'applab-external-mitm' | 'applab-external-capture';
   mitm?: HostRuntimeMitmState | null;
 };
 
@@ -45,17 +52,22 @@ type TracePayload = {
   trace_kind: 'http_trace';
   label: string;
   format: 'json';
-  source: 'applab-external-proxy' | 'applab-external-mitm';
+  source: 'applab-external-proxy' | 'applab-external-mitm' | 'applab-external-capture';
   payload: {
     session_id: string;
     proxy_id: string;
     generated_at: string;
     entries: Array<Record<string, unknown>>;
+    warning?: string;
+    pcap_bytes?: number;
+    platform?: string;
+    device_id?: string;
   };
   artifactMeta: {
-    capture_mode: 'external-proxy' | 'external-mitm';
+    capture_mode: 'external-proxy' | 'external-mitm' | 'external-capture';
     proxy_id: string;
     entry_count: number;
+    warning?: string;
   };
 };
 
@@ -76,6 +88,7 @@ type ActiveProxyRecord = {
 };
 
 const activeProxies = new Map<string, ActiveProxyRecord>();
+const activePhysicalCaptures = new Map<string, PhysicalCaptureHandle>();
 const finalizationsInFlight = new Map<string, Promise<LocalCaptureProxyFinalizationResult>>();
 let cleanupRegistered = false;
 
@@ -102,10 +115,33 @@ export async function ensureLocalCaptureProxyProfile(input: {
     };
   }
 
-  const captureMode = String((profile.capture as Record<string, unknown> | undefined)?.mode || '')
+  const requestedMode = String((profile.capture as Record<string, unknown> | undefined)?.mode || '')
     .trim()
     .toLowerCase();
-  const usesExternalProxy = captureMode === 'external-proxy';
+  let captureMode = requestedMode;
+
+  // Auto-downgrade gate: physical devices CANNOT do external-proxy or
+  // external-mitm reliably (no system-cert install path, often pinned). Force
+  // external-capture (rvictl iOS / PCAPdroid Android) and surface a hint via
+  // the returned profile so callers can log the decision.
+  const physicalPlatformDetected = resolvePhysicalPlatform(input.platform, input.deviceId);
+  let modeDowngradedFrom: string | null = null;
+  if (
+    physicalPlatformDetected &&
+    (captureMode === 'external-proxy' || captureMode === 'external-mitm')
+  ) {
+    modeDowngradedFrom = captureMode;
+    captureMode = 'external-capture';
+    // Stamp the resolved mode back so downstream code sees the canonical value.
+    if (profile.capture && typeof profile.capture === 'object') {
+      (profile.capture as Record<string, unknown>).mode = 'external-capture';
+      (profile.capture as Record<string, unknown>).applabMode = 'external-capture';
+      (profile.capture as Record<string, unknown>).downgradedFrom = modeDowngradedFrom;
+    }
+  }
+
+  const isExternalCapture = captureMode === 'external-capture';
+  const usesExternalProxy = captureMode === 'external-proxy' || isExternalCapture;
   if (!usesExternalProxy) {
     return {
       profile,
@@ -115,7 +151,10 @@ export async function ensureLocalCaptureProxyProfile(input: {
     };
   }
 
-  if (hasExplicitProxy(profile)) {
+  // external-capture does not use a proxy URL on the device — the host runtime
+  // session is registered without a listener and capture is performed via
+  // rvictl/PCAPdroid. Skip the explicit-proxy short-circuit for that mode.
+  if (!isExternalCapture && hasExplicitProxy(profile)) {
     return {
       profile,
       captureProxy: null,
@@ -134,14 +173,23 @@ export async function ensureLocalCaptureProxyProfile(input: {
     sessionId: input.sessionId,
     platform: input.platform,
     deviceId: input.deviceId,
-    captureMode: resolveAppLabCaptureMode(profile),
+    captureMode: isExternalCapture ? 'external-capture' : resolveAppLabCaptureMode(profile),
     lifecycle: input.lifecycle || null,
   });
-  profile.proxy = {
-    host: proxy.host,
-    port: proxy.port,
-    protocol: 'http',
-  };
+  if (modeDowngradedFrom && proxy) {
+    (proxy as Record<string, unknown>).downgradedFrom = modeDowngradedFrom;
+    (proxy as Record<string, unknown>).downgradeReason =
+      'physical device cannot install system cert; using rvictl/PCAPdroid no-decrypt capture';
+  }
+  // external-capture has no proxy URL — leave profile.proxy untouched so the
+  // device makes direct connections (we observe via rvictl/PCAPdroid instead).
+  if (!isExternalCapture && proxy.port !== null) {
+    profile.proxy = {
+      host: proxy.host,
+      port: proxy.port,
+      protocol: 'http',
+    };
+  }
 
   return {
     profile,
@@ -164,11 +212,89 @@ export async function stopLocalCaptureProxy(sessionId: string): Promise<{
   }
 
   activeProxies.delete(sessionId);
+
+  // Physical capture path: stop the rvictl/PCAPdroid handle, parse pcap, build trace.
+  const physicalHandle = activePhysicalCaptures.get(sessionId) || null;
+  if (physicalHandle) {
+    activePhysicalCaptures.delete(sessionId);
+    return finalizePhysicalCapture(sessionId, existing.captureProxy, physicalHandle);
+  }
+
   const drained = await drainHostRuntimeCaptureSession(sessionId).catch(() => null);
   return {
     captureProxy: normalizeCaptureProxyState(drained?.captureProxy, existing.captureProxy, false),
     trace: normalizeTracePayload(drained?.trace || null),
   };
+}
+
+async function finalizePhysicalCapture(
+  sessionId: string,
+  fallbackState: LocalCaptureProxyState,
+  handle: PhysicalCaptureHandle
+): Promise<{ captureProxy: LocalCaptureProxyState | null; trace: TracePayload | null }> {
+  let pcapPath = handle.pcapPath;
+  let bytesCaptured = 0;
+  try {
+    const stopped = await stopPhysicalCapture(handle);
+    pcapPath = stopped.pcapPath;
+    bytesCaptured = stopped.bytesCaptured;
+  } catch {
+    bytesCaptured = 0;
+  }
+
+  let entries: Array<Record<string, unknown>> = [];
+  let parseWarning: string | null = null;
+  if (bytesCaptured > 0) {
+    try {
+      const parsed = await parsePcapToHarLikeTrace(pcapPath, {
+        source: handle.platform === 'ios' ? 'rvictl-pcap' : 'pcapdroid-pcap',
+      });
+      entries = parsed.entries as unknown as Array<Record<string, unknown>>;
+    } catch {
+      entries = [];
+    }
+  }
+
+  // Empty pcap diagnosis — most common causes per platform:
+  if (bytesCaptured === 0 || (entries.length === 0 && bytesCaptured < 200)) {
+    if (handle.platform === 'android') {
+      parseWarning =
+        'PCAPdroid wrote ~no traffic. Most likely causes: (1) VPN consent not granted on the device — open PCAPdroid manually once and accept the VPN prompt; (2) PCAPdroid not actively capturing — verify it shows "Recording" status; (3) device used cellular while you expected Wi-Fi.';
+    } else if (handle.platform === 'ios') {
+      parseWarning =
+        'rvictl/tcpdump captured no packets. Most likely causes: (1) iPhone was locked or screen off — rvictl mirrors only when the device is awake; (2) BPF perms missing (run `sudo chown $USER /dev/bpf*`); (3) HTTP/3-only traffic with no TCP fallback.';
+    }
+  }
+
+  const finalState: LocalCaptureProxyState = {
+    ...fallbackState,
+    active: false,
+    entryCount: entries.length,
+  };
+  const proxyId = finalState.id || `physical-${sessionId}`;
+  const trace: TracePayload = {
+    trace_kind: 'http_trace',
+    label: 'applab-external-capture',
+    format: 'json',
+    source: 'applab-external-capture',
+    payload: {
+      session_id: sessionId,
+      proxy_id: proxyId,
+      generated_at: new Date().toISOString(),
+      entries,
+      ...(parseWarning ? { warning: parseWarning } : {}),
+      pcap_bytes: bytesCaptured,
+      platform: handle.platform,
+      device_id: handle.deviceId,
+    },
+    artifactMeta: {
+      capture_mode: 'external-capture',
+      proxy_id: proxyId,
+      entry_count: entries.length,
+      ...(parseWarning ? { warning: parseWarning } : {}),
+    },
+  };
+  return { captureProxy: finalState, trace };
 }
 
 export function listLocalCaptureProxyStates(): LocalCaptureProxyState[] {
@@ -341,11 +467,25 @@ async function startLocalCaptureProxy(input: {
   sessionId: string;
   platform?: MobilePlatform | string | null;
   deviceId?: string | null;
-  captureMode?: 'external-proxy' | 'external-mitm';
+  captureMode?: 'external-proxy' | 'external-mitm' | 'external-capture';
   lifecycle?: LocalCaptureProxyLifecycleConfig | null;
 }): Promise<LocalCaptureProxyState> {
   const existing = activeProxies.get(input.sessionId);
   if (existing) return existing.captureProxy;
+
+  const captureMode = input.captureMode || 'external-proxy';
+  const physicalPlatform = resolvePhysicalPlatform(input.platform, input.deviceId);
+
+  // Physical device path: capture happens out-of-band (rvictl on iOS,
+  // PCAPdroid on Android) — the host runtime session is registered without
+  // a proxy listener so callers can attach a pcap-derived trace on stop.
+  if (captureMode === 'external-capture' && physicalPlatform) {
+    return startPhysicalCaptureProxy({
+      ...input,
+      captureMode: 'external-capture',
+      physicalPlatform,
+    });
+  }
 
   const advertiseHost = resolveAdvertiseHost(input);
   const bindHost = resolveBindHost(advertiseHost);
@@ -354,7 +494,7 @@ async function startLocalCaptureProxy(input: {
     sessionId: input.sessionId,
     advertiseHost,
     bindHost,
-    captureMode: input.captureMode || 'external-proxy',
+    captureMode,
     maxDurationMs,
     maxBodyCaptureBytes: 16384,
     meta: {
@@ -376,6 +516,60 @@ async function startLocalCaptureProxy(input: {
   });
   registerCleanup();
   return captureProxy;
+}
+
+async function startPhysicalCaptureProxy(input: {
+  sessionId: string;
+  platform?: MobilePlatform | string | null;
+  deviceId?: string | null;
+  captureMode: 'external-capture';
+  physicalPlatform: PhysicalPlatform;
+  lifecycle?: LocalCaptureProxyLifecycleConfig | null;
+}): Promise<LocalCaptureProxyState> {
+  const deviceId = normalizeOptionalString(input.deviceId);
+  if (!deviceId) {
+    throw new Error('external-capture requires a deviceId (iOS UDID or adb id).');
+  }
+  const handle = await startPhysicalCapture({
+    sessionId: input.sessionId,
+    platform: input.physicalPlatform,
+    deviceId,
+  });
+  activePhysicalCaptures.set(input.sessionId, handle);
+
+  const captureProxy: LocalCaptureProxyState = {
+    id: `physical-${input.physicalPlatform}-${Date.now()}`,
+    sessionId: input.sessionId,
+    active: true,
+    bindHost: '',
+    host: '',
+    port: null,
+    url: null,
+    startedAt: handle.startedAt,
+    entryCount: 0,
+    captureMode: 'external-capture',
+    source: 'applab-external-capture',
+    mitm: null,
+  };
+
+  activeProxies.set(input.sessionId, {
+    sessionId: input.sessionId,
+    captureProxy,
+    lifecycle: input.lifecycle || null,
+  });
+  registerCleanup();
+  return captureProxy;
+}
+
+function resolvePhysicalPlatform(
+  platform: MobilePlatform | string | null | undefined,
+  deviceId: string | null | undefined
+): PhysicalPlatform | null {
+  const normalized = String(platform || '').trim().toLowerCase();
+  const id = String(deviceId || '').trim();
+  if (normalized === 'ios') return 'ios';
+  if (normalized === 'android' && id && !id.startsWith('emulator-')) return 'android';
+  return null;
 }
 
 function resolveAdvertiseHost(input: {
@@ -463,8 +657,29 @@ function normalizeCaptureProxyState(
   active: boolean
 ): LocalCaptureProxyState | null {
   const record = isObjectRecord(value) ? value : null;
+  const fallbackMode = fallback?.captureMode;
+  const recordMode = normalizeOptionalString(record?.captureMode);
+  const isExternalCapture = recordMode === 'external-capture' || fallbackMode === 'external-capture';
   const host = normalizeOptionalString(record?.host) || fallback?.host || null;
   const port = Number(record?.port ?? fallback?.port ?? NaN);
+  // For external-capture there is no proxy host:port — the state is valid even
+  // without those fields. Synthesize a minimal state from the fallback.
+  if (isExternalCapture) {
+    return {
+      id: normalizeOptionalString(record?.id) || fallback?.id || `physical-${Math.random().toString(36).slice(2, 10)}`,
+      sessionId: normalizeOptionalString(record?.sessionId) || fallback?.sessionId || '',
+      active,
+      bindHost: normalizeOptionalString(record?.bindHost) || fallback?.bindHost || '',
+      host: host || '',
+      port: null,
+      url: null,
+      startedAt: normalizeOptionalString(record?.startedAt) || fallback?.startedAt || new Date().toISOString(),
+      entryCount: clampInt(record?.entryCount ?? fallback?.entryCount ?? 0, 0, Number.MAX_SAFE_INTEGER, 0),
+      captureMode: 'external-capture',
+      source: 'applab-external-capture',
+      mitm: null,
+    };
+  }
   if (!host || !Number.isFinite(port) || port <= 0) {
     return fallback
       ? {
@@ -484,7 +699,7 @@ function normalizeCaptureProxyState(
     url: normalizeOptionalString(record?.url) || fallback?.url || `http://${host}:${port}`,
     startedAt: normalizeOptionalString(record?.startedAt) || fallback?.startedAt || new Date().toISOString(),
     entryCount: clampInt(record?.entryCount ?? fallback?.entryCount ?? 0, 0, Number.MAX_SAFE_INTEGER, 0),
-    captureMode: normalizeOptionalString(record?.captureMode) === 'external-mitm' || fallback?.captureMode === 'external-mitm'
+    captureMode: recordMode === 'external-mitm' || fallbackMode === 'external-mitm'
       ? 'external-mitm'
       : 'external-proxy',
     source: normalizeOptionalString(record?.source) === 'applab-external-mitm' || fallback?.source === 'applab-external-mitm'
@@ -494,11 +709,15 @@ function normalizeCaptureProxyState(
   };
 }
 
-function resolveAppLabCaptureMode(profile: Record<string, unknown>): 'external-proxy' | 'external-mitm' {
+function resolveAppLabCaptureMode(
+  profile: Record<string, unknown>
+): 'external-proxy' | 'external-mitm' | 'external-capture' {
   const capture = profile.capture;
   if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return 'external-proxy';
   const applabMode = String((capture as Record<string, unknown>).applabMode || '').trim().toLowerCase();
-  return applabMode === 'external-mitm' ? 'external-mitm' : 'external-proxy';
+  if (applabMode === 'external-mitm') return 'external-mitm';
+  if (applabMode === 'external-capture') return 'external-capture';
+  return 'external-proxy';
 }
 
 function normalizeTracePayload(value: unknown): TracePayload | null {

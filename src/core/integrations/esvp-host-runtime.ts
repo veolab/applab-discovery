@@ -15,15 +15,15 @@ type RuntimeCaptureProxyState = {
   url: string | null;
   startedAt: string | null;
   entryCount: number;
-  captureMode: 'external-proxy' | 'external-mitm';
-  source: 'applab-external-proxy' | 'applab-external-mitm';
+  captureMode: 'external-proxy' | 'external-mitm' | 'external-capture';
+  source: 'applab-external-proxy' | 'applab-external-mitm' | 'applab-external-capture';
 };
 
 type RuntimeTracePayload = {
   trace_kind: 'http_trace';
   label: string;
   format: 'json';
-  source: 'applab-external-proxy' | 'applab-external-mitm';
+  source: 'applab-external-proxy' | 'applab-external-mitm' | 'applab-external-capture';
   payload: {
     session_id: string;
     proxy_id: string;
@@ -31,7 +31,7 @@ type RuntimeTracePayload = {
     entries: Array<Record<string, unknown>>;
   };
   artifactMeta: {
-    capture_mode: 'external-proxy' | 'external-mitm';
+    capture_mode: 'external-proxy' | 'external-mitm' | 'external-capture';
     proxy_id: string;
     entry_count: number;
   };
@@ -78,7 +78,7 @@ export type HostRuntimeStartSessionInput = {
   sessionId: string;
   advertiseHost: string;
   bindHost: string;
-  captureMode?: 'external-proxy' | 'external-mitm';
+  captureMode?: 'external-proxy' | 'external-mitm' | 'external-capture';
   maxDurationMs?: number | null;
   maxBodyCaptureBytes?: number;
   meta?: Record<string, unknown> | null;

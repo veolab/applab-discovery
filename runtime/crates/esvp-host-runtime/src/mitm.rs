@@ -77,7 +77,7 @@ impl MitmEnvironment {
                     .ok_or_else(|| "external-mitm requires an Android emulator device id".to_string())?;
                 if !device_id.starts_with("emulator-") {
                     return Err(
-                        "external-mitm is currently limited to Android Emulator. Physical Android comes later.".to_string(),
+                        "external-mitm requires Android Emulator (root + remount). For physical devices use captureMode=external-capture (no-decrypt pcap via PCAPdroid).".to_string(),
                     );
                 }
                 install_android_emulator_root_cert(device_id, &self.root_cert_pem_path)
@@ -90,9 +90,9 @@ impl MitmEnvironment {
                 install_ios_simulator_root_cert(device_id, &self.root_cert_pem_path)
             }
             Some(other) => Err(format!(
-                "external-mitm is only supported for Android Emulator and iOS Simulator right now (got {other})."
+                "external-mitm only supports Android Emulator and iOS Simulator (got {other}). For physical devices use captureMode=external-capture."
             )),
-            None => Err("external-mitm requires platform metadata so the runtime can install the root certificate.".to_string()),
+            None => Err("external-mitm requires platform metadata so the runtime can install the root certificate. For physical devices use captureMode=external-capture instead.".to_string()),
         }
     }
 

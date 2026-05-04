@@ -65,12 +65,14 @@ struct ProxySession {
 enum CaptureMode {
     ExternalProxy,
     ExternalMitm,
+    ExternalCapture,
 }
 
 impl CaptureMode {
     fn from_request(value: Option<&str>) -> Self {
         match value.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
             "external-mitm" => Self::ExternalMitm,
+            "external-capture" => Self::ExternalCapture,
             _ => Self::ExternalProxy,
         }
     }
@@ -79,6 +81,7 @@ impl CaptureMode {
         match self {
             Self::ExternalProxy => "external-proxy",
             Self::ExternalMitm => "external-mitm",
+            Self::ExternalCapture => "external-capture",
         }
     }
 
@@ -86,21 +89,31 @@ impl CaptureMode {
         match self {
             Self::ExternalProxy => "applab-external-proxy",
             Self::ExternalMitm => "applab-external-mitm",
+            Self::ExternalCapture => "applab-external-capture",
         }
+    }
+
+    fn requires_proxy_listener(self) -> bool {
+        matches!(self, Self::ExternalProxy | Self::ExternalMitm)
     }
 }
 
 impl ProxySession {
     fn capture_proxy_state(&self, active_override: Option<bool>) -> CaptureProxyState {
         let active = active_override.unwrap_or_else(|| self.active.load(Ordering::SeqCst));
+        let has_listener = self.capture_mode.requires_proxy_listener();
         CaptureProxyState {
             id: self.runtime_session_id.clone(),
             session_id: self.session_id.clone(),
             active,
             bind_host: self.bind_host.clone(),
             host: self.advertise_host.clone(),
-            port: Some(self.port),
-            url: Some(format!("http://{}:{}", self.advertise_host, self.port)),
+            port: if has_listener { Some(self.port) } else { None },
+            url: if has_listener {
+                Some(format!("http://{}:{}", self.advertise_host, self.port))
+            } else {
+                None
+            },
             started_at: Some(self.started_at.clone()),
             entry_count: self.entry_count.load(Ordering::SeqCst),
             capture_mode: self.capture_mode.as_str().to_string(),
@@ -430,15 +443,21 @@ async fn start_session(
         (None, None)
     };
 
-    let bind_addr = format!("{}:0", payload.bind_host);
-    let listener = match TcpListener::bind(bind_addr).await {
-        Ok(listener) => listener,
-        Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Failed to bind proxy listener: {error}")),
+    let listener_and_port = if capture_mode.requires_proxy_listener() {
+        let bind_addr = format!("{}:0", payload.bind_host);
+        let listener = match TcpListener::bind(bind_addr).await {
+            Ok(listener) => listener,
+            Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Failed to bind proxy listener: {error}")),
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Failed to read proxy listener port: {error}")),
+        };
+        Some((listener, port))
+    } else {
+        None
     };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Failed to read proxy listener port: {error}")),
-    };
+    let port = listener_and_port.as_ref().map(|(_, p)| *p).unwrap_or(0);
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let session = Arc::new(ProxySession {
@@ -466,17 +485,26 @@ async fn start_session(
         session_id = %session.session_id,
         runtime_session_id = %session.runtime_session_id,
         port = session.port,
-        "proxy session started"
+        capture_mode = %capture_mode.as_str(),
+        "capture session started"
     );
 
-    tokio::spawn(run_proxy_listener(
-        state.client.clone(),
-        session.clone(),
-        listener,
-        stop_rx,
-        payload.max_body_capture_bytes.unwrap_or(16_384),
-        payload.meta.clone(),
-    ));
+    if let Some((listener, _)) = listener_and_port {
+        tokio::spawn(run_proxy_listener(
+            state.client.clone(),
+            session.clone(),
+            listener,
+            stop_rx,
+            payload.max_body_capture_bytes.unwrap_or(16_384),
+            payload.meta.clone(),
+        ));
+    } else {
+        // ExternalCapture mode: no proxy listener — capture is performed
+        // out-of-band by the orchestrator (rvictl on iOS, PCAPdroid on Android).
+        // The session exists only to receive trace entries via /sessions/:id/drain
+        // or to be drained with an attached pcap-derived payload.
+        drop(stop_rx);
+    }
 
     let max_duration_ms = payload
         .max_duration_ms

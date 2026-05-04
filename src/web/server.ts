@@ -2926,6 +2926,91 @@ app.post('/api/upload', async (c) => {
 // ============================================================================
 // CAPTURE API
 // ============================================================================
+
+// ─── Solo network capture (no test recording attached) ─────────────────
+// Lets the user start/stop a network capture session standalone — useful
+// when debugging an app interactively without going through Maestro/PW.
+// The session id is generated on start and required on stop.
+const soloNetworkCaptures = new Map<string, { sessionId: string; createdAt: string }>();
+
+app.post('/api/capture/network/start', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const platform = String(body?.platform || '').toLowerCase();
+    const deviceId = String(body?.deviceId || body?.device_id || '').trim();
+    const requestedMode = String(body?.mode || 'external-capture').toLowerCase();
+    if (platform !== 'ios' && platform !== 'android') {
+      return c.json({ error: "platform must be 'ios' or 'android'" }, 400);
+    }
+    if (!deviceId) {
+      return c.json({ error: 'deviceId is required (UDID for iOS, adb serial for Android)' }, 400);
+    }
+    const sessionId =
+      String(body?.sessionId || '').trim() || `solo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const profile = {
+      capture: { mode: requestedMode, applabMode: requestedMode },
+    };
+    const prepared = await ensureLocalCaptureProxyProfile({
+      sessionId,
+      profile,
+      platform,
+      deviceId,
+      allowAppLabOwnedProxy:
+        appLabNetworkProxySettings.localProxyOptInEnabled === true &&
+        !appLabNetworkProxySettings.emergencyLockEnabled,
+      lifecycle: null,
+    });
+    if (!prepared.appLabOwnedProxy) {
+      return c.json(
+        {
+          error:
+            'AppLab-owned proxy is not enabled. Enable Local Proxy Opt-In in Settings, or pass an explicit external proxy in the profile.',
+        },
+        400
+      );
+    }
+    soloNetworkCaptures.set(sessionId, {
+      sessionId,
+      createdAt: new Date().toISOString(),
+    });
+    return c.json({
+      ok: true,
+      sessionId,
+      captureProxy: prepared.captureProxy,
+      profile: prepared.profile,
+      hint: 'Capture armed. Drive your app on the device. POST /api/capture/network/stop with this sessionId to finalize and parse the trace.',
+    });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
+app.post('/api/capture/network/stop', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const sessionId = String(body?.sessionId || '').trim();
+    if (!sessionId) return c.json({ error: 'sessionId is required' }, 400);
+    if (!soloNetworkCaptures.has(sessionId)) {
+      return c.json({ error: `no solo capture for sessionId ${sessionId}` }, 404);
+    }
+    const result = await finalizeLocalCaptureProxySession({
+      sourceSessionId: sessionId,
+      clearNetwork: false,
+    });
+    soloNetworkCaptures.delete(sessionId);
+    return c.json({ ok: true, sessionId, ...result });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
+app.get('/api/capture/network/active', (c) => {
+  return c.json({
+    active: Array.from(soloNetworkCaptures.values()),
+  });
+});
+
 app.post('/api/capture/start', async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
