@@ -11,7 +11,7 @@ import { exec, execSync, spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { eq, desc, and, inArray } from 'drizzle-orm';
 import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR, EXPORTS_DIR, FRAMES_DIR } from '../db/index.js';
 import { isTemplatesInstalled, getAvailableTemplates, getTemplate, getBundlePath } from '../core/templates/loader.js';
@@ -66,6 +66,7 @@ import { LOCAL_ESVP_SERVER_URL } from '../core/integrations/esvp-local-runtime.j
 import { executeBatchExport, registerAdapter, getAvailableAdapters, type ProjectDataProvider } from '../core/export/pipeline.js';
 import { notionAdapter } from '../core/export/adapters/notion.js';
 import type { BatchExportManifest } from '../core/export/adapters/types.js';
+import { buildFlowMap, persistFlowMap, type FlowMap, type FlowMapFrameInput } from '../core/flow-map/builder.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1639,6 +1640,500 @@ type NormalizedProjectRecord = ProjectRecord & {
   analysisProgress: ProjectAnalysisProgressState | null;
 };
 
+type FlowMapCollectionFlow = {
+  id: string;
+  projectId: string;
+  name: string;
+  platform: string;
+  color: string;
+  visible: boolean;
+  layout: {
+    x: number;
+    y: number;
+  };
+  flowMap: FlowMap;
+};
+
+type FlowMapCollection = {
+  version: 1;
+  id: string;
+  type: 'flow-map';
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  layout: {
+    mode: 'lanes' | 'merged';
+  };
+  flows: FlowMapCollectionFlow[];
+};
+
+type FlowMapExportBackground = 'grid' | 'transparent';
+
+const FLOW_MAP_COLORS = [
+  '#60a5fa',
+  '#34d399',
+  '#fbbf24',
+  '#f472b6',
+  '#a78bfa',
+  '#fb7185',
+  '#2dd4bf',
+  '#f97316',
+];
+
+function isFlowMapProject(project?: Pick<ProjectRecord, 'platform'> | null): boolean {
+  return project?.platform === 'flow-map';
+}
+
+function getFlowMapProjectDir(flowMapId: string): string {
+  return join(PROJECTS_DIR, flowMapId);
+}
+
+function getFlowMapCollectionPath(flowMapId: string): string {
+  return join(getFlowMapProjectDir(flowMapId), 'flow-map-collection.json');
+}
+
+function readFlowMapCollection(flowMapId: string): FlowMapCollection | null {
+  const filePath = getFlowMapCollectionPath(flowMapId);
+  if (!existsSync(filePath)) return null;
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8')) as FlowMapCollection;
+  } catch {
+    return null;
+  }
+}
+
+function writeFlowMapCollection(collection: FlowMapCollection): void {
+  const projectDir = getFlowMapProjectDir(collection.id);
+  mkdirSync(projectDir, { recursive: true });
+  collection.updatedAt = new Date().toISOString();
+  writeFileSync(getFlowMapCollectionPath(collection.id), JSON.stringify(collection, null, 2), 'utf8');
+}
+
+function sanitizeFlowMapName(value: unknown, fallback = 'Flow Map'): string {
+  const name = String(value || '').replace(/\s+/g, ' ').trim();
+  return name ? name.slice(0, 120) : fallback;
+}
+
+function getFlowMapExportDir(flowMapId: string): string {
+  return join(EXPORTS_DIR, flowMapId, 'flow-map');
+}
+
+function htmlEscape(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fileToDataUrl(filePath: string | null | undefined): string {
+  if (!filePath || !existsSync(filePath)) return '';
+  try {
+    const ext = filePath.toLowerCase().split('.').pop();
+    const mime = ext === 'jpg' || ext === 'jpeg'
+      ? 'image/jpeg'
+      : ext === 'webp'
+        ? 'image/webp'
+        : 'image/png';
+    return `data:${mime};base64,${readFileSync(filePath).toString('base64')}`;
+  } catch {
+    return '';
+  }
+}
+
+function getFlowMapDurationMs(flowMap: FlowMap): number {
+  const mediaDuration = Number(flowMap.media?.durationMs || 0);
+  if (Number.isFinite(mediaDuration) && mediaDuration > 0) return mediaDuration;
+  return Math.max(0, ...flowMap.nodes.map((node) => Number(node.endMs || node.startMs || 0)));
+}
+
+function getFlowMapCollectionStats(collection: FlowMapCollection): {
+  frameCount: number;
+  durationSeconds: number;
+  thumbnailPath: string | null;
+} {
+  const visibleFlows = collection.flows.filter((flow) => flow.visible !== false);
+  const flows = visibleFlows.length > 0 ? visibleFlows : collection.flows;
+  const frameCount = flows.reduce((total, flow) => total + flow.flowMap.nodes.length, 0);
+  const durationSeconds = flows.reduce((total, flow) => total + getFlowMapDurationMs(flow.flowMap), 0) / 1000;
+  const thumbnailPath = flows
+    .flatMap((flow) => flow.flowMap.nodes)
+    .find((node) => Boolean(node.imagePath))?.imagePath || null;
+  return {
+    frameCount,
+    durationSeconds,
+    thumbnailPath,
+  };
+}
+
+async function refreshFlowMapProjectMetadata(collection: FlowMapCollection): Promise<ProjectRecord | null> {
+  const db = getDatabase();
+  const stats = getFlowMapCollectionStats(collection);
+  await db.update(projects)
+    .set({
+      name: collection.name,
+      marketingTitle: collection.name,
+      thumbnailPath: stats.thumbnailPath,
+      frameCount: stats.frameCount,
+      duration: stats.durationSeconds,
+      aiSummary: `FlowMap collection with ${collection.flows.length} flow${collection.flows.length === 1 ? '' : 's'} and ${stats.frameCount} captured screen${stats.frameCount === 1 ? '' : 's'}.`,
+      updatedAt: new Date(),
+    })
+    .where(eq(projects.id, collection.id));
+
+  const [project] = await db.select().from(projects).where(eq(projects.id, collection.id)).limit(1);
+  return project ? project as ProjectRecord : null;
+}
+
+async function hydrateFlowMapCollectionSourceNames(collection: FlowMapCollection): Promise<FlowMapCollection> {
+  const sourceIds = Array.from(new Set(collection.flows.map((flow) => flow.projectId).filter(Boolean)));
+  if (sourceIds.length === 0) return collection;
+
+  const db = getDatabase();
+  const sourceRows = await db.select().from(projects).where(inArray(projects.id, sourceIds));
+  const sourceById = new Map(sourceRows.map((project) => [project.id, project as ProjectRecord]));
+  return {
+    ...collection,
+    flows: collection.flows.map((flow) => {
+      const source = sourceById.get(flow.projectId);
+      if (!source) return flow;
+      const sourceName = source.name || source.marketingTitle || flow.name;
+      return {
+        ...flow,
+        name: sourceName,
+        platform: source.platform || flow.platform,
+        flowMap: {
+          ...flow.flowMap,
+          title: sourceName,
+          platform: source.platform || flow.flowMap.platform,
+        },
+      };
+    }),
+  };
+}
+
+type FlowMapExportViewMode = 'flow' | 'grid';
+
+const FLOW_MAP_EXPORT_PAGE_PAD = 56;
+const FLOW_MAP_EXPORT_STAGE_PAD = 88;
+const FLOW_MAP_EXPORT_NODE_W = 124;
+const FLOW_MAP_EXPORT_NODE_H = 272;
+const FLOW_MAP_EXPORT_PHONE_W = 104;
+const FLOW_MAP_EXPORT_PHONE_H = 208;
+
+function getExportGridColumns(nodeCount: number): number {
+  const count = Math.max(1, Number(nodeCount) || 1);
+  if (count <= 2) return 2;
+  if (count <= 6) return 3;
+  if (count <= 12) return 4;
+  if (count <= 20) return 5;
+  return 6;
+}
+
+function buildExportArrowLayout(nodes: FlowMap['nodes'], mode: FlowMapExportViewMode): {
+  positions: Record<string, { x: number; y: number; width: number; height: number }>;
+  bodyWidth: number;
+  bodyHeight: number;
+} {
+  const nodeW = FLOW_MAP_EXPORT_NODE_W;
+  const nodeH = FLOW_MAP_EXPORT_NODE_H;
+  const pad = 20;
+  const positions: Record<string, { x: number; y: number; width: number; height: number }> = {};
+
+  if (mode === 'grid') {
+    const columns = getExportGridColumns(nodes.length);
+    const colGap = 72;
+    const rowGap = 68;
+    nodes.forEach((node, index) => {
+      const col = index % columns;
+      const row = Math.floor(index / columns);
+      positions[node.id] = {
+        x: pad + col * (nodeW + colGap),
+        y: pad + row * (nodeH + rowGap),
+        width: nodeW,
+        height: nodeH,
+      };
+    });
+    const rows = Math.max(1, Math.ceil(nodes.length / columns));
+    return {
+      positions,
+      bodyWidth: pad * 2 + columns * nodeW + Math.max(0, columns - 1) * colGap + 56,
+      bodyHeight: pad * 2 + rows * nodeH + Math.max(0, rows - 1) * rowGap,
+    };
+  }
+
+  const gap = 58;
+  nodes.forEach((node, index) => {
+    positions[node.id] = {
+      x: pad + index * (nodeW + gap),
+      y: pad + (index % 2 === 1 ? 26 : 0),
+      width: nodeW,
+      height: nodeH,
+    };
+  });
+  return {
+    positions,
+    bodyWidth: pad * 2 + nodes.length * nodeW + Math.max(0, nodes.length - 1) * gap,
+    bodyHeight: pad * 2 + nodeH + 34,
+  };
+}
+
+function getExportFlowMetrics(flow: FlowMapCollectionFlow, options: { viewMode: FlowMapExportViewMode; showArrows: boolean }): {
+  width: number;
+  height: number;
+  bodyWidth?: number;
+  bodyHeight?: number;
+} {
+  const nodes = flow.flowMap.nodes || [];
+  const nodeCount = Math.max(1, nodes.length);
+  if (options.showArrows) {
+    const layout = buildExportArrowLayout(nodes, options.viewMode);
+    return {
+      width: Math.max(420, layout.bodyWidth),
+      height: 44 + layout.bodyHeight,
+      bodyWidth: layout.bodyWidth,
+      bodyHeight: layout.bodyHeight,
+    };
+  }
+
+  if (options.viewMode === 'grid') {
+    const columns = getExportGridColumns(nodeCount);
+    const rows = Math.ceil(nodeCount / columns);
+    return {
+      width: Math.max(520, 36 + columns * FLOW_MAP_EXPORT_NODE_W + Math.max(0, columns - 1) * 18),
+      height: 82 + rows * FLOW_MAP_EXPORT_NODE_H + Math.max(0, rows - 1) * 24,
+    };
+  }
+
+  return {
+    width: Math.max(520, 88 + nodeCount * 148),
+    height: 344,
+  };
+}
+
+function renderExportArrowLayer(flow: FlowMapCollectionFlow, layout: ReturnType<typeof buildExportArrowLayout>): string {
+  const nodes = flow.flowMap.nodes || [];
+  if (nodes.length < 2) return '';
+  const safeId = String(flow.id || 'flow').replace(/[^a-zA-Z0-9_-]/g, '');
+  const paths: string[] = [];
+  for (let index = 0; index < nodes.length - 1; index += 1) {
+    const from = layout.positions[nodes[index].id];
+    const to = layout.positions[nodes[index + 1].id];
+    if (!from || !to) continue;
+    const sx = from.x + from.width;
+    const sy = from.y + 86;
+    const ex = to.x;
+    const ey = to.y + 86;
+    const path = ex >= sx
+      ? `M ${sx} ${sy} C ${sx + Math.max(38, (ex - sx) * 0.45)} ${sy}, ${ex - Math.max(38, (ex - sx) * 0.45)} ${ey}, ${ex} ${ey}`
+      : `M ${sx} ${sy} C ${Math.max(sx, ex) + 40} ${sy}, ${Math.max(sx, ex) + 40} ${ey}, ${ex} ${ey}`;
+    paths.push(`<path class="edge-path" d="${htmlEscape(path)}" marker-end="url(#exportArrow_${htmlEscape(safeId)})"></path>`);
+  }
+
+  return `
+    <svg class="edge-layer" width="${layout.bodyWidth}" height="${layout.bodyHeight}" viewBox="0 0 ${layout.bodyWidth} ${layout.bodyHeight}" aria-hidden="true">
+      <defs>
+        <marker id="exportArrow_${htmlEscape(safeId)}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="currentColor"></path>
+        </marker>
+      </defs>
+      ${paths.join('')}
+    </svg>
+  `;
+}
+
+function computeFlowMapCollectionBounds(
+  collection: FlowMapCollection,
+  options: { viewMode?: FlowMapExportViewMode; showArrows?: boolean } = {},
+): {
+  width: number;
+  height: number;
+  stageWidth: number;
+  stageHeight: number;
+  minX: number;
+  minY: number;
+} {
+  if (collection.flows.length === 0) {
+    return {
+      width: 1200,
+      height: 720,
+      stageWidth: 1200 - FLOW_MAP_EXPORT_PAGE_PAD * 2,
+      stageHeight: 520,
+      minX: 0,
+      minY: 0,
+    };
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = 0;
+  let maxY = 0;
+  const metricsOptions = {
+    viewMode: options.viewMode || 'flow',
+    showArrows: Boolean(options.showArrows),
+  };
+
+  for (const flow of collection.flows) {
+    const metrics = getExportFlowMetrics(flow, metricsOptions);
+    const x = Number(flow.layout?.x ?? 80);
+    const y = Number(flow.layout?.y ?? 80);
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + metrics.width);
+    maxY = Math.max(maxY, y + metrics.height);
+  }
+
+  const stagePad = FLOW_MAP_EXPORT_STAGE_PAD;
+  const pagePad = FLOW_MAP_EXPORT_PAGE_PAD;
+  const contentWidth = Math.max(1, maxX - minX);
+  const contentHeight = Math.max(1, maxY - minY);
+  const stageWidth = Math.ceil(contentWidth + stagePad * 2);
+  const stageHeight = Math.ceil(contentHeight + stagePad * 2);
+
+  return {
+    width: Math.ceil(stageWidth + pagePad * 2),
+    height: Math.ceil(stageHeight + 220),
+    stageWidth,
+    stageHeight,
+    minX: Math.floor(minX - stagePad),
+    minY: Math.floor(minY - stagePad),
+  };
+}
+
+function renderFlowMapCollectionExportHtml(
+  collection: FlowMapCollection,
+  options: { background?: FlowMapExportBackground; viewMode?: FlowMapExportViewMode; showArrows?: boolean; hideText?: boolean } = {},
+): string {
+  const viewMode: FlowMapExportViewMode = options.viewMode === 'grid' ? 'grid' : 'flow';
+  const showArrows = Boolean(options.showArrows);
+  const hideText = Boolean(options.hideText);
+  const bounds = computeFlowMapCollectionBounds(collection, { viewMode, showArrows });
+  const pageMinHeight = hideText
+    ? bounds.stageHeight + FLOW_MAP_EXPORT_PAGE_PAD * 2
+    : bounds.height;
+  const generatedAt = new Date().toISOString();
+  const background = options.background === 'transparent' ? 'transparent' : 'grid';
+  const transparent = background === 'transparent';
+  const rootBackground = transparent ? 'transparent' : '#08090b';
+  const pageBackground = transparent ? 'transparent' : '#08090b';
+  const stageBackground = transparent
+    ? 'transparent'
+    : '#0b0d10';
+  const stageBackgroundImage = transparent
+    ? 'none'
+    : 'linear-gradient(#171a1f 1px, transparent 1px), linear-gradient(90deg, #171a1f 1px, transparent 1px)';
+  const stageBorder = transparent ? '1px solid transparent' : '1px solid #1f2937';
+  const headerMarkup = hideText ? '' : `
+    <div class="export-header">
+      <div>
+        <h1>${htmlEscape(collection.name)}</h1>
+        <p class="subtitle">${collection.flows.length} flow${collection.flows.length === 1 ? '' : 's'} exported as a portable AppLab FlowMap. Screens are embedded so MCP agents can inspect it without video hosting.</p>
+      </div>
+      <div class="meta">Generated ${htmlEscape(generatedAt)}<br>AppLab Discovery FlowMap</div>
+    </div>
+  `;
+  const footerMarkup = hideText ? '' : `<div class="footer">Source collection: ${htmlEscape(collection.id)}</div>`;
+  const flowMarkup = collection.flows.map((flow) => {
+    const x = Math.round(Number(flow.layout?.x ?? 80) - bounds.minX);
+    const y = Math.round(Number(flow.layout?.y ?? 80) - bounds.minY);
+    const nodes = flow.flowMap.nodes;
+    const metrics = getExportFlowMetrics(flow, { viewMode, showArrows });
+    const arrowLayout = showArrows ? buildExportArrowLayout(nodes, viewMode) : null;
+    const edgeMarkup = arrowLayout ? renderExportArrowLayer(flow, arrowLayout) : '';
+    const gridColumns = getExportGridColumns(nodes.length);
+    const modeClass = viewMode === 'grid' ? 'grid-mode' : 'flow-mode';
+    const arrowClass = showArrows ? 'arrows-mode' : '';
+    const nodeMarkup = nodes.map((node, index) => {
+      const image = fileToDataUrl(node.imagePath);
+      const position = arrowLayout?.positions[node.id];
+      const positionStyle = position ? ` style="left:${position.x}px;top:${position.y}px;"` : '';
+      return `
+        <div class="node"${positionStyle}>
+          <div class="phone">
+            ${image ? `<img src="${image}" alt="${htmlEscape(node.title || `Screen ${index + 1}`)}">` : '<div class="no-image">No image</div>'}
+          </div>
+          ${hideText ? '' : `
+            <div class="node-label">${htmlEscape(node.title || `Screen ${index + 1}`)}</div>
+            <div class="node-time">${htmlEscape(formatExportFlowMapTime(node.startMs))}</div>
+          `}
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <section class="flow ${modeClass} ${arrowClass}" style="left:${x}px;top:${y}px;width:${metrics.width}px;--flow-color:${htmlEscape(flow.color)};--grid-cols:${gridColumns};">
+        ${hideText ? '' : `
+          <header>
+            <div>
+              <h2>${htmlEscape(flow.name)}</h2>
+              <p>${htmlEscape(flow.platform || 'capture')} · ${flow.flowMap.nodes.length} screens · ${htmlEscape(formatExportFlowMapTime(getFlowMapDurationMs(flow.flowMap)))}</p>
+            </div>
+            <span>${htmlEscape(flow.flowMap.title || flow.name)}</span>
+          </header>
+        `}
+        <div class="flow-body" ${arrowLayout ? `style="height:${arrowLayout.bodyHeight}px;"` : ''}>
+          ${edgeMarkup}
+          <div class="nodes">${nodeMarkup}</div>
+        </div>
+      </section>
+    `;
+  }).join('');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${htmlEscape(collection.name)} - AppLab FlowMap</title>
+  <style>
+    :root { color-scheme: dark; background: ${rootBackground}; color: #e8eef7; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: ${rootBackground}; color: #e8eef7; }
+    .export-page { width: ${bounds.width}px; min-height: ${pageMinHeight}px; padding: ${FLOW_MAP_EXPORT_PAGE_PAD}px; background: ${pageBackground}; }
+    .export-header { display: flex; justify-content: space-between; gap: 40px; align-items: flex-start; margin-bottom: 30px; }
+    h1 { font-size: 36px; line-height: 1.12; margin: 0 0 10px; letter-spacing: 0; }
+    .subtitle { color: #a8b5c8; font-size: 16px; line-height: 1.35; margin: 0; max-width: 560px; }
+    .meta { color: #718096; font-size: 13px; line-height: 1.35; text-align: right; white-space: nowrap; }
+    .export-stage { position: relative; width: ${bounds.stageWidth}px; height: ${bounds.stageHeight}px; border: ${stageBorder}; border-radius: 16px; overflow: hidden; background-color: ${stageBackground}; background-image: ${stageBackgroundImage}; background-size: 40px 40px; }
+    .flow { position: absolute; min-width: 420px; max-width: none; border: 1px solid color-mix(in srgb, var(--flow-color) 38%, #1f2937); border-radius: 12px; background: rgba(12, 15, 20, 0.95); box-shadow: 0 18px 44px rgba(0,0,0,.36); overflow: hidden; }
+    .flow header { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; margin: 0; padding: 16px 16px 14px 14px; border-left: 4px solid var(--flow-color); border-bottom: 1px solid rgba(148, 163, 184, 0.16); background: color-mix(in srgb, var(--flow-color) 8%, rgba(12, 15, 20, 0.96)); }
+    .flow h2 { font-size: 20px; line-height: 1.15; margin: 0 0 6px; letter-spacing: 0; }
+    .flow p { color: #a8b5c8; font-size: 13px; margin: 0; }
+    .flow header span { color: var(--flow-color); font-size: 12px; padding-top: 2px; max-width: 260px; text-align: right; }
+    .flow-body { position: relative; overflow: visible; }
+    .nodes { display: flex; align-items: flex-start; gap: 24px; padding: 20px; }
+    .grid-mode:not(.arrows-mode) .nodes { display: grid; grid-template-columns: repeat(var(--grid-cols), ${FLOW_MAP_EXPORT_NODE_W}px); gap: 24px 18px; }
+    .arrows-mode .nodes { position: absolute; inset: 0; display: block; padding: 0; }
+    .node { position: relative; width: ${FLOW_MAP_EXPORT_NODE_W}px; flex: 0 0 auto; }
+    .arrows-mode .node { position: absolute; }
+    .edge-layer { position: absolute; left: 0; top: 0; overflow: visible; color: var(--flow-color); pointer-events: none; }
+    .edge-path { fill: none; stroke: var(--flow-color); stroke-width: 1.5; opacity: 0.82; }
+    .phone { width: ${FLOW_MAP_EXPORT_PHONE_W}px; height: ${FLOW_MAP_EXPORT_PHONE_H}px; margin: 0 auto; border-radius: 12px; overflow: hidden; border: 1px solid #293241; background: #050608; display: flex; align-items: center; justify-content: center; }
+    .phone img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .no-image { color: #64748b; font-size: 10px; padding: 10px; text-align: center; }
+    .node-label { margin-top: 10px; color: #d8e1ef; font-size: 13px; line-height: 1.25; text-align: center; max-height: 36px; overflow: hidden; }
+    .node-time { margin-top: 4px; color: #60a5fa; font-size: 12px; text-align: center; }
+    .footer { color: #718096; font-size: 13px; margin-top: 18px; }
+  </style>
+</head>
+<body>
+  <main class="export-page">
+    ${headerMarkup}
+    <div class="export-stage">${flowMarkup}</div>
+    ${footerMarkup}
+  </main>
+</body>
+</html>`;
+}
+
+function formatExportFlowMapTime(ms: number | null | undefined): string {
+  const totalSeconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 function resolveVideoPath(videoPath: string | null): string | null {
   if (!videoPath) return null;
   try {
@@ -1688,6 +2183,235 @@ function normalizeProjectRecord(project: ProjectRecord): NormalizedProjectRecord
   };
 
   return withProjectAnalysisProgress(normalized) as NormalizedProjectRecord;
+}
+
+function resolveFlowCodePath(recordingBaseDir: string | null): string | null {
+  if (!recordingBaseDir || !existsSync(recordingBaseDir)) return null;
+  const candidates = [
+    join(recordingBaseDir, 'test.yaml'),
+    join(recordingBaseDir, 'test.yml'),
+    join(recordingBaseDir, 'test.spec.ts'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) || null;
+}
+
+async function buildProjectFlowMap(projectId: string, options: { persist?: boolean } = {}): Promise<FlowMap | null> {
+  const db = getDatabase();
+  const [rawProject] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+  if (!rawProject) return null;
+
+  const project = await maybeRepairMobileProjectThumbnail(rawProject as ProjectRecord);
+  const recordingBaseDir = resolveRecordingBaseDir(project.videoPath);
+  const resolvedVideoPath = resolveVideoPath(project.videoPath);
+  const sessionPath = recordingBaseDir ? join(recordingBaseDir, 'session.json') : null;
+  const flowCodePath = resolveFlowCodePath(recordingBaseDir);
+
+  let sessionData: any = null;
+  if (sessionPath && existsSync(sessionPath)) {
+    try {
+      sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
+    } catch {
+      sessionData = null;
+    }
+  }
+
+  const projectFrames = await db
+    .select()
+    .from(frames)
+    .where(eq(frames.projectId, projectId))
+    .orderBy(frames.frameNumber);
+
+  const frameInputs: FlowMapFrameInput[] = projectFrames.map((frame) => ({
+    id: frame.id,
+    frameNumber: frame.frameNumber,
+    timestamp: frame.timestamp,
+    imagePath: frame.imagePath,
+    ocrText: frame.ocrText,
+  }));
+
+  if (frameInputs.length === 0 && project.thumbnailPath && existsSync(project.thumbnailPath) && !isSyntheticProjectCover(project.thumbnailPath)) {
+    frameInputs.push({
+      id: `${projectId}_thumbnail`,
+      frameNumber: 1,
+      timestamp: 0,
+      imagePath: project.thumbnailPath,
+      ocrText: project.ocrText,
+    });
+  }
+
+  const startedAt = toEpochMs(project.createdAt);
+  const durationMs = typeof project.duration === 'number' && Number.isFinite(project.duration)
+    ? Math.max(0, project.duration * 1000)
+    : null;
+  const screenshotsDir = typeof sessionData?.screenshotsDir === 'string'
+    ? sessionData.screenshotsDir
+    : recordingBaseDir
+      ? join(recordingBaseDir, 'screenshots')
+      : null;
+
+  const flowMap = buildFlowMap({
+    owner: {
+      type: 'project',
+      id: projectId,
+      sourceId: typeof sessionData?.id === 'string' ? sessionData.id : null,
+    },
+    title: project.marketingTitle || project.name,
+    platform: project.platform,
+    session: {
+      id: typeof sessionData?.id === 'string' ? sessionData.id : projectId,
+      name: sessionData?.name || project.name,
+      platform: sessionData?.platform || project.platform || 'unknown',
+      startedAt: typeof sessionData?.startedAt === 'number' ? sessionData.startedAt : startedAt || undefined,
+      endedAt: typeof sessionData?.endedAt === 'number'
+        ? sessionData.endedAt
+        : startedAt && durationMs
+          ? startedAt + durationMs
+          : undefined,
+      status: sessionData?.status || project.status || 'captured',
+      actions: Array.isArray(sessionData?.actions) ? sessionData.actions : [],
+      screenshotsDir: screenshotsDir || undefined,
+      videoPath: resolvedVideoPath,
+      viewport: sessionData?.viewport || null,
+      networkEntries: Array.isArray(sessionData?.networkEntries) ? sessionData.networkEntries : [],
+    },
+    frames: frameInputs,
+    screenshotsDir,
+    videoPath: resolvedVideoPath,
+    durationMs,
+    recordingDir: recordingBaseDir,
+    sessionPath,
+    flowCodePath,
+  });
+
+  if (options.persist !== false && recordingBaseDir) {
+    persistFlowMap(flowMap, recordingBaseDir);
+  }
+
+  return flowMap;
+}
+
+async function buildMobileRecordingFlowMap(recordingId: string, options: { persist?: boolean } = {}): Promise<FlowMap | null> {
+  const recordingDir = getMobileRecordingDir(recordingId);
+  const sessionPath = join(recordingDir, 'session.json');
+  if (!existsSync(sessionPath)) return null;
+
+  const sessionData = JSON.parse(readFileSync(sessionPath, 'utf-8'));
+  const flowCodePath = resolveFlowCodePath(recordingDir);
+  const resolvedVideoPath = resolveVideoPath(sessionData?.videoPath || recordingDir);
+  const flowMap = buildFlowMap({
+    owner: {
+      type: 'mobile-recording',
+      id: recordingId,
+      sourceId: typeof sessionData?.id === 'string' ? sessionData.id : null,
+    },
+    title: sessionData?.name || `Mobile Recording ${recordingId}`,
+    platform: sessionData?.platform || 'mobile',
+    session: {
+      ...sessionData,
+      videoPath: resolvedVideoPath,
+      screenshotsDir: sessionData?.screenshotsDir || join(recordingDir, 'screenshots'),
+    },
+    screenshotsDir: sessionData?.screenshotsDir || join(recordingDir, 'screenshots'),
+    videoPath: resolvedVideoPath,
+    recordingDir,
+    sessionPath,
+    flowCodePath,
+  });
+
+  if (options.persist !== false) {
+    persistFlowMap(flowMap, recordingDir);
+  }
+
+  return flowMap;
+}
+
+async function buildCollectionFlow(
+  projectId: string,
+  index: number,
+  existingLayout?: { x?: number; y?: number } | null,
+): Promise<FlowMapCollectionFlow> {
+  const db = getDatabase();
+  const [rawProject] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+  if (!rawProject) {
+    throw new Error(`Project not found: ${projectId}`);
+  }
+  if (isFlowMapProject(rawProject as ProjectRecord)) {
+    throw new Error('FlowMap projects cannot be nested inside another FlowMap');
+  }
+
+  const project = await maybeRepairMobileProjectThumbnail(rawProject as ProjectRecord);
+  const flowMap = await buildProjectFlowMap(projectId, { persist: true });
+  if (!flowMap) {
+    throw new Error(`Could not build flow map for project: ${projectId}`);
+  }
+
+  return {
+    id: `flow_${crypto.randomUUID()}`,
+    projectId,
+    name: project.name || project.marketingTitle || `Flow ${index + 1}`,
+    platform: project.platform || 'project',
+    color: FLOW_MAP_COLORS[index % FLOW_MAP_COLORS.length],
+    visible: true,
+    layout: {
+      x: Number(existingLayout?.x ?? 96),
+      y: Number(existingLayout?.y ?? (96 + index * 360)),
+    },
+    flowMap,
+  };
+}
+
+async function createFlowMapCollection(name: string, projectIds: string[]): Promise<{
+  collection: FlowMapCollection;
+  project: ProjectRecord;
+}> {
+  const uniqueProjectIds = Array.from(new Set(projectIds.filter(Boolean)));
+  if (uniqueProjectIds.length === 0) {
+    throw new Error('Select at least one capture to create a FlowMap');
+  }
+
+  const id = `flowmap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const createdAt = new Date().toISOString();
+  const flows: FlowMapCollectionFlow[] = [];
+  for (let index = 0; index < uniqueProjectIds.length; index += 1) {
+    flows.push(await buildCollectionFlow(uniqueProjectIds[index], index));
+  }
+
+  const collection: FlowMapCollection = {
+    version: 1,
+    id,
+    type: 'flow-map',
+    name: sanitizeFlowMapName(name, 'Flow Map'),
+    createdAt,
+    updatedAt: createdAt,
+    layout: {
+      mode: 'lanes',
+    },
+    flows,
+  };
+  writeFlowMapCollection(collection);
+
+  const stats = getFlowMapCollectionStats(collection);
+  const db = getDatabase();
+  const now = new Date();
+  await db.insert(projects).values({
+    id,
+    name: collection.name,
+    videoPath: getFlowMapProjectDir(id),
+    thumbnailPath: stats.thumbnailPath,
+    platform: 'flow-map',
+    aiSummary: `FlowMap collection with ${flows.length} flow${flows.length === 1 ? '' : 's'} and ${stats.frameCount} captured screen${stats.frameCount === 1 ? '' : 's'}.`,
+    frameCount: stats.frameCount,
+    duration: stats.durationSeconds,
+    tags: JSON.stringify(['FlowMap']),
+    marketingTitle: collection.name,
+    status: 'ready',
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const [project] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+  if (!project) throw new Error('FlowMap project was not created');
+  return { collection, project: project as ProjectRecord };
 }
 
 function getRecordingSessionFinalUrl(sessionData: any): string | null {
@@ -1915,6 +2639,269 @@ app.get('/api/projects/:id', async (c) => {
       networkCapture,
       esvp,
     }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get('/api/projects/:id/flow-map', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const flowMap = await buildProjectFlowMap(id);
+    if (!flowMap) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+    return c.json({ flowMap });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/projects/:id/flow-map/rebuild', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const flowMap = await buildProjectFlowMap(id, { persist: true });
+    if (!flowMap) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+    return c.json({ success: true, flowMap });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/flow-maps', async (c) => {
+  try {
+    const body = await c.req.json();
+    const projectIds = Array.isArray(body.projectIds) ? body.projectIds.map(String) : [];
+    const { collection, project } = await createFlowMapCollection(
+      sanitizeFlowMapName(body.name, 'Flow Map'),
+      projectIds,
+    );
+
+    return c.json({
+      success: true,
+      collection,
+      project: normalizeProjectRecord(project),
+    }, 201);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, message.includes('Select at least') ? 400 : 500);
+  }
+});
+
+app.get('/api/flow-maps/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const collection = readFlowMapCollection(id);
+    if (!collection) {
+      return c.json({ error: 'FlowMap not found' }, 404);
+    }
+
+    return c.json({ collection: await hydrateFlowMapCollectionSourceNames(collection) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.put('/api/flow-maps/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+    let collection = readFlowMapCollection(id);
+    if (!collection) {
+      return c.json({ error: 'FlowMap not found' }, 404);
+    }
+
+    const body = await c.req.json();
+    if (typeof body.name === 'string') {
+      collection.name = sanitizeFlowMapName(body.name, collection.name);
+    }
+    if (body.layout?.mode === 'lanes' || body.layout?.mode === 'merged') {
+      collection.layout.mode = body.layout.mode;
+    }
+    if (Array.isArray(body.flows)) {
+      const updates = new Map<string, any>(body.flows.map((flow: any) => [String(flow.id), flow]));
+      collection.flows = collection.flows.map((flow) => {
+        const update = updates.get(flow.id);
+        if (!update) return flow;
+        const nextX = Number(update.layout?.x);
+        const nextY = Number(update.layout?.y);
+        return {
+          ...flow,
+          name: typeof update.name === 'string' ? sanitizeFlowMapName(update.name, flow.name) : flow.name,
+          visible: typeof update.visible === 'boolean' ? update.visible : flow.visible,
+          layout: {
+            x: Number.isFinite(nextX) ? nextX : flow.layout.x,
+            y: Number.isFinite(nextY) ? nextY : flow.layout.y,
+          },
+        };
+      });
+    }
+
+    writeFlowMapCollection(collection);
+    const project = await refreshFlowMapProjectMetadata(collection);
+    return c.json({
+      success: true,
+      collection,
+      project: project ? normalizeProjectRecord(project) : null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/flow-maps/:id/flows', async (c) => {
+  try {
+    const id = c.req.param('id');
+    let collection = readFlowMapCollection(id);
+    if (!collection) {
+      return c.json({ error: 'FlowMap not found' }, 404);
+    }
+    collection = await hydrateFlowMapCollectionSourceNames(collection);
+
+    const body = await c.req.json() as any;
+    const requestedProjectIds: string[] = Array.isArray(body.projectIds)
+      ? body.projectIds.map((value: unknown) => String(value))
+      : [];
+    const existingProjectIds = new Set(collection.flows.map((flow) => flow.projectId));
+    const nextProjectIds: string[] = Array.from(new Set(requestedProjectIds.filter((projectId: string) => !existingProjectIds.has(projectId))));
+
+    const added: FlowMapCollectionFlow[] = [];
+    for (const projectId of nextProjectIds) {
+      const index = collection.flows.length + added.length;
+      added.push(await buildCollectionFlow(projectId, index));
+    }
+
+    collection.flows.push(...added);
+    writeFlowMapCollection(collection);
+    const project = await refreshFlowMapProjectMetadata(collection);
+
+    return c.json({
+      success: true,
+      added: added.length,
+      collection,
+      project: project ? normalizeProjectRecord(project) : null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const statusCode = message.includes('Project not found') || message.includes('nested') ? 400 : 500;
+    return c.json({ error: message }, statusCode);
+  }
+});
+
+app.delete('/api/flow-maps/:id/flows/:flowId', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const flowId = c.req.param('flowId');
+    const collection = readFlowMapCollection(id);
+    if (!collection) {
+      return c.json({ error: 'FlowMap not found' }, 404);
+    }
+
+    const before = collection.flows.length;
+    collection.flows = collection.flows.filter((flow) => flow.id !== flowId);
+    if (collection.flows.length === before) {
+      return c.json({ error: 'Flow not found' }, 404);
+    }
+
+    writeFlowMapCollection(collection);
+    const project = await refreshFlowMapProjectMetadata(collection);
+    return c.json({
+      success: true,
+      collection,
+      project: project ? normalizeProjectRecord(project) : null,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/flow-maps/:id/export', async (c) => {
+  try {
+    const id = c.req.param('id');
+    let collection = readFlowMapCollection(id);
+    if (!collection) {
+      return c.json({ error: 'FlowMap not found' }, 404);
+    }
+    collection = await hydrateFlowMapCollectionSourceNames(collection);
+
+    let body: any = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      body = {};
+    }
+    const format = body.format === 'png' ? 'png' : 'html';
+    const background: FlowMapExportBackground = body.background === 'transparent' ? 'transparent' : 'grid';
+    const viewMode: FlowMapExportViewMode = body.viewMode === 'grid' ? 'grid' : 'flow';
+    const showArrows = body.showArrows === true;
+    const hideText = body.hideText === true;
+    const exportDir = getFlowMapExportDir(id);
+    mkdirSync(exportDir, { recursive: true });
+    const htmlPath = join(exportDir, 'index.html');
+    writeFileSync(htmlPath, renderFlowMapCollectionExportHtml(collection, { background, viewMode, showArrows, hideText }), 'utf8');
+
+    if (format === 'png') {
+      const outputPath = join(exportDir, background === 'transparent' ? 'flow-map-transparent.png' : 'flow-map.png');
+      const { chromium } = await import('playwright');
+      const bounds = computeFlowMapCollectionBounds(collection, { viewMode, showArrows });
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage({
+          viewport: {
+            width: Math.min(4096, Math.max(1, bounds.width)),
+            height: Math.min(4096, Math.max(1, hideText ? bounds.stageHeight + FLOW_MAP_EXPORT_PAGE_PAD * 2 : bounds.height)),
+          },
+          deviceScaleFactor: 1,
+        });
+        await page.goto(pathToFileURL(htmlPath).href, { waitUntil: 'networkidle' });
+        const exportPage = page.locator('.export-page');
+        const clip = await exportPage.boundingBox();
+        if (!clip) {
+          throw new Error('FlowMap export page was not rendered');
+        }
+        await page.screenshot({
+          path: outputPath,
+          clip,
+          omitBackground: background === 'transparent',
+        });
+      } finally {
+        await browser.close();
+      }
+
+      return c.json({
+        success: true,
+        format,
+        background,
+        viewMode,
+        showArrows,
+        hideText,
+        path: outputPath,
+        directory: exportDir,
+        htmlPath,
+        downloadUrl: `/api/file?path=${encodeURIComponent(outputPath)}&download=true`,
+        previewUrl: `/api/file?path=${encodeURIComponent(outputPath)}`,
+      });
+    }
+
+    return c.json({
+      success: true,
+      format,
+      background,
+      viewMode,
+      showArrows,
+      hideText,
+      path: htmlPath,
+      directory: exportDir,
+      downloadUrl: `/api/file?path=${encodeURIComponent(htmlPath)}&download=true`,
+      previewUrl: `/api/file?path=${encodeURIComponent(htmlPath)}`,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -6275,6 +7262,8 @@ app.get('/api/file', async (c) => {
       '.webm': 'video/webm',
       '.txt': 'text/plain',
       '.json': 'application/json',
+      '.html': 'text/html; charset=utf-8',
+      '.svg': 'image/svg+xml',
     };
 
     const contentType = mimeTypes[ext] || 'application/octet-stream';
@@ -8017,6 +9006,34 @@ app.get('/api/testing/mobile/recordings/:id', async (c) => {
       flowCode
     });
 
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.get('/api/testing/mobile/recordings/:id/flow-map', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const flowMap = await buildMobileRecordingFlowMap(id);
+    if (!flowMap) {
+      return c.json({ error: 'Recording not found' }, 404);
+    }
+    return c.json({ flowMap });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/testing/mobile/recordings/:id/flow-map/rebuild', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const flowMap = await buildMobileRecordingFlowMap(id, { persist: true });
+    if (!flowMap) {
+      return c.json({ error: 'Recording not found' }, 404);
+    }
+    return c.json({ success: true, flowMap });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);

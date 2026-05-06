@@ -4074,6 +4074,1167 @@
             color: var(--accent);
         }
 
+        .flow-map-shell {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 320px;
+            min-height: 620px;
+            border: 1px solid var(--border);
+            background: #0d0d0d;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .flow-map-main {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border);
+        }
+
+        .flow-map-toolbar {
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 10px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .flow-map-segments,
+        .flow-map-tools {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .flow-map-segment {
+            height: 28px;
+            padding: 0 10px;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0;
+            cursor: pointer;
+        }
+
+        .flow-map-segment:hover {
+            color: var(--text-primary);
+            background: var(--bg-elevated);
+        }
+
+        .flow-map-segment.active {
+            color: var(--accent-hover);
+            background: rgba(59, 130, 246, 0.12);
+            border-color: rgba(59, 130, 246, 0.24);
+        }
+
+        .flow-map-tool-btn {
+            width: 28px;
+            height: 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-elevated);
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        .flow-map-tool-btn:hover {
+            color: var(--text-primary);
+            border-color: var(--border-hover);
+        }
+
+        .flow-map-tool-btn svg {
+            width: 15px;
+            height: 15px;
+        }
+
+        .flow-map-viewport {
+            position: relative;
+            flex: 1;
+            min-height: 576px;
+            overflow: hidden;
+            cursor: grab;
+            background-color: #0a0a0a;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+            background-size: 28px 28px;
+        }
+
+        .flow-map-viewport.dragging {
+            cursor: grabbing;
+        }
+
+        .flow-map-stage {
+            position: absolute;
+            left: 0;
+            top: 0;
+            transform-origin: 0 0;
+        }
+
+        .flow-map-edge-layer {
+            position: absolute;
+            left: 0;
+            top: 0;
+            overflow: visible;
+            pointer-events: auto;
+        }
+
+        .flow-map-edge-path {
+            fill: none;
+            stroke: rgba(96, 165, 250, 0.55);
+            stroke-width: 2;
+            pointer-events: stroke;
+            cursor: pointer;
+        }
+
+        .flow-map-edge-path:hover,
+        .flow-map-edge-path.selected {
+            stroke: var(--accent-hover);
+            stroke-width: 3;
+        }
+
+        .flow-map-edge-label {
+            position: absolute;
+            max-width: 160px;
+            padding: 5px 8px;
+            border: 1px solid rgba(96, 165, 250, 0.22);
+            border-radius: 6px;
+            background: rgba(12, 18, 30, 0.92);
+            color: #c7d2fe;
+            font-size: 10px;
+            line-height: 1.3;
+            letter-spacing: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: pointer;
+            transform: translate(-50%, -50%);
+        }
+
+        .flow-map-edge-label:hover,
+        .flow-map-edge-label.selected {
+            border-color: var(--accent-hover);
+            color: #eff6ff;
+        }
+
+        .flow-map-node {
+            position: absolute;
+            width: 140px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            background: rgba(18, 18, 18, 0.96);
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+            overflow: hidden;
+            cursor: pointer;
+            transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+        }
+
+        .flow-map-node.is-landscape {
+            width: 220px;
+        }
+
+        .flow-map-node:hover {
+            border-color: rgba(96, 165, 250, 0.5);
+            transform: translateY(-1px);
+        }
+
+        .flow-map-node.selected {
+            border-color: var(--accent-hover);
+            box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.2), 0 16px 40px rgba(0, 0, 0, 0.42);
+        }
+
+        .flow-map-node-media {
+            width: 100%;
+            height: 238px;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .flow-map-node.is-landscape .flow-map-node-media {
+            height: 124px;
+        }
+
+        .flow-map-node-media img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        .flow-map-node-empty {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        .flow-map-node-caption {
+            padding: 8px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .flow-map-node-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            letter-spacing: 0;
+        }
+
+        .flow-map-node-subtitle {
+            margin-top: 2px;
+            font-size: 10px;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            letter-spacing: 0;
+        }
+
+        .flow-map-node-time {
+            margin-top: 5px;
+            font-size: 9px;
+            color: var(--accent-hover);
+            letter-spacing: 0;
+        }
+
+        .flow-map-detail {
+            min-width: 0;
+            background: var(--bg-surface);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .flow-map-detail-body {
+            padding: 14px;
+            overflow-y: auto;
+        }
+
+        .flow-map-detail-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: 0;
+            margin-bottom: 4px;
+        }
+
+        .flow-map-detail-subtitle {
+            font-size: 11px;
+            color: var(--text-muted);
+            line-height: 1.45;
+            margin-bottom: 12px;
+        }
+
+        .flow-map-detail-video,
+        .flow-map-detail-image {
+            width: 100%;
+            max-height: 260px;
+            object-fit: contain;
+            display: block;
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+
+        .flow-map-detail-image {
+            max-height: 220px;
+        }
+
+        .flow-map-detail-rows {
+            display: grid;
+            gap: 8px;
+        }
+
+        .flow-map-detail-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 11px;
+        }
+
+        .flow-map-detail-row span:first-child {
+            color: var(--text-muted);
+        }
+
+        .flow-map-detail-row span:last-child {
+            color: var(--text-secondary);
+            text-align: right;
+            overflow-wrap: anywhere;
+        }
+
+        .flow-map-empty,
+        .flow-map-loading {
+            height: 100%;
+            min-height: 360px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .flow-map-project-thumb {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background:
+                linear-gradient(var(--border) 1px, transparent 1px),
+                linear-gradient(90deg, var(--border) 1px, transparent 1px),
+                var(--bg-tertiary);
+            background-size: 18px 18px;
+            color: var(--accent);
+        }
+
+        .flow-map-project-thumb svg {
+            width: 38px;
+            height: 38px;
+        }
+
+        #view-analysis.flow-studio-view {
+            max-width: none;
+            width: calc(100% + 64px);
+            margin: -32px;
+            height: calc(100vh - 52px);
+            padding: 0;
+        }
+
+        #view-analysis.flow-studio-view .section-header {
+            display: none;
+        }
+
+        #view-analysis.flow-studio-view #analysisContent {
+            height: 100%;
+        }
+
+        .flow-studio {
+            height: 100%;
+            display: grid;
+            grid-template-columns: 260px minmax(0, 1fr) 320px;
+            background: var(--bg-primary);
+            border-top: 1px solid var(--border);
+        }
+
+        .flow-studio-sidebar,
+        .flow-studio-inspector {
+            min-height: 0;
+            background: var(--bg-secondary);
+            border-color: var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .flow-studio-sidebar {
+            border-right: 1px solid var(--border);
+        }
+
+        .flow-studio-inspector {
+            border-left: 1px solid var(--border);
+        }
+
+        .flow-studio-panel-header {
+            height: 60px;
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .flow-studio-title {
+            min-width: 0;
+        }
+
+        .flow-studio-title h2 {
+            margin: 0;
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .flow-studio-title p {
+            margin: 3px 0 0;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .flow-studio-list {
+            padding: 10px;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .flow-studio-list-item {
+            width: 100%;
+            border: 1px solid var(--border);
+            background: var(--bg-primary);
+            border-radius: 8px;
+            padding: 10px;
+            cursor: pointer;
+            text-align: left;
+            color: var(--text-primary);
+            display: grid;
+            grid-template-columns: 4px 1fr;
+            gap: 10px;
+            transition: border-color 0.15s, background 0.15s;
+        }
+
+        .flow-studio-list-item:hover,
+        .flow-studio-list-item.active {
+            border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 9%, var(--bg-primary));
+        }
+
+        .flow-studio-list-color {
+            width: 4px;
+            border-radius: 999px;
+            background: var(--flow-color);
+        }
+
+        .flow-studio-list-name {
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .flow-studio-list-meta {
+            margin-top: 4px;
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        .flow-studio-main {
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .flow-studio-toolbar {
+            height: 60px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 0 14px;
+            background: var(--bg-secondary);
+        }
+
+        .flow-studio-toolbar-left,
+        .flow-studio-toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .flow-studio.loading {
+            pointer-events: none;
+        }
+
+        .flow-studio-loading-list {
+            padding: 10px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .flow-studio-loading-list .skeleton {
+            height: 52px;
+            border-radius: 8px;
+        }
+
+        .flow-studio-loading-canvas {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+            background-color: #0a0a0a;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+            background-size: 28px 28px;
+        }
+
+        .flow-studio-loading-card {
+            position: absolute;
+            width: 360px;
+            height: 220px;
+            border: 1px solid rgba(96, 165, 250, 0.28);
+            border-radius: 10px;
+            background: rgba(12, 15, 20, 0.9);
+            box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+            padding: 14px;
+        }
+
+        .flow-studio-loading-card.secondary {
+            border-color: rgba(52, 211, 153, 0.28);
+        }
+
+        .flow-studio-loading-row {
+            display: flex;
+            gap: 16px;
+            align-items: flex-start;
+            margin-top: 16px;
+        }
+
+        .flow-studio-loading-phone {
+            width: 58px;
+            height: 116px;
+            border-radius: 8px;
+        }
+
+        .flow-studio-loading-inspector {
+            padding: 16px;
+            display: grid;
+            gap: 12px;
+        }
+
+        .flow-studio-loading-inspector .skeleton:first-child {
+            width: 100%;
+            height: 180px;
+            border-radius: 10px;
+        }
+
+        .flow-studio-loading-line {
+            height: 12px;
+            border-radius: 999px;
+        }
+
+        .flow-studio-name {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .flow-studio-segments {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: 8px;
+            padding-left: 8px;
+            border-left: 1px solid var(--border);
+        }
+
+        .flow-studio-segment {
+            height: 28px;
+            padding: 0 10px;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0;
+            cursor: pointer;
+        }
+
+        .flow-studio-segment:hover {
+            color: var(--text-primary);
+            background: var(--bg-elevated);
+        }
+
+        .flow-studio-segment.active {
+            color: var(--accent-hover);
+            background: rgba(59, 130, 246, 0.12);
+            border-color: rgba(59, 130, 246, 0.24);
+        }
+
+        .flow-studio-arrow-toggle {
+            height: 28px;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 0 9px 0 7px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            font-size: 12px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .flow-studio-arrow-toggle:hover {
+            border-color: var(--accent);
+            color: var(--text-primary);
+        }
+
+        .flow-studio-arrow-toggle input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .flow-studio-arrow-toggle span,
+        .flow-studio-arrow-toggle svg {
+            pointer-events: none;
+        }
+
+        .flow-studio-arrow-switch {
+            width: 28px;
+            height: 16px;
+            border-radius: 999px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            position: relative;
+            flex: 0 0 auto;
+            transition: background 0.15s, border-color 0.15s;
+        }
+
+        .flow-studio-arrow-switch::after {
+            content: '';
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            left: 2px;
+            top: 2px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: transform 0.15s, background 0.15s;
+        }
+
+        .flow-studio-arrow-toggle input:checked + .flow-studio-arrow-switch {
+            background: rgba(59, 130, 246, 0.18);
+            border-color: rgba(59, 130, 246, 0.5);
+        }
+
+        .flow-studio-arrow-toggle input:checked + .flow-studio-arrow-switch::after {
+            transform: translateX(12px);
+            background: var(--accent-hover);
+        }
+
+        .flow-studio-arrow-icon {
+            width: 14px;
+            height: 14px;
+            display: inline-flex;
+            color: currentColor;
+        }
+
+        .flow-studio-arrow-icon svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .flow-studio-canvas {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+            cursor: grab;
+            background:
+                linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px),
+                #08090b;
+            background-size: 40px 40px;
+        }
+
+        .flow-studio-canvas.dragging {
+            cursor: grabbing;
+        }
+
+        .flow-studio-stage {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 2600px;
+            height: 1600px;
+            transform-origin: 0 0;
+        }
+
+        .flow-studio-flow {
+            position: absolute;
+            width: max-content;
+            min-width: 420px;
+            max-width: none;
+            border: 1px solid color-mix(in srgb, var(--flow-color) 45%, var(--border));
+            background: rgba(15, 18, 23, 0.96);
+            border-radius: 8px;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.28);
+            overflow: hidden;
+        }
+
+        .flow-studio-flow.selected {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent), 0 14px 42px rgba(0,0,0,0.34);
+        }
+
+        .flow-studio-flow-header {
+            height: 42px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 0 10px;
+            border-bottom: 1px solid var(--border);
+            cursor: move;
+            background: color-mix(in srgb, var(--flow-color) 10%, var(--bg-secondary));
+        }
+
+        .flow-studio-flow-heading {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .flow-studio-flow-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--flow-color);
+            flex: 0 0 auto;
+        }
+
+        .flow-studio-flow-name {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .flow-studio-flow-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .flow-studio-icon-btn {
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+
+        .flow-studio-icon-btn:hover {
+            color: var(--text-primary);
+            border-color: var(--accent);
+        }
+
+        .flow-studio-icon-btn svg {
+            width: 15px;
+            height: 15px;
+        }
+
+        .flow-studio-nodes {
+            display: flex;
+            align-items: flex-start;
+            gap: 18px;
+            padding: 14px;
+            overflow: visible;
+        }
+
+        .flow-studio-flow-body {
+            position: relative;
+            overflow: visible;
+        }
+
+        .flow-studio-flow.arrows-mode .flow-studio-flow-body {
+            min-height: var(--flow-body-height);
+        }
+
+        .flow-studio-node {
+            position: relative;
+            width: 102px;
+            flex: 0 0 auto;
+        }
+
+        .flow-studio-node:not(:last-child)::after {
+            display: none;
+        }
+
+        .flow-studio-flow.board-mode .flow-studio-nodes {
+            display: grid;
+            grid-template-columns: repeat(var(--grid-cols), 102px);
+            align-items: start;
+            gap: 16px 12px;
+        }
+
+        .flow-studio-flow.arrows-mode .flow-studio-nodes {
+            position: absolute;
+            inset: 0;
+            display: block;
+            padding: 0;
+        }
+
+        .flow-studio-flow.arrows-mode .flow-studio-node {
+            position: absolute;
+        }
+
+        .flow-studio-edge-layer {
+            position: absolute;
+            left: 0;
+            top: 0;
+            overflow: visible;
+            pointer-events: none;
+            color: var(--flow-color);
+        }
+
+        .flow-studio-edge-path {
+            fill: none;
+            stroke: var(--flow-color);
+            stroke-width: 1.5;
+            opacity: 0.82;
+        }
+
+        .flow-studio-phone {
+            width: 84px;
+            height: 168px;
+            margin: 0 auto;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+            background: var(--bg-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .flow-studio-phone img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .flow-studio-node-empty {
+            font-size: 10px;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 8px;
+        }
+
+        .flow-studio-node-label {
+            margin-top: 7px;
+            font-size: 10px;
+            line-height: 1.2;
+            color: var(--text-secondary);
+            text-align: center;
+            height: 24px;
+            overflow: hidden;
+        }
+
+        .flow-studio-node-time {
+            margin-top: 3px;
+            font-size: 10px;
+            color: var(--accent);
+            text-align: center;
+        }
+
+        .flow-studio-inspector-body {
+            padding: 14px;
+            overflow: auto;
+            min-height: 0;
+        }
+
+        .flow-studio-video {
+            width: 100%;
+            max-height: 300px;
+            background: #000;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            display: block;
+        }
+
+        .flow-studio-preview {
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-primary);
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+        }
+
+        .flow-studio-preview img {
+            max-width: 100%;
+            max-height: 320px;
+            object-fit: contain;
+            display: block;
+        }
+
+        .flow-studio-stats {
+            margin-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .flow-studio-stat {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 9px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+        }
+
+        .flow-studio-stat span:first-child {
+            color: var(--text-muted);
+        }
+
+        .flow-studio-stat span:last-child {
+            color: var(--text-primary);
+            text-align: right;
+        }
+
+        .flow-studio-empty {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 12px;
+            text-align: center;
+            padding: 24px;
+        }
+
+        .flow-studio-add-list {
+            padding: 16px;
+            overflow: auto;
+            max-height: 55vh;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .flow-studio-add-row {
+            display: grid;
+            grid-template-columns: 18px 44px 1fr;
+            gap: 10px;
+            align-items: center;
+            padding: 9px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-tertiary);
+        }
+
+        .flow-studio-add-row img {
+            width: 44px;
+            height: 44px;
+            object-fit: cover;
+            border-radius: 6px;
+            background: var(--bg-primary);
+        }
+
+        .flow-studio-export-preview {
+            min-height: 280px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 22px;
+            overflow: hidden;
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+        }
+
+        #flowStudioExportModal .flow-studio-export-modal {
+            width: min(920px, calc(100vw - 40px));
+            max-width: none;
+            max-height: min(760px, calc(100vh - 40px));
+            display: flex;
+            flex-direction: column;
+        }
+
+        .flow-studio-export-body {
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 252px minmax(0, 1fr);
+            gap: 18px;
+            overflow: auto;
+        }
+
+        .flow-studio-export-options {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .flow-studio-export-option {
+            display: grid;
+            grid-template-columns: 18px 1fr;
+            align-items: start;
+            gap: 10px;
+            width: 100%;
+            padding: 12px;
+        }
+
+        .flow-studio-export-clean-toggle {
+            height: 34px;
+            width: 100%;
+            justify-content: flex-start;
+            margin-top: 6px;
+            padding: 0 11px 0 8px;
+        }
+
+        .flow-studio-export-clean-label {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            line-height: 1.1;
+        }
+
+        .flow-studio-export-clean-label strong {
+            color: var(--text-primary);
+            font-size: 12px;
+            letter-spacing: 0;
+        }
+
+        .flow-studio-export-clean-label small {
+            color: var(--text-muted);
+            font-size: 10px;
+            letter-spacing: 0;
+        }
+
+        .flow-studio-export-preview-column {
+            min-width: 0;
+        }
+
+        .flow-studio-export-preview.grid-bg {
+            background-color: #0b0d10;
+            background-image:
+                linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px);
+            background-size: 24px 24px;
+        }
+
+        .flow-studio-export-preview.transparent-bg {
+            background-color: #151515;
+            background-image:
+                linear-gradient(45deg, rgba(255,255,255,0.06) 25%, transparent 25%),
+                linear-gradient(-45deg, rgba(255,255,255,0.06) 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.06) 75%),
+                linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.06) 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+        }
+
+        .flow-studio-export-mini-flow {
+            flex: 0 0 auto;
+            max-width: 300px;
+            padding: 10px;
+            border: 1px solid color-mix(in srgb, var(--flow-color) 40%, var(--border));
+            border-radius: 8px;
+            background: rgba(12, 15, 20, 0.94);
+        }
+
+        .flow-studio-export-mini-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .flow-studio-export-mini-nodes {
+            display: flex;
+            gap: 8px;
+        }
+
+        .flow-studio-export-mini-phone {
+            width: 42px;
+            height: 84px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+            background: #000;
+        }
+
+        .flow-studio-export-mini-phone img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .flow-studio-export-result {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font-size: 11px;
+            overflow-wrap: anywhere;
+        }
+
+        @media (max-width: 820px) {
+            #flowStudioExportModal .flow-studio-export-modal {
+                width: calc(100vw - 24px);
+                max-height: calc(100vh - 24px);
+            }
+
+            .flow-studio-export-body {
+                grid-template-columns: 1fr;
+                padding: 14px;
+            }
+
+            .flow-studio-export-preview {
+                min-height: 220px;
+                padding: 14px;
+            }
+        }
+
+        @media (max-width: 980px) {
+            .flow-map-shell {
+                grid-template-columns: 1fr;
+            }
+
+            .flow-map-main {
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+            }
+
+            .flow-map-detail {
+                min-height: 280px;
+            }
+
+            .flow-studio {
+                grid-template-columns: 1fr;
+            }
+
+            .flow-studio-sidebar,
+            .flow-studio-inspector {
+                display: none;
+            }
+        }
+
         /* Link External Section */
         .link-external-section {
             margin-bottom: 24px;
@@ -7112,6 +8273,7 @@
                 </div>
                 <div class="selection-bar-right">
                     <button class="btn btn-secondary" id="cancelSelectBtn">Cancel</button>
+                    <button class="btn btn-primary" id="createFlowMapBtn" disabled>Create Flow Map</button>
                     <button class="btn btn-primary" id="exportSelectedBtn" disabled>Export</button>
                     <button class="btn btn-primary" id="deleteSelectedBtn" style="background: var(--error);">Delete</button>
                 </div>
@@ -8721,6 +9883,7 @@
             if (value === 'ios') return 'iOS';
             if (value === 'android') return 'Android';
             if (value === 'web') return 'Web';
+            if (value === 'flow-map') return 'FlowMap';
             return 'Project';
         }
 
@@ -8732,6 +9895,13 @@
                     ${label}
                 </span>
             `;
+        }
+
+        function isFlowMapProject(project) {
+            const platform = (project?.platform || '').toLowerCase();
+            const id = String(project?.id || '');
+            const tags = String(project?.tags || project?.tag || '').toLowerCase();
+            return platform === 'flow-map' || id.startsWith('flowmap_') || tags.includes('flowmap');
         }
 
         // State
@@ -11733,6 +12903,26 @@
             const onImgLoad = `this.previousElementSibling?.remove()`;
             const onImgError = `this.previousElementSibling?.remove(); this.parentElement.innerHTML='No preview'`;
 
+            if (isFlowMapProject(project)) {
+                if (project.thumbnailPath) {
+                    const url = `/api/file?path=${encodeURIComponent(project.thumbnailPath)}`;
+                    return `${skelHtml}<img src="${url}" alt="${project.name}" onload="${onImgLoad}" onerror="${onImgError}">`;
+                }
+                return `
+                    <div class="flow-map-project-thumb" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="4" width="5" height="8" rx="1.5"></rect>
+                            <rect x="16" y="4" width="5" height="8" rx="1.5"></rect>
+                            <rect x="9.5" y="14" width="5" height="6" rx="1.5"></rect>
+                            <path d="M8 8h8"></path>
+                            <path d="M12 12v2"></path>
+                            <path d="M6 12v3.5h3.5"></path>
+                            <path d="M18 12v3.5h-3.5"></path>
+                        </svg>
+                    </div>
+                `;
+            }
+
             // Prefer AI-selected thumbnail (best frame)
             if (project.thumbnailPath) {
                 const url = `/api/file?path=${encodeURIComponent(project.thumbnailPath)}`;
@@ -11798,9 +12988,19 @@
 
         function updateSelectionCount() {
             const count = selectedProjects.size;
+            const selectedCaptures = [...selectedProjects]
+                .map(id => projects.find(p => p.id === id))
+                .filter(p => p && !isFlowMapProject(p));
             document.getElementById('selectionCount').textContent = `${count} selected`;
             document.getElementById('deleteSelectedBtn').disabled = count === 0;
             document.getElementById('exportSelectedBtn').disabled = count === 0;
+            const createFlowMapBtn = document.getElementById('createFlowMapBtn');
+            if (createFlowMapBtn) {
+                createFlowMapBtn.disabled = selectedCaptures.length === 0;
+                createFlowMapBtn.title = selectedCaptures.length === 0
+                    ? 'Select one or more captures'
+                    : `Create a FlowMap from ${selectedCaptures.length} capture${selectedCaptures.length === 1 ? '' : 's'}`;
+            }
         }
 
         document.getElementById('selectModeBtn').addEventListener('click', () => {
@@ -12640,6 +13840,149 @@
         document.getElementById('refreshProjects').addEventListener('click', loadProjects);
         document.getElementById('importProjectsBtn')?.addEventListener('click', openImportPicker);
 
+        async function createFlowMapFromSelection() {
+            const projectIds = [...selectedProjects].filter((id) => {
+                const project = projects.find(p => p.id === id);
+                return project && !isFlowMapProject(project);
+            });
+            if (projectIds.length === 0) {
+                showToast('Select one or more captures first', 'warning');
+                return;
+            }
+
+            const defaultName = projectIds.length === 1
+                ? `${projects.find(p => p.id === projectIds[0])?.name || 'Capture'} FlowMap`
+                : 'New FlowMap';
+            openCreateFlowMapModal(projectIds, defaultName);
+        }
+
+        function openCreateFlowMapModal(projectIds, defaultName) {
+            document.getElementById('createFlowMapModal')?.remove();
+
+            const selectedCaptureProjects = projectIds
+                .map((id) => projects.find(p => p.id === id))
+                .filter(Boolean);
+            if (!selectedCaptureProjects.length) {
+                showToast('No valid captures selected', 'warning');
+                return;
+            }
+
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay active';
+            modal.id = 'createFlowMapModal';
+            modal.innerHTML = `
+                <div class="modal" style="max-width: 640px;">
+                    <div class="modal-header">
+                        <div class="modal-title">Create FlowMap</div>
+                        <button class="icon-btn" type="button" data-create-flow-close>
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div style="padding: 16px; display: grid; gap: 14px;">
+                        <label style="display: grid; gap: 6px;">
+                            <span style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Name</span>
+                            <input
+                                id="createFlowMapNameInput"
+                                value="${escapeAttr(defaultName)}"
+                                style="width: 100%; padding: 10px 12px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font: inherit;"
+                            >
+                        </label>
+                        <div style="display: grid; gap: 8px;">
+                            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Selected captures</div>
+                            <div style="display: grid; gap: 8px; max-height: 280px; overflow: auto;">
+                                ${selectedCaptureProjects.map((project) => `
+                                    <div style="display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-tertiary);">
+                                        <div style="width: 44px; height: 44px; border-radius: 6px; overflow: hidden; background: var(--bg-primary); display: flex; align-items: center; justify-content: center;">
+                                            ${project.thumbnailPath
+                                                ? `<img src="/api/file?path=${encodeURIComponent(project.thumbnailPath)}" alt="" style="width: 100%; height: 100%; object-fit: cover;">`
+                                                : `<span style="font-size: 10px; color: var(--text-muted);">No image</span>`
+                                            }
+                                        </div>
+                                        <div style="min-width: 0;">
+                                            <div style="font-size: 12px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(project.name)}</div>
+                                            <div style="font-size: 10px; color: var(--text-muted); margin-top: 3px;">${escapeHtml(getProjectPlatformLabel(project))} · ${escapeHtml(formatDate(project.createdAt))}</div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" type="button" data-create-flow-close>Cancel</button>
+                        <button class="btn btn-primary" type="button" id="createFlowMapConfirmBtn">Create FlowMap</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            const input = document.getElementById('createFlowMapNameInput');
+            input?.focus();
+            input?.select();
+            modal.querySelectorAll('[data-create-flow-close]').forEach((button) => {
+                button.addEventListener('click', () => modal.remove());
+            });
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) modal.remove();
+            });
+            modal.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') modal.remove();
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    document.getElementById('createFlowMapConfirmBtn')?.click();
+                }
+            });
+            document.getElementById('createFlowMapConfirmBtn')?.addEventListener('click', () => {
+                const name = input?.value?.trim() || defaultName;
+                submitCreateFlowMap(projectIds, name, modal);
+            });
+        }
+
+        async function submitCreateFlowMap(projectIds, name, modal) {
+            const createBtn = document.getElementById('createFlowMapBtn');
+            const modalBtn = document.getElementById('createFlowMapConfirmBtn');
+            const originalLabel = createBtn?.textContent || 'Create Flow Map';
+            if (createBtn) {
+                createBtn.disabled = true;
+                createBtn.textContent = 'Creating...';
+            }
+            if (modalBtn) {
+                modalBtn.disabled = true;
+                modalBtn.textContent = 'Creating...';
+            }
+
+            try {
+                const result = await apiCall('/flow-maps', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        name,
+                        projectIds,
+                    }),
+                });
+                if (result.error) throw new Error(result.error);
+                showToast('FlowMap created', 'success');
+                modal?.remove();
+                exitSelectMode();
+                await loadProjects();
+                const flowMapId = result.project?.id || result.collection?.id;
+                if (flowMapId) selectProject(flowMapId);
+            } catch (error) {
+                showToast(error.message || 'Failed to create FlowMap', 'error');
+            } finally {
+                if (createBtn) {
+                    createBtn.textContent = originalLabel;
+                    updateSelectionCount();
+                }
+                if (modalBtn) {
+                    modalBtn.disabled = false;
+                    modalBtn.textContent = 'Create FlowMap';
+                }
+            }
+        }
+
+        document.getElementById('createFlowMapBtn')?.addEventListener('click', createFlowMapFromSelection);
+
         document.getElementById('exportSelectedBtn').addEventListener('click', () => {
             if (selectedProjects.size === 0) return;
             openBatchExportModal([...selectedProjects]);
@@ -12688,6 +14031,8 @@
         async function updateAnalysisTab() {
             const container = document.getElementById('analysisContent');
             const actionsEl = document.getElementById('analysisActions');
+            const analysisView = document.getElementById('view-analysis');
+            analysisView?.classList.remove('flow-studio-view');
             ensureRecorderWebSocket();
 
             if (!currentProject) {
@@ -12708,42 +14053,38 @@
                 return;
             }
 
-            // Show action buttons when project is selected
-            if (actionsEl) actionsEl.style.display = 'flex';
-
-            // Show Edit Script button only for mobile projects
-            const isMobileProject = currentProject.name?.includes('Mobile Test') ||
-                                   currentProject.source?.includes('mobile') ||
-                                   currentProject.platform === 'ios' ||
-                                   currentProject.platform === 'android' ||
-                                   currentProject.mobileRecordingId;
             const editScriptBtn = document.getElementById('editScriptBtn');
-            if (editScriptBtn) {
-                editScriptBtn.style.display = isMobileProject ? 'flex' : 'none';
-            }
+            if (actionsEl) actionsEl.style.display = 'none';
+            if (editScriptBtn) editScriptBtn.style.display = 'none';
 
-            // Show loading skeleton while fetching full project data
-            container.innerHTML = `
-                <div class="analysis-skeleton">
-                    <div class="skel-card skeleton">
-                        <div class="skel-line skeleton w60"></div>
-                        <div class="skel-line skeleton w40"></div>
-                        <div class="skel-line skeleton w80"></div>
+            const initiallyFlowMapProject = isFlowMapProject(currentProject);
+            if (initiallyFlowMapProject) {
+                analysisView?.classList.add('flow-studio-view');
+                container.innerHTML = renderFlowMapStudioLoadingShell(currentProject);
+            } else {
+                // Show loading skeleton while fetching full project data
+                container.innerHTML = `
+                    <div class="analysis-skeleton">
+                        <div class="skel-card skeleton">
+                            <div class="skel-line skeleton w60"></div>
+                            <div class="skel-line skeleton w40"></div>
+                            <div class="skel-line skeleton w80"></div>
+                        </div>
+                        <div class="skel-card skeleton">
+                            <div class="skel-line skeleton w80"></div>
+                            <div class="skel-line skeleton w60"></div>
+                        </div>
+                        <div class="skel-card skeleton full">
+                            <div class="skel-video skeleton"></div>
+                        </div>
+                        <div class="skel-card skeleton full">
+                            <div class="skel-line skeleton w100"></div>
+                            <div class="skel-line skeleton w60"></div>
+                            <div class="skel-line skeleton w80"></div>
+                        </div>
                     </div>
-                    <div class="skel-card skeleton">
-                        <div class="skel-line skeleton w80"></div>
-                        <div class="skel-line skeleton w60"></div>
-                    </div>
-                    <div class="skel-card skeleton full">
-                        <div class="skel-video skeleton"></div>
-                    </div>
-                    <div class="skel-card skeleton full">
-                        <div class="skel-line skeleton w100"></div>
-                        <div class="skel-line skeleton w60"></div>
-                        <div class="skel-line skeleton w80"></div>
-                    </div>
-                </div>
-            `;
+                `;
+            }
 
             // Fetch full project data including frames
             try {
@@ -12757,6 +14098,28 @@
                 console.log('Could not fetch full project data');
             }
 
+            if (isFlowMapProject(currentProject)) {
+                if (actionsEl) actionsEl.style.display = 'none';
+                analysisView?.classList.add('flow-studio-view');
+                container.innerHTML = renderFlowMapStudioShell(currentProject);
+                await initFlowMapStudio(currentProject.id);
+                return;
+            }
+            analysisView?.classList.remove('flow-studio-view');
+
+            // Show action buttons only after a regular project is confirmed.
+            if (actionsEl) actionsEl.style.display = 'flex';
+
+            // Show Edit Script button only for mobile projects
+            const isMobileProject = currentProject.name?.includes('Mobile Test') ||
+                                   currentProject.source?.includes('mobile') ||
+                                   currentProject.platform === 'ios' ||
+                                   currentProject.platform === 'android' ||
+                                   currentProject.mobileRecordingId;
+            if (editScriptBtn) {
+                editScriptBtn.style.display = isMobileProject ? 'flex' : 'none';
+            }
+
             const hasAnalysis = currentProject.ocrText || currentProject.aiSummary;
             const hasFrames = currentProject.frames && currentProject.frames.length > 0;
             const hasActions = currentProject.actions && currentProject.actions.length > 0;
@@ -12764,6 +14127,7 @@
             const networkRouteCount = buildProjectNetworkGroups(networkEntries).length;
             const hasNetworkEntries = networkEntries.length > 0;
             const hasVideo = currentProject.videoPath && ['mp4', 'mov', 'webm'].includes(currentProject.videoPath.toLowerCase().split('.').pop());
+            const hasFlowMapCandidate = hasActions || hasFrames || hasVideo;
             const videoUrl = hasVideo ? `/api/file?path=${encodeURIComponent(currentProject.videoPath)}` : '';
             const projectStatusValue = (currentProject.status || '').toLowerCase();
             const isAnalyzingStatus = isProjectAnalyzing(projectStatusValue);
@@ -12878,6 +14242,47 @@
                                     </svg>
                                     Download with Template
                                 </button>
+                            </div>
+                        </div>
+                    ` : ''}
+
+                    ${hasFlowMapCandidate ? `
+                        <div class="analysis-section">
+                            <div class="analysis-section-title">Flow Map</div>
+                            <div class="flow-map-shell" id="analysisFlowMapShell">
+                                <div class="flow-map-main">
+                                    <div class="flow-map-toolbar">
+                                        <div class="flow-map-segments" role="tablist" aria-label="Flow map view">
+                                            <button class="flow-map-segment active" type="button" data-flow-map-mode="flow">Flow</button>
+                                            <button class="flow-map-segment" type="button" data-flow-map-mode="grid">Grid</button>
+                                        </div>
+                                        <div class="flow-map-tools">
+                                            <button class="flow-map-tool-btn" type="button" data-flow-map-action="zoom-out" title="Zoom out" aria-label="Zoom out">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M8 11h6"/><path d="m21 21-4.35-4.35"/></svg>
+                                            </button>
+                                            <button class="flow-map-tool-btn" type="button" data-flow-map-action="zoom-in" title="Zoom in" aria-label="Zoom in">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M8 11h6"/><path d="M11 8v6"/><path d="m21 21-4.35-4.35"/></svg>
+                                            </button>
+                                            <button class="flow-map-tool-btn" type="button" data-flow-map-action="fit" title="Fit" aria-label="Fit">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+                                            </button>
+                                            <button class="flow-map-tool-btn" type="button" data-flow-map-action="rebuild" title="Rebuild" aria-label="Rebuild">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="flow-map-viewport" id="analysisFlowMapViewport">
+                                        <div class="flow-map-stage" id="analysisFlowMapStage">
+                                            <div class="flow-map-loading">Loading flow...</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <aside class="flow-map-detail" id="analysisFlowMapDetail">
+                                    <div class="flow-map-detail-body">
+                                        <div class="flow-map-detail-title">Flow</div>
+                                        <div class="flow-map-detail-subtitle">Loading...</div>
+                                    </div>
+                                </aside>
                             </div>
                         </div>
                     ` : ''}
@@ -13185,6 +14590,10 @@
                 setTimeout(() => initTemplateUI(), 0);
             }
 
+            if (hasFlowMapCandidate) {
+                setTimeout(() => initAnalysisFlowMap(currentProject.id), 0);
+            }
+
             // Update sticky notes sidebar with linked external items
             updateStickyNotes();
 
@@ -13198,6 +14607,1426 @@
             } else {
                 stopAnalysisPolling();
             }
+        }
+
+        // ====================================================================
+        // FLOW STUDIO
+        // ====================================================================
+        let flowStudioState = {
+            projectId: null,
+            collection: null,
+            selectedFlowId: null,
+            mode: 'flow',
+            showArrows: false,
+            scale: 1,
+            tx: 40,
+            ty: 40,
+            panning: null,
+            draggingFlow: null,
+        };
+
+        function renderFlowMapStudioLoadingShell(project) {
+            return `
+                <div class="flow-studio loading" aria-busy="true">
+                    <aside class="flow-studio-sidebar">
+                        <div class="flow-studio-panel-header">
+                            <div class="flow-studio-title">
+                                <h2>Projects</h2>
+                                <p>Loading FlowMap</p>
+                            </div>
+                        </div>
+                        <div class="flow-studio-loading-list">
+                            <div class="skeleton"></div>
+                            <div class="skeleton"></div>
+                            <div class="skeleton"></div>
+                        </div>
+                    </aside>
+                    <main class="flow-studio-main">
+                        <div class="flow-studio-toolbar">
+                            <div class="flow-studio-toolbar-left">
+                                <div class="flow-studio-icon-btn skeleton"></div>
+                                <div class="flow-studio-name">${escapeHtml(project?.name || 'FlowMap')}</div>
+                                <div class="flow-studio-segments" aria-hidden="true">
+                                    <div class="flow-studio-segment active skeleton" style="width: 54px;"></div>
+                                    <div class="flow-studio-segment skeleton" style="width: 54px;"></div>
+                                </div>
+                            </div>
+                            <div class="flow-studio-toolbar-right" aria-hidden="true">
+                                <div class="btn btn-secondary btn-small skeleton" style="width: 48px;"></div>
+                                <div class="btn btn-secondary btn-small skeleton" style="width: 96px;"></div>
+                                <div class="btn btn-primary btn-small skeleton" style="width: 96px;"></div>
+                            </div>
+                        </div>
+                        <div class="flow-studio-loading-canvas">
+                            <div class="flow-studio-loading-card" style="left: 72px; top: 84px;">
+                                <div class="flow-studio-loading-line skeleton" style="width: 42%;"></div>
+                                <div class="flow-studio-loading-row">
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                </div>
+                            </div>
+                            <div class="flow-studio-loading-card secondary" style="left: 220px; top: 360px;">
+                                <div class="flow-studio-loading-line skeleton" style="width: 36%;"></div>
+                                <div class="flow-studio-loading-row">
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                    <div class="flow-studio-loading-phone skeleton"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </main>
+                    <aside class="flow-studio-inspector">
+                        <div class="flow-studio-panel-header">
+                            <div class="flow-studio-title">
+                                <h2>Flow</h2>
+                                <p>Loading preview</p>
+                            </div>
+                        </div>
+                        <div class="flow-studio-loading-inspector">
+                            <div class="skeleton"></div>
+                            <div class="flow-studio-loading-line skeleton" style="width: 70%;"></div>
+                            <div class="flow-studio-loading-line skeleton" style="width: 100%;"></div>
+                            <div class="flow-studio-loading-line skeleton" style="width: 84%;"></div>
+                        </div>
+                    </aside>
+                </div>
+            `;
+        }
+
+        function renderFlowMapStudioShell(project) {
+            return `
+                <div class="flow-studio" id="flowStudio">
+                    <aside class="flow-studio-sidebar">
+                        <div class="flow-studio-panel-header">
+                            <div class="flow-studio-title">
+                                <h2>Projects</h2>
+                                <p>FlowMap collection</p>
+                            </div>
+                            <button class="flow-studio-icon-btn" type="button" onclick="openFlowStudioAddCaptureModal()" title="Add capture" aria-label="Add capture">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                            </button>
+                        </div>
+                        <div class="flow-studio-list" id="flowStudioList"></div>
+                    </aside>
+                    <main class="flow-studio-main">
+                        <div class="flow-studio-toolbar">
+                            <div class="flow-studio-toolbar-left">
+                                <button class="flow-studio-icon-btn" type="button" onclick="switchView('projects')" title="Back to Projects" aria-label="Back to Projects">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
+                                </button>
+                                <div class="flow-studio-name" id="flowStudioName">${escapeHtml(project?.name || 'FlowMap')}</div>
+                                <div class="flow-studio-segments" role="tablist" aria-label="FlowMap view">
+                                    <button class="flow-studio-segment active" type="button" data-flow-studio-mode="flow" onclick="setFlowStudioMode('flow')">Flow</button>
+                                    <button class="flow-studio-segment" type="button" data-flow-studio-mode="grid" onclick="setFlowStudioMode('grid')">Grid</button>
+                                </div>
+                                <label class="flow-studio-arrow-toggle" title="Show arrows between screens">
+                                    <input id="flowStudioArrowsToggle" type="checkbox" onchange="setFlowStudioArrows(this.checked)">
+                                    <span class="flow-studio-arrow-switch"></span>
+                                    <span class="flow-studio-arrow-icon" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M5 12h14"></path>
+                                            <path d="m13 6 6 6-6 6"></path>
+                                        </svg>
+                                    </span>
+                                    <span>Arrows</span>
+                                </label>
+                            </div>
+                            <div class="flow-studio-toolbar-right">
+                                <button class="btn btn-secondary btn-small" type="button" onclick="fitFlowStudio()">Fit</button>
+                                <button class="btn btn-secondary btn-small" type="button" onclick="exportFlowStudio('html')">Export HTML</button>
+                                <button class="btn btn-primary btn-small" type="button" onclick="exportFlowStudio('png')">Export PNG</button>
+                            </div>
+                        </div>
+                        <div class="flow-studio-canvas" id="flowStudioCanvas">
+                            <div class="flow-studio-stage" id="flowStudioStage"></div>
+                        </div>
+                    </main>
+                    <aside class="flow-studio-inspector">
+                        <div class="flow-studio-panel-header">
+                            <div class="flow-studio-title">
+                                <h2>Flow</h2>
+                                <p id="flowStudioInspectorHint">Select a flow</p>
+                            </div>
+                        </div>
+                        <div class="flow-studio-inspector-body" id="flowStudioInspector"></div>
+                    </aside>
+                </div>
+            `;
+        }
+
+        function getFlowStudioRefs() {
+            return {
+                root: document.getElementById('flowStudio'),
+                list: document.getElementById('flowStudioList'),
+                canvas: document.getElementById('flowStudioCanvas'),
+                stage: document.getElementById('flowStudioStage'),
+                inspector: document.getElementById('flowStudioInspector'),
+                inspectorHint: document.getElementById('flowStudioInspectorHint'),
+                name: document.getElementById('flowStudioName'),
+            };
+        }
+
+        async function initFlowMapStudio(projectId) {
+            flowStudioState = {
+                projectId,
+                collection: null,
+                selectedFlowId: null,
+                mode: 'flow',
+                showArrows: false,
+                scale: 1,
+                tx: 40,
+                ty: 40,
+                panning: null,
+                draggingFlow: null,
+            };
+
+            const refs = getFlowStudioRefs();
+            if (!refs.stage || !refs.canvas) return;
+            refs.stage.innerHTML = '<div class="flow-studio-empty">Loading FlowMap...</div>';
+
+            try {
+                const result = await apiCall(`/flow-maps/${encodeURIComponent(projectId)}`);
+                if (result.error) throw new Error(result.error);
+                flowStudioState.collection = result.collection;
+                flowStudioState.selectedFlowId = result.collection?.flows?.[0]?.id || null;
+                flowStudioState.mode = result.collection?.layout?.mode === 'merged' ? 'grid' : 'flow';
+                renderFlowStudio();
+                requestAnimationFrame(() => fitFlowStudio());
+            } catch (error) {
+                refs.stage.innerHTML = `<div class="flow-studio-empty">${escapeHtml(error.message || 'FlowMap unavailable')}</div>`;
+            }
+
+            refs.canvas.onpointerdown = handleFlowStudioCanvasPointerDown;
+            refs.canvas.onpointermove = handleFlowStudioPointerMove;
+            refs.canvas.onpointerup = handleFlowStudioPointerUp;
+            refs.canvas.onpointercancel = handleFlowStudioPointerUp;
+
+            refs.stage.onclick = handleFlowStudioStageClick;
+            refs.stage.onpointerdown = handleFlowStudioStagePointerDown;
+        }
+
+        function getFlowStudioSelectedFlow() {
+            const flows = flowStudioState.collection?.flows || [];
+            return flows.find(flow => flow.id === flowStudioState.selectedFlowId) || flows[0] || null;
+        }
+
+        function getFlowStudioGridColumns(nodeCount) {
+            const count = Math.max(1, Number(nodeCount) || 1);
+            if (count <= 2) return 2;
+            if (count <= 6) return 3;
+            if (count <= 12) return 4;
+            if (count <= 20) return 5;
+            return 6;
+        }
+
+        function buildFlowStudioArrowLayout(nodes, mode) {
+            const nodeW = 102;
+            const nodeH = 214;
+            const pad = 14;
+            const positions = {};
+
+            if (mode === 'grid') {
+                const columns = getFlowStudioGridColumns(nodes.length);
+                const colGap = 58;
+                const rowGap = 54;
+                nodes.forEach((node, index) => {
+                    const col = index % columns;
+                    const row = Math.floor(index / columns);
+                    positions[node.id] = {
+                        x: pad + col * (nodeW + colGap),
+                        y: pad + row * (nodeH + rowGap),
+                        width: nodeW,
+                        height: nodeH,
+                    };
+                });
+                const rows = Math.max(1, Math.ceil(nodes.length / columns));
+                return {
+                    positions,
+                    bodyWidth: pad * 2 + columns * nodeW + Math.max(0, columns - 1) * colGap + 44,
+                    bodyHeight: pad * 2 + rows * nodeH + Math.max(0, rows - 1) * rowGap,
+                };
+            }
+
+            const gap = 46;
+            nodes.forEach((node, index) => {
+                positions[node.id] = {
+                    x: pad + index * (nodeW + gap),
+                    y: pad + (index % 2 === 1 ? 26 : 0),
+                    width: nodeW,
+                    height: nodeH,
+                };
+            });
+            return {
+                positions,
+                bodyWidth: pad * 2 + nodes.length * nodeW + Math.max(0, nodes.length - 1) * gap,
+                bodyHeight: pad * 2 + nodeH + 26,
+            };
+        }
+
+        function renderFlowStudioArrowLayer(flow, nodes, layout) {
+            if (!flowStudioState.showArrows || nodes.length < 2) return '';
+            const safeId = String(flow.id || 'flow').replace(/[^a-zA-Z0-9_-]/g, '');
+            const paths = [];
+            for (let index = 0; index < nodes.length - 1; index += 1) {
+                const from = layout.positions[nodes[index].id];
+                const to = layout.positions[nodes[index + 1].id];
+                if (!from || !to) continue;
+                const sx = from.x + from.width;
+                const sy = from.y + 84;
+                const ex = to.x;
+                const ey = to.y + 84;
+                const path = ex >= sx
+                    ? `M ${sx} ${sy} C ${sx + Math.max(38, (ex - sx) * 0.45)} ${sy}, ${ex - Math.max(38, (ex - sx) * 0.45)} ${ey}, ${ex} ${ey}`
+                    : `M ${sx} ${sy} C ${Math.max(sx, ex) + 40} ${sy}, ${Math.max(sx, ex) + 40} ${ey}, ${ex} ${ey}`;
+                paths.push(`<path class="flow-studio-edge-path" d="${escapeAttr(path)}" marker-end="url(#flowStudioArrow_${escapeAttr(safeId)})"></path>`);
+            }
+            return `
+                <svg class="flow-studio-edge-layer" width="${layout.bodyWidth}" height="${layout.bodyHeight}" viewBox="0 0 ${layout.bodyWidth} ${layout.bodyHeight}" aria-hidden="true">
+                    <defs>
+                        <marker id="flowStudioArrow_${escapeAttr(safeId)}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                            <path d="M0,0 L8,4 L0,8 Z" fill="currentColor"></path>
+                        </marker>
+                    </defs>
+                    ${paths.join('')}
+                </svg>
+            `;
+        }
+
+        function getFlowStudioFlowMetrics(flow) {
+            const nodeCount = Math.max(1, flow?.flowMap?.nodes?.length || 0);
+            if (flowStudioState.showArrows) {
+                const layout = buildFlowStudioArrowLayout(flow?.flowMap?.nodes || [], flowStudioState.mode);
+                return {
+                    width: Math.max(420, layout.bodyWidth),
+                    height: 42 + layout.bodyHeight,
+                };
+            }
+            if (flowStudioState.mode === 'grid') {
+                const columns = getFlowStudioGridColumns(nodeCount);
+                const rows = Math.ceil(nodeCount / columns);
+                return {
+                    width: Math.max(420, 28 + columns * 102 + Math.max(0, columns - 1) * 12),
+                    height: 58 + rows * 219 + Math.max(0, rows - 1) * 16,
+                };
+            }
+            return {
+                width: Math.max(420, 70 + nodeCount * 120),
+                height: 264,
+            };
+        }
+
+        function getFlowStudioBounds() {
+            const flows = flowStudioState.collection?.flows || [];
+            if (!flows.length) return { minX: 0, minY: 0, maxX: 1200, maxY: 800, width: 1200, height: 800 };
+            let minX = Infinity;
+            let minY = Infinity;
+            let maxX = 0;
+            let maxY = 0;
+            flows.forEach((flow) => {
+                const metrics = getFlowStudioFlowMetrics(flow);
+                const x = Number(flow.layout?.x ?? 80);
+                const y = Number(flow.layout?.y ?? 80);
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, x + metrics.width);
+                maxY = Math.max(maxY, y + metrics.height);
+            });
+            return {
+                minX,
+                minY,
+                maxX,
+                maxY,
+                width: Math.max(1200, maxX + 240),
+                height: Math.max(800, maxY + 240),
+            };
+        }
+
+        function applyFlowStudioTransform() {
+            const refs = getFlowStudioRefs();
+            if (!refs.stage) return;
+            refs.stage.style.transform = `translate(${flowStudioState.tx}px, ${flowStudioState.ty}px) scale(${flowStudioState.scale})`;
+        }
+
+        function fitFlowStudio() {
+            const refs = getFlowStudioRefs();
+            const collection = flowStudioState.collection;
+            if (!refs.canvas || !collection) return;
+
+            const bounds = getFlowStudioBounds();
+            const contentWidth = Math.max(1, bounds.maxX - bounds.minX);
+            const contentHeight = Math.max(1, bounds.maxY - bounds.minY);
+            const scale = Math.min(
+                1.2,
+                Math.max(0.25, Math.min((refs.canvas.clientWidth - 80) / contentWidth, (refs.canvas.clientHeight - 80) / contentHeight)),
+            );
+            flowStudioState.scale = scale;
+            flowStudioState.tx = 40 - bounds.minX * scale;
+            flowStudioState.ty = 40 - bounds.minY * scale;
+            applyFlowStudioTransform();
+        }
+
+        function renderFlowStudio() {
+            const refs = getFlowStudioRefs();
+            const collection = flowStudioState.collection;
+            if (!collection || !refs.stage || !refs.list || !refs.inspector) return;
+
+            const flows = collection.flows || [];
+            const bounds = getFlowStudioBounds();
+            refs.stage.style.width = `${bounds.width}px`;
+            refs.stage.style.height = `${bounds.height}px`;
+            if (refs.name) refs.name.textContent = collection.name || 'FlowMap';
+            refs.root?.querySelectorAll('[data-flow-studio-mode]').forEach((button) => {
+                button.classList.toggle('active', button.dataset.flowStudioMode === flowStudioState.mode);
+            });
+            const arrowsToggle = document.getElementById('flowStudioArrowsToggle');
+            if (arrowsToggle) arrowsToggle.checked = Boolean(flowStudioState.showArrows);
+
+            if (!flows.length) {
+                refs.stage.innerHTML = '<div class="flow-studio-empty">No flows in this collection.</div>';
+                refs.list.innerHTML = '';
+                refs.inspector.innerHTML = '<div class="flow-studio-empty">Add captures from Projects.</div>';
+                return;
+            }
+
+            refs.list.innerHTML = flows.map((flow) => `
+                <button class="flow-studio-list-item ${flow.id === flowStudioState.selectedFlowId ? 'active' : ''}" type="button" data-flow-select="${escapeAttr(flow.id)}" style="--flow-color:${escapeAttr(flow.color)}">
+                    <span class="flow-studio-list-color"></span>
+                    <span>
+                        <span class="flow-studio-list-name">${escapeHtml(flow.name)}</span>
+                        <span class="flow-studio-list-meta">${escapeHtml(flow.platform)} · ${flow.flowMap.nodes.length} screens · ${formatFlowMapTime(flow.flowMap.media?.durationMs || 0)}</span>
+                    </span>
+                </button>
+            `).join('');
+
+            refs.stage.innerHTML = flows.map((flow) => renderFlowStudioFlow(flow)).join('');
+            applyFlowStudioTransform();
+            renderFlowStudioInspector();
+
+            refs.list.querySelectorAll('[data-flow-select]').forEach((button) => {
+                button.addEventListener('click', () => {
+                    flowStudioState.selectedFlowId = button.dataset.flowSelect;
+                    renderFlowStudio();
+                });
+            });
+        }
+
+        function renderFlowStudioFlow(flow) {
+            const nodes = flow.flowMap.nodes || [];
+            const x = Number(flow.layout?.x ?? 80);
+            const y = Number(flow.layout?.y ?? 80);
+            const selected = flow.id === flowStudioState.selectedFlowId ? 'selected' : '';
+            const modeClass = flowStudioState.mode === 'grid' ? 'board-mode' : 'flow-mode';
+            const arrowsClass = flowStudioState.showArrows ? 'arrows-mode' : '';
+            const gridColumns = getFlowStudioGridColumns(nodes.length);
+            const metrics = getFlowStudioFlowMetrics(flow);
+            const arrowLayout = flowStudioState.showArrows
+                ? buildFlowStudioArrowLayout(nodes, flowStudioState.mode)
+                : null;
+            const edgeMarkup = arrowLayout ? renderFlowStudioArrowLayer(flow, nodes, arrowLayout) : '';
+            const nodeMarkup = nodes.map((node, index) => {
+                const position = arrowLayout?.positions?.[node.id];
+                const positionStyle = position ? ` style="left:${position.x}px;top:${position.y}px;"` : '';
+                return `
+                <div class="flow-studio-node"${positionStyle}>
+                    <div class="flow-studio-phone">
+                        ${node.imagePath
+                            ? `<img src="${flowMapFileUrl(node.imagePath)}" alt="${escapeAttr(node.title || `Screen ${index + 1}`)}" loading="lazy">`
+                            : '<div class="flow-studio-node-empty">No image</div>'
+                        }
+                    </div>
+                    <div class="flow-studio-node-label">${escapeHtml(node.title || `Screen ${index + 1}`)}</div>
+                    <div class="flow-studio-node-time">${escapeHtml(formatFlowMapTime(node.startMs))}</div>
+                </div>
+            `;
+            }).join('');
+            const bodyStyle = arrowLayout
+                ? ` style="--flow-body-height:${arrowLayout.bodyHeight}px;height:${arrowLayout.bodyHeight}px;"`
+                : '';
+
+            return `
+                <section class="flow-studio-flow ${modeClass} ${arrowsClass} ${selected}" data-flow-id="${escapeAttr(flow.id)}" style="left:${x}px;top:${y}px;width:${metrics.width}px;--grid-cols:${gridColumns};--flow-color:${escapeAttr(flow.color)}">
+                    <div class="flow-studio-flow-header" data-flow-drag="${escapeAttr(flow.id)}">
+                        <div class="flow-studio-flow-heading">
+                            <span class="flow-studio-flow-dot"></span>
+                            <span class="flow-studio-flow-name">${escapeHtml(flow.name)}</span>
+                        </div>
+                        <div class="flow-studio-flow-actions">
+                            <button class="flow-studio-icon-btn" type="button" data-flow-action="delete" data-flow-id="${escapeAttr(flow.id)}" title="Delete flow" aria-label="Delete flow">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="flow-studio-flow-body"${bodyStyle}>
+                        ${edgeMarkup}
+                        <div class="flow-studio-nodes">${nodeMarkup || '<div class="flow-studio-empty">No captured screens.</div>'}</div>
+                    </div>
+                </section>
+            `;
+        }
+
+        function setFlowStudioArrows(enabled) {
+            flowStudioState.showArrows = Boolean(enabled);
+            renderFlowStudio();
+            requestAnimationFrame(() => fitFlowStudio());
+        }
+
+        async function setFlowStudioMode(mode) {
+            if (mode !== 'flow' && mode !== 'grid') return;
+            if (flowStudioState.mode === mode) return;
+            flowStudioState.mode = mode;
+            if (flowStudioState.collection) {
+                flowStudioState.collection.layout = {
+                    ...(flowStudioState.collection.layout || {}),
+                    mode: mode === 'grid' ? 'merged' : 'lanes',
+                };
+            }
+            renderFlowStudio();
+            requestAnimationFrame(() => fitFlowStudio());
+            try {
+                if (flowStudioState.collection) {
+                    await apiCall(`/flow-maps/${encodeURIComponent(flowStudioState.collection.id)}`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ layout: flowStudioState.collection.layout }),
+                    });
+                }
+            } catch {
+                // Mode is still usable locally; persistence can retry on the next edit.
+            }
+        }
+
+        function renderFlowStudioInspector() {
+            const refs = getFlowStudioRefs();
+            const flow = getFlowStudioSelectedFlow();
+            if (!refs.inspector || !refs.inspectorHint) return;
+            if (!flow) {
+                refs.inspectorHint.textContent = 'Select a flow';
+                refs.inspector.innerHTML = '<div class="flow-studio-empty">No flow selected.</div>';
+                return;
+            }
+
+            refs.inspectorHint.textContent = `${flow.flowMap.nodes.length} screens`;
+            const videoUrl = flowMapFileUrl(flow.flowMap.media?.videoPath);
+            const firstImage = flow.flowMap.nodes.find(node => node.imagePath)?.imagePath;
+            refs.inspector.innerHTML = `
+                ${videoUrl
+                    ? `<video class="flow-studio-video" controls preload="metadata" src="${escapeAttr(videoUrl)}"></video>`
+                    : firstImage
+                        ? `<div class="flow-studio-preview"><img src="${flowMapFileUrl(firstImage)}" alt="${escapeAttr(flow.name)}" loading="lazy"></div>`
+                        : '<div class="flow-studio-empty">No preview available.</div>'
+                }
+                <div class="flow-studio-stats">
+                    <div class="flow-studio-stat"><span>Name</span><span>${escapeHtml(flow.name)}</span></div>
+                    <div class="flow-studio-stat"><span>Platform</span><span>${escapeHtml(flow.platform)}</span></div>
+                    <div class="flow-studio-stat"><span>Screens</span><span>${flow.flowMap.nodes.length}</span></div>
+                    <div class="flow-studio-stat"><span>Transitions</span><span>${flow.flowMap.edges.length}</span></div>
+                    <div class="flow-studio-stat"><span>Duration</span><span>${formatFlowMapTime(flow.flowMap.media?.durationMs || 0)}</span></div>
+                    <div class="flow-studio-stat"><span>Source</span><span>${escapeHtml(flow.projectId)}</span></div>
+                </div>
+            `;
+        }
+
+        function handleFlowStudioStageClick(event) {
+            const deleteButton = event.target.closest('[data-flow-action="delete"]');
+            if (deleteButton) {
+                event.stopPropagation();
+                deleteFlowStudioFlow(deleteButton.dataset.flowId);
+                return;
+            }
+
+            const flowEl = event.target.closest('[data-flow-id]');
+            if (flowEl) {
+                flowStudioState.selectedFlowId = flowEl.dataset.flowId;
+                renderFlowStudio();
+            }
+        }
+
+        function handleFlowStudioStagePointerDown(event) {
+            const dragHandle = event.target.closest('[data-flow-drag]');
+            if (!dragHandle) return;
+            const flowId = dragHandle.dataset.flowDrag;
+            const flow = flowStudioState.collection?.flows?.find(item => item.id === flowId);
+            if (!flow) return;
+
+            event.stopPropagation();
+            flowStudioState.selectedFlowId = flowId;
+            flowStudioState.draggingFlow = {
+                id: flowId,
+                startX: event.clientX,
+                startY: event.clientY,
+                originX: Number(flow.layout?.x ?? 80),
+                originY: Number(flow.layout?.y ?? 80),
+            };
+            renderFlowStudio();
+        }
+
+        function handleFlowStudioCanvasPointerDown(event) {
+            if (event.target.closest('[data-flow-id]')) return;
+            flowStudioState.panning = {
+                startX: event.clientX,
+                startY: event.clientY,
+                originTx: flowStudioState.tx,
+                originTy: flowStudioState.ty,
+            };
+            event.currentTarget.classList.add('dragging');
+        }
+
+        function handleFlowStudioPointerMove(event) {
+            const dragging = flowStudioState.draggingFlow;
+            if (dragging) {
+                const flow = flowStudioState.collection?.flows?.find(item => item.id === dragging.id);
+                if (!flow) return;
+                flow.layout.x = Math.max(0, dragging.originX + (event.clientX - dragging.startX) / flowStudioState.scale);
+                flow.layout.y = Math.max(0, dragging.originY + (event.clientY - dragging.startY) / flowStudioState.scale);
+                const flowEl = document.querySelector(`.flow-studio-flow[data-flow-id="${CSS.escape(flow.id)}"]`);
+                if (flowEl) {
+                    flowEl.style.left = `${flow.layout.x}px`;
+                    flowEl.style.top = `${flow.layout.y}px`;
+                }
+                return;
+            }
+
+            const panning = flowStudioState.panning;
+            if (!panning) return;
+            flowStudioState.tx = panning.originTx + event.clientX - panning.startX;
+            flowStudioState.ty = panning.originTy + event.clientY - panning.startY;
+            applyFlowStudioTransform();
+        }
+
+        function handleFlowStudioPointerUp(event) {
+            const wasDraggingFlow = Boolean(flowStudioState.draggingFlow);
+            flowStudioState.draggingFlow = null;
+            flowStudioState.panning = null;
+            event.currentTarget?.classList?.remove('dragging');
+            if (wasDraggingFlow) {
+                saveFlowStudioLayout();
+            }
+        }
+
+        async function saveFlowStudioLayout() {
+            const collection = flowStudioState.collection;
+            if (!collection) return;
+            try {
+                const result = await apiCall(`/flow-maps/${encodeURIComponent(collection.id)}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        flows: collection.flows.map(flow => ({
+                            id: flow.id,
+                            layout: flow.layout,
+                            visible: flow.visible !== false,
+                        })),
+                    }),
+                });
+                if (result.collection) flowStudioState.collection = result.collection;
+            } catch (error) {
+                showToast('Failed to save FlowMap layout', 'error');
+            }
+        }
+
+        async function deleteFlowStudioFlow(flowId) {
+            if (!flowId || !flowStudioState.collection) return;
+            const flow = flowStudioState.collection.flows.find(item => item.id === flowId);
+            const confirmed = await showConfirmDialog({
+                title: 'Delete Flow',
+                message: `Remove "${flow?.name || 'this flow'}" from this FlowMap?`,
+                warning: 'The source capture stays in Projects.',
+                confirmText: 'Delete',
+                type: 'danger',
+            });
+            if (!confirmed) return;
+
+            try {
+                const result = await apiCall(`/flow-maps/${encodeURIComponent(flowStudioState.collection.id)}/flows/${encodeURIComponent(flowId)}`, {
+                    method: 'DELETE',
+                });
+                if (result.error) throw new Error(result.error);
+                flowStudioState.collection = result.collection;
+                flowStudioState.selectedFlowId = result.collection?.flows?.[0]?.id || null;
+                renderFlowStudio();
+                showToast('Flow removed', 'success');
+                loadProjects().catch(() => {});
+            } catch (error) {
+                showToast(error.message || 'Failed to delete flow', 'error');
+            }
+        }
+
+        async function openFlowStudioAddCaptureModal() {
+            const collection = flowStudioState.collection;
+            if (!collection) return;
+            let allProjects = projects;
+            try {
+                const data = await apiCall('/projects?limit=200');
+                allProjects = (data.projects || []).map(normalizeProjectData);
+            } catch {
+                allProjects = projects;
+            }
+
+            const usedProjectIds = new Set(collection.flows.map(flow => flow.projectId));
+            const available = allProjects.filter(project => !isFlowMapProject(project) && !usedProjectIds.has(project.id));
+            if (!available.length) {
+                showToast('No new captures available to add', 'info');
+                return;
+            }
+
+            document.getElementById('flowStudioAddModal')?.remove();
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay active';
+            modal.id = 'flowStudioAddModal';
+            modal.innerHTML = `
+                <div class="modal" style="max-width: 620px;">
+                    <div class="modal-header">
+                        <div class="modal-title">Add Captures to FlowMap</div>
+                        <button class="icon-btn" type="button" onclick="document.getElementById('flowStudioAddModal')?.remove()">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                    </div>
+                    <div class="flow-studio-add-list">
+                        ${available.map(project => `
+                            <label class="flow-studio-add-row">
+                                <input type="checkbox" value="${escapeAttr(project.id)}">
+                                ${project.thumbnailPath
+                                    ? `<img src="/api/file?path=${encodeURIComponent(project.thumbnailPath)}" alt="">`
+                                    : '<img alt="">'
+                                }
+                                <span>
+                                    <span style="display:block;font-size:12px;font-weight:600;color:var(--text-primary);">${escapeHtml(project.name)}</span>
+                                    <span style="display:block;font-size:10px;color:var(--text-muted);margin-top:3px;">${escapeHtml(getProjectPlatformLabel(project))} · ${escapeHtml(formatDate(project.createdAt))}</span>
+                                </span>
+                            </label>
+                        `).join('')}
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" type="button" onclick="document.getElementById('flowStudioAddModal')?.remove()">Cancel</button>
+                        <button class="btn btn-primary" type="button" id="flowStudioAddConfirmBtn">Add Selected</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            document.getElementById('flowStudioAddConfirmBtn').addEventListener('click', async () => {
+                const ids = [...modal.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value);
+                if (!ids.length) {
+                    showToast('Select at least one capture', 'warning');
+                    return;
+                }
+                try {
+                    const result = await apiCall(`/flow-maps/${encodeURIComponent(collection.id)}/flows`, {
+                        method: 'POST',
+                        body: JSON.stringify({ projectIds: ids }),
+                    });
+                    if (result.error) throw new Error(result.error);
+                    flowStudioState.collection = result.collection;
+                    flowStudioState.selectedFlowId = result.collection?.flows?.at(-1)?.id || flowStudioState.selectedFlowId;
+                    modal.remove();
+                    renderFlowStudio();
+                    showToast(`Added ${result.added || ids.length} flow${(result.added || ids.length) === 1 ? '' : 's'}`, 'success');
+                    loadProjects().catch(() => {});
+                } catch (error) {
+                    showToast(error.message || 'Failed to add captures', 'error');
+                }
+            });
+        }
+
+        function renderFlowStudioExportPreview(background, hideText = false) {
+            const collection = flowStudioState.collection;
+            if (!collection) return '';
+            const flows = (collection.flows || []).slice(0, 3);
+            return `
+                <div class="flow-studio-export-preview ${background === 'transparent' ? 'transparent-bg' : 'grid-bg'} ${hideText ? 'clean-export' : ''}" id="flowStudioExportPreview">
+                    ${flows.map((flow) => `
+                        <div class="flow-studio-export-mini-flow" style="--flow-color:${escapeAttr(flow.color)}">
+                            ${hideText ? '' : `<div class="flow-studio-export-mini-title">${escapeHtml(flow.name)}</div>`}
+                            <div class="flow-studio-export-mini-nodes">
+                                ${(flow.flowMap.nodes || []).slice(0, 5).map((node) => `
+                                    <div class="flow-studio-export-mini-phone">
+                                        ${node.imagePath
+                                            ? `<img src="${flowMapFileUrl(node.imagePath)}" alt="">`
+                                            : ''
+                                        }
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function updateFlowStudioExportPreview(modal) {
+            const background = modal.querySelector('input[name="flowStudioExportBackground"]:checked')?.value || 'grid';
+            const hideText = Boolean(modal.querySelector('#flowStudioCleanExportToggle')?.checked);
+            const previewMount = modal.querySelector('#flowStudioExportPreviewMount');
+            if (previewMount) {
+                previewMount.innerHTML = renderFlowStudioExportPreview(background, hideText);
+            }
+        }
+
+        function exportFlowStudio(format) {
+            const collection = flowStudioState.collection;
+            if (!collection) return;
+            document.getElementById('flowStudioExportModal')?.remove();
+            const modal = document.createElement('div');
+            modal.className = 'modal-overlay active';
+            modal.id = 'flowStudioExportModal';
+            modal.innerHTML = `
+                <div class="modal flow-studio-export-modal">
+                    <div class="modal-header">
+                        <div class="modal-title">Export FlowMap ${format.toUpperCase()}</div>
+                        <button class="icon-btn" type="button" data-flow-export-close>
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="flow-studio-export-body">
+                        <div class="flow-studio-export-options">
+                            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Background</div>
+                            <label class="flow-studio-list-item flow-studio-export-option">
+                                <input type="radio" name="flowStudioExportBackground" value="grid" checked>
+                                <span>
+                                    <span class="flow-studio-list-name">Com fundo</span>
+                                    <span class="flow-studio-list-meta">quadriculado com padding</span>
+                                </span>
+                            </label>
+                            <label class="flow-studio-list-item flow-studio-export-option">
+                                <input type="radio" name="flowStudioExportBackground" value="transparent">
+                                <span>
+                                    <span class="flow-studio-list-name">Sem fundo</span>
+                                    <span class="flow-studio-list-meta">${format === 'png' ? 'PNG transparente' : 'HTML transparente'}</span>
+                                </span>
+                            </label>
+                            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600; margin-top: 8px;">Details</div>
+                            <label class="flow-studio-arrow-toggle flow-studio-export-clean-toggle" title="Hide titles, dates and descriptions">
+                                <input id="flowStudioCleanExportToggle" type="checkbox">
+                                <span class="flow-studio-arrow-switch"></span>
+                                <span class="flow-studio-arrow-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M3 3l18 18"></path>
+                                        <path d="M10.58 10.58A2 2 0 0 0 12 14a2 2 0 0 0 1.42-.58"></path>
+                                        <path d="M16.68 16.68A10.8 10.8 0 0 1 12 18C7 18 3.73 14.39 2 12a18.1 18.1 0 0 1 5.32-4.68"></path>
+                                        <path d="M9.88 5.09A10.5 10.5 0 0 1 12 5c5 0 8.27 3.61 10 7a15.7 15.7 0 0 1-2.2 2.72"></path>
+                                    </svg>
+                                </span>
+                                <span class="flow-studio-export-clean-label">
+                                    <strong>Clean export</strong>
+                                    <small>Hide titles, dates and descriptions</small>
+                                </span>
+                            </label>
+                        </div>
+                        <div class="flow-studio-export-preview-column">
+                            <div style="font-size: 11px; color: var(--text-muted); font-weight: 600; margin-bottom: 8px;">Preview</div>
+                            <div id="flowStudioExportPreviewMount"></div>
+                            <div class="flow-studio-export-result" id="flowStudioExportResult" style="display:none;"></div>
+                        </div>
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" type="button" data-flow-export-close>Cancel</button>
+                        <button class="btn btn-primary" type="button" id="flowStudioExportConfirmBtn">Export ${format.toUpperCase()}</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            updateFlowStudioExportPreview(modal);
+            modal.querySelectorAll('[data-flow-export-close]').forEach((button) => {
+                button.addEventListener('click', () => modal.remove());
+            });
+            modal.querySelectorAll('input[name="flowStudioExportBackground"]').forEach((input) => {
+                input.addEventListener('change', () => updateFlowStudioExportPreview(modal));
+            });
+            modal.querySelector('#flowStudioCleanExportToggle')?.addEventListener('change', () => updateFlowStudioExportPreview(modal));
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) modal.remove();
+            });
+            document.getElementById('flowStudioExportConfirmBtn')?.addEventListener('click', () => {
+                const background = modal.querySelector('input[name="flowStudioExportBackground"]:checked')?.value || 'grid';
+                const hideText = Boolean(modal.querySelector('#flowStudioCleanExportToggle')?.checked);
+                runFlowStudioExport(format, background, hideText, modal);
+            });
+        }
+
+        async function runFlowStudioExport(format, background, hideText, modal) {
+            const collection = flowStudioState.collection;
+            if (!collection) return;
+            const confirmBtn = document.getElementById('flowStudioExportConfirmBtn');
+            const resultEl = document.getElementById('flowStudioExportResult');
+            if (confirmBtn) {
+                confirmBtn.disabled = true;
+                confirmBtn.textContent = 'Exporting...';
+            }
+            try {
+                showToast(`Exporting FlowMap ${format.toUpperCase()}...`, 'info');
+                await saveFlowStudioLayout();
+                const result = await apiCall(`/flow-maps/${encodeURIComponent(collection.id)}/export`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        format,
+                        background,
+                        viewMode: flowStudioState.mode,
+                        showArrows: Boolean(flowStudioState.showArrows),
+                        hideText: Boolean(hideText),
+                    }),
+                });
+                if (result.error) throw new Error(result.error);
+                try {
+                    await fetch('/api/reveal', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: result.path }),
+                    });
+                } catch (error) {
+                    console.warn('Could not reveal FlowMap export:', error);
+                }
+                if (resultEl) {
+                    resultEl.style.display = 'block';
+                    resultEl.innerHTML = `Saved to:<br>${escapeHtml(result.path || result.directory || '')}`;
+                }
+                showToast(`FlowMap saved and opened in Finder`, 'success');
+            } catch (error) {
+                showToast(error.message || 'FlowMap export failed', 'error');
+            } finally {
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = `Export ${format.toUpperCase()}`;
+                }
+            }
+        }
+
+        // ====================================================================
+        // FLOW MAP
+        // ====================================================================
+        let analysisFlowMapState = {
+            projectId: null,
+            flowMap: null,
+            mode: 'flow',
+            selectedType: 'node',
+            selectedId: null,
+            scale: 1,
+            tx: 0,
+            ty: 0,
+            stageWidth: 1200,
+            stageHeight: 640,
+            dragging: null,
+        };
+
+        function getAnalysisFlowMapRefs() {
+            return {
+                shell: document.getElementById('analysisFlowMapShell'),
+                viewport: document.getElementById('analysisFlowMapViewport'),
+                stage: document.getElementById('analysisFlowMapStage'),
+                detail: document.getElementById('analysisFlowMapDetail'),
+            };
+        }
+
+        function clampFlowMap(value, min, max) {
+            return Math.max(min, Math.min(max, value));
+        }
+
+        function formatFlowMapTime(ms) {
+            const totalSeconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            return `${minutes}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        function flowMapFileUrl(path) {
+            return path ? `/api/file?path=${encodeURIComponent(path)}` : '';
+        }
+
+        function getFlowMapNodeSize(node) {
+            const aspect = Number(node?.aspectRatio || 0);
+            const landscape = aspect > 1.1;
+            return landscape
+                ? { width: 220, height: 190, landscape }
+                : { width: 140, height: 304, landscape };
+        }
+
+        function getFlowMapItemTime(item) {
+            if (!item) return 0;
+            return Number(item.startMs || item.endMs || 0);
+        }
+
+        async function initAnalysisFlowMap(projectId) {
+            const refs = getAnalysisFlowMapRefs();
+            if (!refs.shell || !projectId) return;
+
+            analysisFlowMapState = {
+                ...analysisFlowMapState,
+                projectId,
+                flowMap: null,
+                mode: analysisFlowMapState.mode || 'flow',
+                selectedType: 'node',
+                selectedId: null,
+                scale: 1,
+                tx: 0,
+                ty: 0,
+                dragging: null,
+            };
+
+            bindAnalysisFlowMapEvents();
+            renderAnalysisFlowMapLoading();
+
+            try {
+                const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/flow-map`);
+                const data = await response.json();
+                if (!response.ok || !data.flowMap) {
+                    throw new Error(data.error || 'Flow map unavailable');
+                }
+                if (analysisFlowMapState.projectId !== projectId) return;
+                analysisFlowMapState.flowMap = data.flowMap;
+                analysisFlowMapState.selectedType = 'node';
+                analysisFlowMapState.selectedId = data.flowMap.nodes?.[0]?.id || null;
+                renderAnalysisFlowMap({ fit: true });
+            } catch (error) {
+                renderAnalysisFlowMapError(error.message || 'Flow map unavailable');
+            }
+        }
+
+        function bindAnalysisFlowMapEvents() {
+            const refs = getAnalysisFlowMapRefs();
+            if (!refs.shell || refs.shell.dataset.boundFlowMap === '1') return;
+            refs.shell.dataset.boundFlowMap = '1';
+
+            refs.shell.addEventListener('click', (event) => {
+                const modeBtn = event.target.closest('[data-flow-map-mode]');
+                if (modeBtn) {
+                    analysisFlowMapState.mode = modeBtn.dataset.flowMapMode || 'flow';
+                    renderAnalysisFlowMap({ fit: true });
+                    return;
+                }
+
+                const actionBtn = event.target.closest('[data-flow-map-action]');
+                if (actionBtn) {
+                    const action = actionBtn.dataset.flowMapAction;
+                    if (action === 'fit') fitAnalysisFlowMap();
+                    if (action === 'zoom-in') zoomAnalysisFlowMap(1.18);
+                    if (action === 'zoom-out') zoomAnalysisFlowMap(0.84);
+                    if (action === 'rebuild') rebuildAnalysisFlowMap();
+                    return;
+                }
+
+                const nodeEl = event.target.closest('[data-flow-node]');
+                if (nodeEl) {
+                    selectAnalysisFlowMapItem('node', nodeEl.dataset.flowNode, { seek: true });
+                    return;
+                }
+
+                const edgeEl = event.target.closest('[data-flow-edge]');
+                if (edgeEl) {
+                    selectAnalysisFlowMapItem('edge', edgeEl.dataset.flowEdge, { seek: true });
+                }
+            });
+
+            refs.viewport?.addEventListener('wheel', (event) => {
+                if (!analysisFlowMapState.flowMap) return;
+                event.preventDefault();
+                const rect = refs.viewport.getBoundingClientRect();
+                const factor = event.deltaY < 0 ? 1.08 : 0.92;
+                zoomAnalysisFlowMap(factor, event.clientX - rect.left, event.clientY - rect.top);
+            }, { passive: false });
+
+            refs.viewport?.addEventListener('pointerdown', (event) => {
+                if (event.button !== 0) return;
+                if (event.target.closest('[data-flow-node], [data-flow-edge], button')) return;
+                refs.viewport.classList.add('dragging');
+                refs.viewport.setPointerCapture?.(event.pointerId);
+                analysisFlowMapState.dragging = {
+                    pointerId: event.pointerId,
+                    x: event.clientX,
+                    y: event.clientY,
+                    tx: analysisFlowMapState.tx,
+                    ty: analysisFlowMapState.ty,
+                };
+            });
+
+            refs.viewport?.addEventListener('pointermove', (event) => {
+                const drag = analysisFlowMapState.dragging;
+                if (!drag || drag.pointerId !== event.pointerId) return;
+                analysisFlowMapState.tx = drag.tx + (event.clientX - drag.x);
+                analysisFlowMapState.ty = drag.ty + (event.clientY - drag.y);
+                applyAnalysisFlowMapTransform();
+            });
+
+            const stopDrag = (event) => {
+                const drag = analysisFlowMapState.dragging;
+                if (!drag || drag.pointerId !== event.pointerId) return;
+                analysisFlowMapState.dragging = null;
+                refs.viewport.classList.remove('dragging');
+                refs.viewport.releasePointerCapture?.(event.pointerId);
+            };
+            refs.viewport?.addEventListener('pointerup', stopDrag);
+            refs.viewport?.addEventListener('pointercancel', stopDrag);
+        }
+
+        function renderAnalysisFlowMapLoading() {
+            const refs = getAnalysisFlowMapRefs();
+            if (refs.stage) {
+                refs.stage.style.transform = '';
+                refs.stage.innerHTML = '<div class="flow-map-loading">Loading flow...</div>';
+            }
+            if (refs.detail) {
+                refs.detail.innerHTML = `
+                    <div class="flow-map-detail-body">
+                        <div class="flow-map-detail-title">Flow</div>
+                        <div class="flow-map-detail-subtitle">Loading...</div>
+                    </div>
+                `;
+            }
+        }
+
+        function renderAnalysisFlowMapError(message) {
+            const refs = getAnalysisFlowMapRefs();
+            if (refs.stage) {
+                refs.stage.style.transform = '';
+                refs.stage.innerHTML = `<div class="flow-map-empty">${escapeHtml(message || 'Flow map unavailable')}</div>`;
+            }
+            if (refs.detail) {
+                refs.detail.innerHTML = `
+                    <div class="flow-map-detail-body">
+                        <div class="flow-map-detail-title">Flow</div>
+                        <div class="flow-map-detail-subtitle">${escapeHtml(message || 'Unavailable')}</div>
+                    </div>
+                `;
+            }
+        }
+
+        function updateAnalysisFlowMapToolbar() {
+            const refs = getAnalysisFlowMapRefs();
+            refs.shell?.querySelectorAll('[data-flow-map-mode]').forEach((btn) => {
+                btn.classList.toggle('active', btn.dataset.flowMapMode === analysisFlowMapState.mode);
+            });
+        }
+
+        function buildAnalysisFlowMapLayout(flowMap, mode) {
+            const nodes = Array.isArray(flowMap?.nodes) ? flowMap.nodes : [];
+            const primaryPath = flowMap?.paths?.[0]?.nodeIds || [];
+            const orderedIds = mode === 'flow' && primaryPath.length
+                ? primaryPath.filter((id) => nodes.some((node) => node.id === id))
+                : nodes.map((node) => node.id);
+            const orderedNodes = orderedIds.map((id) => nodes.find((node) => node.id === id)).filter(Boolean);
+            const layouts = {};
+
+            if (mode === 'grid') {
+                const columns = Math.max(1, Math.ceil(Math.sqrt(Math.max(orderedNodes.length, 1))));
+                const cellW = 282;
+                const cellH = 366;
+                orderedNodes.forEach((node, index) => {
+                    const size = getFlowMapNodeSize(node);
+                    const col = index % columns;
+                    const row = Math.floor(index / columns);
+                    layouts[node.id] = {
+                        x: 70 + col * cellW + Math.max(0, (cellW - size.width) / 2),
+                        y: 70 + row * cellH,
+                        ...size,
+                    };
+                });
+            } else {
+                const cellW = 280;
+                orderedNodes.forEach((node, index) => {
+                    const size = getFlowMapNodeSize(node);
+                    layouts[node.id] = {
+                        x: 80 + index * cellW,
+                        y: 96 + (index % 2 === 1 ? 42 : 0),
+                        ...size,
+                    };
+                });
+            }
+
+            nodes.forEach((node, index) => {
+                if (layouts[node.id]) return;
+                const size = getFlowMapNodeSize(node);
+                layouts[node.id] = {
+                    x: 80 + index * 260,
+                    y: 460,
+                    ...size,
+                };
+            });
+
+            let stageWidth = 900;
+            let stageHeight = 540;
+            Object.values(layouts).forEach((layout) => {
+                stageWidth = Math.max(stageWidth, layout.x + layout.width + 120);
+                stageHeight = Math.max(stageHeight, layout.y + layout.height + 110);
+            });
+
+            return { layouts, stageWidth, stageHeight };
+        }
+
+        function renderAnalysisFlowMap(options = {}) {
+            const refs = getAnalysisFlowMapRefs();
+            const flowMap = analysisFlowMapState.flowMap;
+            if (!refs.stage || !flowMap) return;
+
+            updateAnalysisFlowMapToolbar();
+
+            const nodes = Array.isArray(flowMap.nodes) ? flowMap.nodes : [];
+            const edges = Array.isArray(flowMap.edges) ? flowMap.edges : [];
+            if (nodes.length === 0) {
+                refs.stage.style.transform = '';
+                refs.stage.innerHTML = '<div class="flow-map-empty">No captured screens.</div>';
+                renderAnalysisFlowMapDetail();
+                return;
+            }
+
+            const { layouts, stageWidth, stageHeight } = buildAnalysisFlowMapLayout(flowMap, analysisFlowMapState.mode);
+            analysisFlowMapState.stageWidth = stageWidth;
+            analysisFlowMapState.stageHeight = stageHeight;
+            refs.stage.style.width = `${stageWidth}px`;
+            refs.stage.style.height = `${stageHeight}px`;
+
+            const selectedType = analysisFlowMapState.selectedType;
+            const selectedId = analysisFlowMapState.selectedId;
+
+            const edgeMarkup = edges.map((edge) => {
+                const from = layouts[edge.from];
+                const to = layouts[edge.to];
+                if (!from || !to) return '';
+                const sx = from.x + from.width;
+                const sy = from.y + from.height * 0.48;
+                const ex = to.x;
+                const ey = to.y + to.height * 0.48;
+                const dx = Math.max(70, Math.abs(ex - sx) * 0.45);
+                const path = `M ${sx} ${sy} C ${sx + dx} ${sy}, ${ex - dx} ${ey}, ${ex} ${ey}`;
+                const selected = selectedType === 'edge' && selectedId === edge.id;
+                return `<path class="flow-map-edge-path ${selected ? 'selected' : ''}" data-flow-edge="${escapeAttr(edge.id)}" d="${escapeAttr(path)}"></path>`;
+            }).join('');
+
+            const labelMarkup = edges.map((edge) => {
+                const from = layouts[edge.from];
+                const to = layouts[edge.to];
+                if (!from || !to) return '';
+                const x = (from.x + from.width + to.x) / 2;
+                const y = (from.y + to.y) / 2 + Math.min(from.height, to.height) * 0.22;
+                const selected = selectedType === 'edge' && selectedId === edge.id;
+                return `
+                    <button
+                        class="flow-map-edge-label ${selected ? 'selected' : ''}"
+                        type="button"
+                        data-flow-edge="${escapeAttr(edge.id)}"
+                        style="left:${x}px; top:${y}px;"
+                        title="${escapeAttr(edge.label || edge.type || 'Transition')}"
+                    >
+                        ${escapeHtml(edge.label || edge.type || 'Transition')}
+                    </button>
+                `;
+            }).join('');
+
+            const nodeMarkup = nodes.map((node) => {
+                const layout = layouts[node.id];
+                if (!layout) return '';
+                const selected = selectedType === 'node' && selectedId === node.id;
+                const landscape = layout.landscape ? 'is-landscape' : '';
+                const imageUrl = flowMapFileUrl(node.imagePath);
+                return `
+                    <button
+                        type="button"
+                        class="flow-map-node ${landscape} ${selected ? 'selected' : ''}"
+                        data-flow-node="${escapeAttr(node.id)}"
+                        style="left:${layout.x}px; top:${layout.y}px;"
+                        title="${escapeAttr(node.subtitle || node.title || '')}"
+                    >
+                        <div class="flow-map-node-media">
+                            ${imageUrl
+                                ? `<img src="${escapeAttr(imageUrl)}" alt="${escapeAttr(node.title || 'Screen')}" loading="lazy">`
+                                : `<div class="flow-map-node-empty">No image</div>`
+                            }
+                        </div>
+                        <div class="flow-map-node-caption">
+                            <div class="flow-map-node-title">${escapeHtml(node.title || 'Screen')}</div>
+                            <div class="flow-map-node-subtitle">${escapeHtml(node.subtitle || '')}</div>
+                            <div class="flow-map-node-time">${escapeHtml(formatFlowMapTime(node.startMs))}</div>
+                        </div>
+                    </button>
+                `;
+            }).join('');
+
+            refs.stage.innerHTML = `
+                <svg class="flow-map-edge-layer" width="${stageWidth}" height="${stageHeight}" viewBox="0 0 ${stageWidth} ${stageHeight}">
+                    <defs>
+                        <marker id="flowMapArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                            <path d="M0,0 L8,4 L0,8 Z" fill="rgba(96, 165, 250, 0.72)"></path>
+                        </marker>
+                    </defs>
+                    ${edgeMarkup.replaceAll('"></path>', '" marker-end="url(#flowMapArrow)"></path>')}
+                </svg>
+                ${labelMarkup}
+                ${nodeMarkup}
+            `;
+
+            if (options.fit) {
+                fitAnalysisFlowMap();
+            } else {
+                applyAnalysisFlowMapTransform();
+            }
+            renderAnalysisFlowMapDetail();
+        }
+
+        function applyAnalysisFlowMapTransform() {
+            const refs = getAnalysisFlowMapRefs();
+            if (!refs.stage) return;
+            refs.stage.style.transform = `translate(${analysisFlowMapState.tx}px, ${analysisFlowMapState.ty}px) scale(${analysisFlowMapState.scale})`;
+        }
+
+        function fitAnalysisFlowMap() {
+            const refs = getAnalysisFlowMapRefs();
+            if (!refs.viewport || !analysisFlowMapState.flowMap) return;
+            const rect = refs.viewport.getBoundingClientRect();
+            const scale = Math.min(
+                1,
+                Math.max(
+                    0.32,
+                    Math.min(
+                        (rect.width - 56) / Math.max(analysisFlowMapState.stageWidth, 1),
+                        (rect.height - 56) / Math.max(analysisFlowMapState.stageHeight, 1)
+                    )
+                )
+            );
+            analysisFlowMapState.scale = scale;
+            analysisFlowMapState.tx = Math.max(24, (rect.width - analysisFlowMapState.stageWidth * scale) / 2);
+            analysisFlowMapState.ty = Math.max(24, (rect.height - analysisFlowMapState.stageHeight * scale) / 2);
+            applyAnalysisFlowMapTransform();
+        }
+
+        function zoomAnalysisFlowMap(factor, originX, originY) {
+            const refs = getAnalysisFlowMapRefs();
+            if (!refs.viewport || !analysisFlowMapState.flowMap) return;
+            const rect = refs.viewport.getBoundingClientRect();
+            const ox = typeof originX === 'number' ? originX : rect.width / 2;
+            const oy = typeof originY === 'number' ? originY : rect.height / 2;
+            const oldScale = analysisFlowMapState.scale;
+            const nextScale = clampFlowMap(oldScale * factor, 0.28, 2.4);
+            const ratio = nextScale / oldScale;
+            analysisFlowMapState.tx = ox - (ox - analysisFlowMapState.tx) * ratio;
+            analysisFlowMapState.ty = oy - (oy - analysisFlowMapState.ty) * ratio;
+            analysisFlowMapState.scale = nextScale;
+            applyAnalysisFlowMapTransform();
+        }
+
+        async function rebuildAnalysisFlowMap() {
+            const projectId = analysisFlowMapState.projectId;
+            if (!projectId) return;
+            renderAnalysisFlowMapLoading();
+            try {
+                const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/flow-map/rebuild`, {
+                    method: 'POST',
+                });
+                const data = await response.json();
+                if (!response.ok || !data.flowMap) {
+                    throw new Error(data.error || 'Failed to rebuild flow map');
+                }
+                analysisFlowMapState.flowMap = data.flowMap;
+                analysisFlowMapState.selectedType = 'node';
+                analysisFlowMapState.selectedId = data.flowMap.nodes?.[0]?.id || null;
+                renderAnalysisFlowMap({ fit: true });
+                showToast('Flow map rebuilt', 'success');
+            } catch (error) {
+                renderAnalysisFlowMapError(error.message || 'Failed to rebuild flow map');
+                showToast('Failed to rebuild flow map', 'error');
+            }
+        }
+
+        function findAnalysisFlowMapSelection() {
+            const flowMap = analysisFlowMapState.flowMap;
+            if (!flowMap) return null;
+            if (analysisFlowMapState.selectedType === 'edge') {
+                const edge = flowMap.edges?.find((item) => item.id === analysisFlowMapState.selectedId);
+                return edge ? { type: 'edge', item: edge } : null;
+            }
+            const node = flowMap.nodes?.find((item) => item.id === analysisFlowMapState.selectedId) || flowMap.nodes?.[0];
+            return node ? { type: 'node', item: node } : null;
+        }
+
+        function selectAnalysisFlowMapItem(type, id, options = {}) {
+            if (!id) return;
+            analysisFlowMapState.selectedType = type;
+            analysisFlowMapState.selectedId = id;
+            renderAnalysisFlowMap();
+            const selection = findAnalysisFlowMapSelection();
+            if (options.seek && selection) {
+                seekAnalysisFlowMapMedia(getFlowMapItemTime(selection.item), true);
+            }
+        }
+
+        function renderAnalysisFlowMapDetail() {
+            const refs = getAnalysisFlowMapRefs();
+            const flowMap = analysisFlowMapState.flowMap;
+            if (!refs.detail || !flowMap) return;
+
+            const selection = findAnalysisFlowMapSelection();
+            if (!selection) {
+                refs.detail.innerHTML = `
+                    <div class="flow-map-detail-body">
+                        <div class="flow-map-detail-title">${escapeHtml(flowMap.title || 'Flow')}</div>
+                        <div class="flow-map-detail-subtitle">No selection.</div>
+                    </div>
+                `;
+                return;
+            }
+
+            const { type, item } = selection;
+            const isNode = type === 'node';
+            const title = isNode ? item.title || 'Screen' : item.label || 'Transition';
+            const subtitle = isNode ? item.subtitle || '' : `${item.type || 'transition'} · ${item.status || 'captured'}`;
+            const timeMs = getFlowMapItemTime(item);
+            const videoUrl = isNode ? '' : flowMapFileUrl(flowMap.media?.videoPath);
+            const imageUrl = isNode ? flowMapFileUrl(item.imagePath) : '';
+            const rowData = isNode
+                ? [
+                    ['Time', formatFlowMapTime(item.startMs)],
+                    ['Actions', String(item.actionIds?.length || 0)],
+                    ['Occurrences', String(item.occurrenceCount || 1)],
+                    ['Image', item.imageName || '-'],
+                  ]
+                : [
+                    ['Time', `${formatFlowMapTime(item.startMs)} - ${formatFlowMapTime(item.endMs)}`],
+                    ['Type', item.type || 'transition'],
+                    ['Status', item.status || 'captured'],
+                    ['Action', item.actionId || '-'],
+                  ];
+
+            refs.detail.innerHTML = `
+                <div class="flow-map-detail-body">
+                    <div class="flow-map-detail-title">${escapeHtml(title)}</div>
+                    <div class="flow-map-detail-subtitle">${escapeHtml(subtitle)}</div>
+                    ${videoUrl ? `<video class="flow-map-detail-video" id="flowMapDetailVideo" controls preload="metadata" src="${escapeAttr(videoUrl)}"></video>` : ''}
+                    ${imageUrl ? `<img class="flow-map-detail-image" src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}" loading="lazy">` : ''}
+                    <div class="flow-map-detail-rows">
+                        ${rowData.map(([label, value]) => `
+                            <div class="flow-map-detail-row">
+                                <span>${escapeHtml(label)}</span>
+                                <span>${escapeHtml(value)}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+
+            setTimeout(() => seekAnalysisFlowMapMedia(timeMs, false), 0);
+        }
+
+        function seekAnalysisFlowMapMedia(ms, shouldPlay) {
+            const seconds = Math.max(0, (Number(ms) || 0) / 1000);
+            const videos = [
+                document.getElementById('flowMapDetailVideo'),
+                document.getElementById('analysisVideo'),
+            ].filter(Boolean);
+
+            videos.forEach((video) => {
+                const apply = () => {
+                    try {
+                        if (Number.isFinite(seconds)) video.currentTime = seconds;
+                    } catch {}
+                    if (shouldPlay && video.id === 'flowMapDetailVideo') {
+                        video.play().catch(() => {});
+                    }
+                };
+                if (video.readyState >= 1) {
+                    apply();
+                } else {
+                    video.addEventListener('loadedmetadata', apply, { once: true });
+                }
+            });
         }
 
         // ====================================================================
