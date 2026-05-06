@@ -1669,6 +1669,8 @@ type FlowMapCollection = {
 
 type FlowMapExportBackground = 'grid' | 'transparent';
 
+const FLOW_MAP_SCREENSHOT_FILE_RE = /\.(png|jpg|jpeg|webp)$/i;
+
 const FLOW_MAP_COLORS = [
   '#60a5fa',
   '#34d399',
@@ -1716,6 +1718,35 @@ function sanitizeFlowMapName(value: unknown, fallback = 'Flow Map'): string {
 
 function getFlowMapExportDir(flowMapId: string): string {
   return join(EXPORTS_DIR, flowMapId, 'flow-map');
+}
+
+function listFlowMapScreenshotPaths(dir: string | null | undefined): string[] {
+  if (!dir || !existsSync(dir)) return [];
+  try {
+    if (!statSync(dir).isDirectory()) return [];
+    return readdirSync(dir)
+      .filter((file) => FLOW_MAP_SCREENSHOT_FILE_RE.test(file))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+      .map((file) => join(dir, file));
+  } catch {
+    return [];
+  }
+}
+
+function resolveProjectFlowMapScreenshotsDir(
+  projectId: string,
+  recordingBaseDir: string | null,
+  sessionData: any,
+): string | null {
+  const candidates = [
+    typeof sessionData?.screenshotsDir === 'string' ? sessionData.screenshotsDir : null,
+    recordingBaseDir ? join(recordingBaseDir, 'screenshots') : null,
+    recordingBaseDir ? join(recordingBaseDir, 'frames') : null,
+    join(PROJECTS_DIR, projectId, 'frames'),
+    join(FRAMES_DIR, projectId),
+  ].filter(Boolean) as string[];
+
+  return candidates.find((candidate) => listFlowMapScreenshotPaths(candidate).length > 0) || null;
 }
 
 function htmlEscape(value: unknown): string {
@@ -2214,6 +2245,8 @@ async function buildProjectFlowMap(projectId: string, options: { persist?: boole
       sessionData = null;
     }
   }
+  const screenshotsDir = resolveProjectFlowMapScreenshotsDir(projectId, recordingBaseDir, sessionData);
+  const screenshotPaths = listFlowMapScreenshotPaths(screenshotsDir);
 
   const projectFrames = await db
     .select()
@@ -2229,7 +2262,13 @@ async function buildProjectFlowMap(projectId: string, options: { persist?: boole
     ocrText: frame.ocrText,
   }));
 
-  if (frameInputs.length === 0 && project.thumbnailPath && existsSync(project.thumbnailPath) && !isSyntheticProjectCover(project.thumbnailPath)) {
+  if (
+    frameInputs.length === 0
+    && screenshotPaths.length === 0
+    && project.thumbnailPath
+    && existsSync(project.thumbnailPath)
+    && !isSyntheticProjectCover(project.thumbnailPath)
+  ) {
     frameInputs.push({
       id: `${projectId}_thumbnail`,
       frameNumber: 1,
@@ -2243,11 +2282,6 @@ async function buildProjectFlowMap(projectId: string, options: { persist?: boole
   const durationMs = typeof project.duration === 'number' && Number.isFinite(project.duration)
     ? Math.max(0, project.duration * 1000)
     : null;
-  const screenshotsDir = typeof sessionData?.screenshotsDir === 'string'
-    ? sessionData.screenshotsDir
-    : recordingBaseDir
-      ? join(recordingBaseDir, 'screenshots')
-      : null;
 
   const flowMap = buildFlowMap({
     owner: {
@@ -2358,6 +2392,51 @@ async function buildCollectionFlow(
     },
     flowMap,
   };
+}
+
+async function repairFlowMapCollectionFlows(collection: FlowMapCollection): Promise<FlowMapCollection> {
+  let changed = false;
+  const flows: FlowMapCollectionFlow[] = [];
+
+  for (const flow of collection.flows) {
+    const currentNodes = flow.flowMap?.nodes?.length || 0;
+    const currentEdges = flow.flowMap?.edges?.length || 0;
+    const hasVideo = Boolean(flow.flowMap?.media?.videoPath);
+
+    if (!flow.projectId || (currentNodes > 1 && hasVideo)) {
+      flows.push(flow);
+      continue;
+    }
+
+    const rebuilt = await buildProjectFlowMap(flow.projectId, { persist: true });
+    if (
+      rebuilt
+      && (
+        rebuilt.nodes.length > currentNodes
+        || rebuilt.edges.length > currentEdges
+        || (!hasVideo && Boolean(rebuilt.media.videoPath))
+      )
+    ) {
+      changed = true;
+      flows.push({
+        ...flow,
+        flowMap: rebuilt,
+      });
+      continue;
+    }
+
+    flows.push(flow);
+  }
+
+  if (!changed) return collection;
+
+  const repaired: FlowMapCollection = {
+    ...collection,
+    flows,
+  };
+  writeFlowMapCollection(repaired);
+  await refreshFlowMapProjectMetadata(repaired);
+  return repaired;
 }
 
 async function createFlowMapCollection(name: string, projectIds: string[]): Promise<{
@@ -2696,10 +2775,11 @@ app.post('/api/flow-maps', async (c) => {
 app.get('/api/flow-maps/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const collection = readFlowMapCollection(id);
+    let collection = readFlowMapCollection(id);
     if (!collection) {
       return c.json({ error: 'FlowMap not found' }, 404);
     }
+    collection = await repairFlowMapCollectionFlows(collection);
 
     return c.json({ collection: await hydrateFlowMapCollectionSourceNames(collection) });
   } catch (error) {
@@ -2762,6 +2842,7 @@ app.post('/api/flow-maps/:id/flows', async (c) => {
     if (!collection) {
       return c.json({ error: 'FlowMap not found' }, 404);
     }
+    collection = await repairFlowMapCollectionFlows(collection);
     collection = await hydrateFlowMapCollectionSourceNames(collection);
 
     const body = await c.req.json() as any;

@@ -318,7 +318,9 @@ function buildSteps(input: BuildFlowMapInput, durationMs: number): FlowStep[] {
       ocrText: frame.ocrText || null,
     }));
 
-  if (frameSteps.length > 0) return frameSteps;
+  if (frameSteps.length > 0 && (screenshotPaths.length === 0 || frameSteps.length >= screenshotPaths.length)) {
+    return frameSteps;
+  }
 
   return screenshotPaths.map((imagePath, index) => ({
     id: `screenshot_${String(index + 1).padStart(3, '0')}`,
