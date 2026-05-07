@@ -25,7 +25,7 @@ import {
 } from '../../core/testing/maestro.js';
 import {
   isPlaywrightInstalled,
-  getPlaywrightVersion,
+  getPlaywrightRuntimeStatus,
   installPlaywrightBrowsers,
   runPlaywrightTest,
   runPlaywrightScript,
@@ -197,19 +197,22 @@ export const playwrightStatusTool: MCPTool = {
   description: 'Check Playwright installation status and list available devices.',
   inputSchema: z.object({}),
   handler: async () => {
-    const installed = await isPlaywrightInstalled();
-    const version = installed ? await getPlaywrightVersion() : null;
+    const status = await getPlaywrightRuntimeStatus();
     const devices = listBrowserDevices();
 
     return createTextResult(JSON.stringify({
-      installed,
-      version,
+      installed: status.packageInstalled,
+      ready: status.ready,
+      browserInstalled: status.browserInstalled,
+      browserExecutablePath: status.executablePath,
+      version: status.version,
       devices: devices.map(d => ({
         name: d.name,
         viewport: d.viewport,
         isMobile: d.isMobile,
       })),
-      installHint: !installed ? 'npm install -D @playwright/test && npx playwright install' : null,
+      warning: status.ready ? null : status.warning,
+      installHint: status.ready ? null : (status.actionHint || 'npx playwright install chromium'),
     }, null, 2));
   },
 };
@@ -244,9 +247,12 @@ export const playwrightRunTool: MCPTool = {
       screenshot,
     } = params;
 
-    const installed = await isPlaywrightInstalled();
-    if (!installed) {
-      return createErrorResult('Playwright is not installed. Install with: npm install -D @playwright/test && npx playwright install');
+    const status = await getPlaywrightRuntimeStatus();
+    if (!status.packageInstalled) {
+      return createErrorResult('Playwright is not installed. Install with: npm install -D @playwright/test && npx playwright install chromium');
+    }
+    if (!status.ready) {
+      return createErrorResult(`${status.warning || 'Playwright browser runtime is not ready.'} Run: ${status.actionHint || 'npx playwright install chromium'}`);
     }
 
     const result = await runPlaywrightTest({
@@ -282,9 +288,12 @@ export const playwrightCodegenTool: MCPTool = {
   handler: async (params) => {
     const { url, browser, device, output } = params;
 
-    const installed = await isPlaywrightInstalled();
-    if (!installed) {
+    const status = await getPlaywrightRuntimeStatus();
+    if (!status.packageInstalled) {
       return createErrorResult('Playwright is not installed');
+    }
+    if (!status.ready) {
+      return createErrorResult(`${status.warning || 'Playwright browser runtime is not ready.'} Run: ${status.actionHint || 'npx playwright install chromium'}`);
     }
 
     const result = await startPlaywrightCodegen(url, {
@@ -447,7 +456,7 @@ export const testDevicesTool: MCPTool = {
   inputSchema: z.object({}),
   handler: async () => {
     const maestroInstalled = await isMaestroInstalled();
-    const playwrightInstalled = await isPlaywrightInstalled();
+    const playwrightStatus = await getPlaywrightRuntimeStatus();
 
     const mobileDevices = maestroInstalled ? await listMaestroDevices() : [];
     const browserDevices = listBrowserDevices();
@@ -458,7 +467,10 @@ export const testDevicesTool: MCPTool = {
         devices: mobileDevices,
       },
       browser: {
-        available: playwrightInstalled,
+        available: playwrightStatus.ready,
+        packageInstalled: playwrightStatus.packageInstalled,
+        warning: playwrightStatus.ready ? null : playwrightStatus.warning,
+        installHint: playwrightStatus.ready ? null : playwrightStatus.actionHint,
         devices: browserDevices.map(d => ({
           name: d.name,
           viewport: d.viewport,

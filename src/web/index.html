@@ -2995,8 +2995,39 @@
             background: var(--error);
         }
 
+        .status-dot.warning {
+            background: var(--warning);
+        }
+
         .status-text {
             color: var(--text-secondary);
+        }
+
+        .dependency-warning-pill {
+            height: 22px;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            margin-left: 10px;
+            padding: 0 9px;
+            border: 1px solid rgba(245, 158, 11, 0.32);
+            border-radius: 999px;
+            background: rgba(245, 158, 11, 0.1);
+            color: #fbbf24;
+            font-size: 11px;
+            letter-spacing: 0;
+            cursor: pointer;
+        }
+
+        .dependency-warning-pill:hover {
+            border-color: rgba(245, 158, 11, 0.58);
+            background: rgba(245, 158, 11, 0.16);
+        }
+
+        .dependency-warning-pill svg {
+            width: 13px;
+            height: 13px;
+            flex: 0 0 auto;
         }
 
         .status-right {
@@ -3030,6 +3061,117 @@
         .toast.success { border-left: 3px solid var(--success); }
         .toast.error { border-left: 3px solid var(--error); }
         .toast.info { border-left: 3px solid var(--accent); }
+        .toast.warning { border-left: 3px solid var(--warning); }
+
+        .setup-warning-card {
+            margin-bottom: 12px;
+            padding: 12px;
+            border: 1px solid rgba(245, 158, 11, 0.28);
+            border-radius: 8px;
+            background: rgba(245, 158, 11, 0.08);
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.45;
+        }
+
+        .setup-warning-card strong {
+            color: #fbbf24;
+            font-weight: 700;
+        }
+
+        .setup-warning-command {
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .setup-warning-command code {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding: 6px 8px;
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            font-size: 11px;
+        }
+
+        .setup-dependency-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 5px;
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        .setup-dependency-badge {
+            display: inline-flex;
+            align-items: center;
+            height: 20px;
+            padding: 0 7px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
+
+        .setup-dependency-badge.ready {
+            border-color: rgba(16, 185, 129, 0.28);
+            background: rgba(16, 185, 129, 0.09);
+            color: #34d399;
+        }
+
+        .setup-dependency-badge.warning {
+            border-color: rgba(245, 158, 11, 0.28);
+            background: rgba(245, 158, 11, 0.09);
+            color: #fbbf24;
+        }
+
+        .setup-dependency-badge.missing {
+            border-color: rgba(248, 113, 113, 0.3);
+            background: rgba(248, 113, 113, 0.08);
+            color: #f87171;
+        }
+
+        .setup-dependency-command {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            margin-top: 8px;
+        }
+
+        .setup-dependency-command code {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding: 5px 7px;
+            border-radius: 6px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            font-size: 11px;
+        }
+
+        .tool-dot.warning {
+            background: var(--warning);
+        }
+
+        .tool-dot.error {
+            background: var(--error);
+        }
 
         @keyframes toastIn {
             from {
@@ -8580,6 +8722,14 @@
         <div class="status-left">
             <div class="status-dot" id="statusDot"></div>
             <span class="status-text" id="statusText">Ready</span>
+            <button class="dependency-warning-pill" id="dependencyWarningPill" type="button" onclick="openSettings(); loadSetupStatus();" title="Open setup details">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                    <path d="M12 9v4"></path>
+                    <path d="M12 17h.01"></path>
+                </svg>
+                <span id="dependencyWarningText">Setup warning</span>
+            </button>
         </div>
         <div class="status-right" id="footerVersion">v0.0.0</div>
     </footer>
@@ -9910,7 +10060,13 @@
         let projects = [];
         let captureSources = [];
         let selectedSource = null;
-        let testingStatus = { maestro: false, playwright: false };
+        let testingStatus = {
+            maestro: false,
+            playwright: false,
+            playwrightPackageInstalled: false,
+            playwrightWarning: null,
+            playwrightActionHint: null
+        };
         let selectMode = false;
         let selectedProjects = new Set();
         let globalProviderLabel = '';
@@ -11067,6 +11223,7 @@
             const dot = document.getElementById('statusDot');
             const textEl = document.getElementById('statusText');
             dot.classList.toggle('error', type === 'error');
+            dot.classList.toggle('warning', type === 'warning');
             textEl.textContent = text;
         }
 
@@ -11085,6 +11242,7 @@
         const mobileToolCapabilities = {
             idbInstalled: null
         };
+        let setupRuntimeWarnings = [];
 
         function supportsBrowserNotifications() {
             return typeof window !== 'undefined' && 'Notification' in window;
@@ -11203,6 +11361,32 @@
                 mobileToolCapabilities.idbInstalled = data.idbInstalled;
                 updateMirroredTapIdbStatusUI();
             }
+            setupRuntimeWarnings = Array.isArray(data?.summary?.warnings)
+                ? data.summary.warnings.filter(item => item && item.warning)
+                : [];
+            updateDependencyWarningPill();
+        }
+
+        function getPrimarySetupWarning() {
+            const playwrightWarning = setupRuntimeWarnings.find(item => String(item.name || '').toLowerCase().includes('playwright'));
+            return playwrightWarning || setupRuntimeWarnings[0] || null;
+        }
+
+        function updateDependencyWarningPill() {
+            const pill = document.getElementById('dependencyWarningPill');
+            const text = document.getElementById('dependencyWarningText');
+            if (!pill || !text) return;
+            const warning = getPrimarySetupWarning();
+            if (!warning) {
+                pill.style.display = 'none';
+                pill.title = 'Open setup details';
+                return;
+            }
+            const name = warning.name || 'Setup';
+            const hint = warning.actionHint ? ` Run: ${warning.actionHint}` : '';
+            text.textContent = `${name} setup`;
+            pill.title = `${warning.warning || 'Setup warning'}${hint}`;
+            pill.style.display = 'inline-flex';
         }
 
         function openIdbInstallInstructions() {
@@ -12440,7 +12624,10 @@
         let captureStatus = {
             xcrun: null,
             adb: null,
-            playwright: null
+            playwright: null,
+            playwrightPackageInstalled: null,
+            playwrightWarning: null,
+            playwrightActionHint: null
         };
 
         // Initialize Capture view when loaded
@@ -12499,6 +12686,9 @@
                 captureStatus.xcrun = status.xcrun;
                 captureStatus.adb = status.adb;
                 captureStatus.playwright = status.playwright;
+                captureStatus.playwrightPackageInstalled = status.playwrightPackageInstalled;
+                captureStatus.playwrightWarning = status.playwrightWarning || null;
+                captureStatus.playwrightActionHint = status.playwrightActionHint || null;
 
                 // Update xcrun status
                 const xcrunEl = document.getElementById('xcrunStatus');
@@ -12541,10 +12731,17 @@
                         dot.style.background = '#34C759';
                         text.textContent = 'available';
                         text.style.color = '#34C759';
+                        playwrightEl.title = '';
+                    } else if (status.playwrightPackageInstalled) {
+                        dot.style.background = 'var(--warning)';
+                        text.textContent = 'browser missing/update';
+                        text.style.color = 'var(--warning)';
+                        playwrightEl.title = `${status.playwrightWarning || 'Playwright browser needs setup'}${status.playwrightActionHint ? ` Run: ${status.playwrightActionHint}` : ''}`;
                     } else {
                         dot.style.background = '#FF3B30';
                         text.textContent = 'not installed';
                         text.style.color = '#FF3B30';
+                        playwrightEl.title = status.playwrightActionHint || 'Install Playwright and Chromium';
                     }
                 }
 
@@ -12567,7 +12764,15 @@
                     const startBtn = document.getElementById('startCaptureWebBtn');
                     if (startBtn) {
                         startBtn.disabled = true;
-                        startBtn.title = 'Playwright not installed';
+                        startBtn.title = status.playwrightWarning || status.playwrightActionHint || 'Playwright is not ready';
+                    }
+                } else if (webSection) {
+                    webSection.style.opacity = '';
+                    webSection.style.pointerEvents = '';
+                    const startBtn = document.getElementById('startCaptureWebBtn');
+                    if (startBtn) {
+                        startBtn.disabled = false;
+                        startBtn.title = '';
                     }
                 }
 
@@ -18236,7 +18441,23 @@
                 const data = await apiCall('/testing/status');
                 testingStatus.maestro = data.maestro || false;
                 testingStatus.playwright = data.playwright || false;
+                testingStatus.playwrightPackageInstalled = data.playwrightPackageInstalled || false;
+                testingStatus.playwrightWarning = data.playwrightWarning || null;
+                testingStatus.playwrightActionHint = data.playwrightActionHint || null;
             } catch {}
+        }
+
+        function getPlaywrightTestingStatusLabel() {
+            if (testingStatus.playwright) return 'Installed and ready';
+            if (testingStatus.playwrightPackageInstalled) return 'Browser missing or needs update';
+            return 'Not installed';
+        }
+
+        function getPlaywrightTestingInstallCommand() {
+            if (testingStatus.playwrightActionHint) return testingStatus.playwrightActionHint;
+            return testingStatus.playwrightPackageInstalled
+                ? 'npx playwright install chromium'
+                : 'npm install -g playwright && npx playwright install chromium';
         }
 
         function updateTestingTab() {
@@ -18556,7 +18777,8 @@
                         <div class="tool-dot ${testingStatus.playwright ? 'installed' : 'missing'}"></div>
                         <div class="tool-info">
                             <div class="tool-name">Playwright</div>
-                            <div class="tool-desc">${testingStatus.playwright ? 'Installed and ready' : 'Not installed'}</div>
+                            <div class="tool-desc">${escapeHtml(getPlaywrightTestingStatusLabel())}</div>
+                            ${testingStatus.playwrightWarning ? `<div class="tool-desc" style="margin-top: 4px; color: var(--warning);">${escapeHtml(testingStatus.playwrightWarning)}</div>` : ''}
                         </div>
                         ${!testingStatus.playwright ? `
                             <button class="claude-code-btn" onclick="askClaudeToInstall('playwright')" title="Install with Claude Code">
@@ -18568,8 +18790,8 @@
 
                     ${!testingStatus.playwright ? `
                         <div class="install-cmd-wrapper">
-                            <code class="install-cmd">npm install -g playwright && npx playwright install</code>
-                            <button class="copy-cmd-btn" onclick="copyToClipboard('npm install -g playwright && npx playwright install')" title="Copy command">
+                            <code class="install-cmd">${escapeHtml(getPlaywrightTestingInstallCommand())}</code>
+                            <button class="copy-cmd-btn" onclick="copyToClipboard('${escapeAttr(getPlaywrightTestingInstallCommand())}')" title="Copy command">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                     <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
@@ -19142,6 +19364,11 @@
                 if (data.summary && data.summary.requiredMissing && data.summary.requiredMissing.length > 0) {
                     openSettings();
                     showToast('Some required dependencies are missing. Check Settings.', 'warning');
+                } else {
+                    const setupWarning = getPrimarySetupWarning();
+                    if (setupWarning) {
+                        showToast(`${setupWarning.name}: setup/update needed. Check Settings.`, 'warning', 7000);
+                    }
                 }
             }).catch(() => {});
 
@@ -25390,6 +25617,35 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
         // =====================================================================
         // SETTINGS
         // =====================================================================
+        function getSetupDependencyStatusLabel(dep) {
+            if (dep?.ready || dep?.status === 'ready') return 'Ready';
+            if (dep?.status === 'warning' || dep?.installed) return 'Needs setup';
+            return dep?.required ? 'Missing required' : 'Missing';
+        }
+
+        function getSetupDependencyDotClass(dep) {
+            if (dep?.ready || dep?.status === 'ready') return 'installed';
+            if (dep?.required && dep?.status === 'missing') return 'error';
+            return dep?.status === 'missing' ? 'error' : 'warning';
+        }
+
+        function getSetupDependencyBadgeClass(dep) {
+            if (dep?.ready || dep?.status === 'ready') return 'ready';
+            return dep?.status === 'missing' ? 'missing' : 'warning';
+        }
+
+        function getSetupDependencyMessage(dep) {
+            if (dep?.warning) return dep.warning;
+            if (dep?.ready || dep?.status === 'ready') {
+                return dep?.version && dep.version !== 'installed' ? `v${dep.version}` : 'Installed and verified';
+            }
+            return dep?.installHint || dep?.actionHint || 'Setup needed';
+        }
+
+        function getSetupDependencyCommand(dep) {
+            return dep?.actionHint || dep?.installHint || '';
+        }
+
         async function loadSetupStatus() {
             const container = document.getElementById('setupList');
             container.innerHTML = '<div style="text-align: center; padding: 24px;"><div class="spinner" style="margin: 0 auto;"></div></div>';
@@ -25398,16 +25654,51 @@ appId: ${platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'}
                 const data = await apiCall('/setup/status');
                 cacheSetupCapabilities(data);
                 const deps = data.dependencies || [];
+                const warnings = Array.isArray(data.summary?.warnings) ? data.summary.warnings : [];
+                const warningHtml = warnings.length ? `
+                    <div class="setup-warning-card">
+                        <strong>Setup attention needed</strong>
+                        <div style="margin-top: 4px;">${warnings.map(item => escapeHtml(item.warning || `${item.name || 'Dependency'} needs setup.`)).join('<br>')}</div>
+                        ${warnings[0]?.actionHint ? `
+                            <div class="setup-warning-command">
+                                <code>${escapeHtml(warnings[0].actionHint)}</code>
+                                <button class="btn btn-secondary btn-small" type="button" onclick="copyToClipboard('${escapeAttr(warnings[0].actionHint)}')">Copy</button>
+                            </div>
+                        ` : ''}
+                    </div>
+                ` : '';
 
-                container.innerHTML = `<div class="deps-grid">${deps.map(dep => `
+                container.innerHTML = `${warningHtml}<div class="deps-grid">${deps.map(dep => {
+                    const statusLabel = getSetupDependencyStatusLabel(dep);
+                    const dotClass = getSetupDependencyDotClass(dep);
+                    const badgeClass = getSetupDependencyBadgeClass(dep);
+                    const message = getSetupDependencyMessage(dep);
+                    const command = getSetupDependencyCommand(dep);
+                    const secondaryMeta = [
+                        dep?.required ? 'Required' : 'Optional',
+                        dep?.details,
+                        dep?.detectedPath ? `Path: ${dep.detectedPath}` : ''
+                    ].filter(Boolean).join(' · ');
+                    return `
                     <div class="tool-status">
-                        <div class="tool-dot ${dep.installed ? 'installed' : 'missing'}"></div>
+                        <div class="tool-dot ${dotClass}"></div>
                         <div class="tool-info">
-                            <div class="tool-name">${dep.name}</div>
-                            <div class="tool-desc">${dep.installed ? (dep.version === 'installed' ? 'Installed' : `v${dep.version}`) : dep.installHint}</div>
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                                <div class="tool-name">${escapeHtml(dep.name || 'Dependency')}</div>
+                                <span class="setup-dependency-badge ${badgeClass}">${escapeHtml(statusLabel)}</span>
+                            </div>
+                            <div class="tool-desc">${escapeHtml(message)}</div>
+                            ${secondaryMeta ? `<div class="setup-dependency-meta">${escapeHtml(secondaryMeta)}</div>` : ''}
+                            ${command ? `
+                                <div class="setup-dependency-command">
+                                    <code>${escapeHtml(command)}</code>
+                                    <button class="btn btn-secondary btn-small" type="button" onclick="copyToClipboard('${escapeAttr(command)}')">Copy</button>
+                                </div>
+                            ` : ''}
                         </div>
                     </div>
-                `).join('')}</div>`;
+                `;
+                }).join('')}</div>`;
             } catch {
                 container.innerHTML = '<p style="color: var(--text-muted); text-align: center;">Failed to load status</p>';
             }

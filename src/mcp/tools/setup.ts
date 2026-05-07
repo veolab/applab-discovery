@@ -5,15 +5,14 @@
 
 import { z } from 'zod';
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import { platform, homedir } from 'node:os';
 import type { MCPTool } from '../server.js';
 import { createTextResult, createJsonResult } from '../server.js';
 import { DATA_DIR, DB_PATH } from '../../db/index.js';
 import { getESVPHealth, listESVPDevices } from '../../core/integrations/esvp.js';
 import { LOCAL_ESVP_SERVER_URL } from '../../core/integrations/esvp-local-runtime.js';
-const requireFromHere = createRequire(import.meta.url);
+import { getPlaywrightRuntimeStatus } from '../../core/testing/playwright.js';
 
 // ============================================================================
 // DEPENDENCY DEFINITIONS
@@ -50,7 +49,7 @@ const dependencies: Dependency[] = [
     versionPattern: /(\d+\.\d+\.\d+)/,
     required: false,
     description: 'Web app testing and browser automation',
-    installHint: 'npm install -g playwright',
+    installHint: 'npm install -g playwright && npx playwright install chromium',
   },
   {
     name: 'Xcode CLI Tools',
@@ -73,14 +72,64 @@ const dependencies: Dependency[] = [
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
-function checkDependency(dep: Dependency): { installed: boolean; version: string | null; error?: string } {
+type DependencyStatus = {
+  installed: boolean;
+  ready: boolean;
+  status: 'ready' | 'warning' | 'missing';
+  version: string | null;
+  error?: string;
+  details?: string;
+  detectedPath?: string | null;
+  browserInstalled?: boolean;
+  browserExecutablePath?: string | null;
+  warning?: string;
+  actionHint?: string;
+};
+
+function getDependencyActionHint(dep: Dependency): string {
+  switch (dep.name) {
+    case 'FFmpeg':
+      return platform() === 'darwin' ? 'brew install ffmpeg' : 'sudo apt install -y ffmpeg';
+    case 'ADB':
+      return platform() === 'darwin' ? 'brew install android-platform-tools' : 'sudo apt install -y adb';
+    case 'Playwright':
+      return 'npm install -g playwright && npx playwright install chromium';
+    default:
+      return dep.installHint;
+  }
+}
+
+function formatDependencyError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || 'Command failed');
+  return message.length > 1200 ? `${message.slice(0, 1200)}...` : message;
+}
+
+function createMissingDependencyStatus(dep: Dependency, error?: unknown): DependencyStatus {
+  return {
+    installed: false,
+    ready: false,
+    status: 'missing',
+    version: null,
+    error: error ? formatDependencyError(error) : undefined,
+    warning: `${dep.name} is not installed. ${dep.description} will be unavailable until it is installed.`,
+    actionHint: getDependencyActionHint(dep),
+  };
+}
+
+async function checkDependency(dep: Dependency): Promise<DependencyStatus> {
   // Special handling for Maestro - check multiple paths
   if (dep.name === 'Maestro CLI') {
     return checkMaestro(dep);
   }
   // Special handling for Playwright - check module resolvable by DiscoveryLab, not npx auto-download
   if (dep.name === 'Playwright') {
-    return checkPlaywright(dep);
+    return checkPlaywright();
+  }
+  if (dep.name === 'Xcode CLI Tools') {
+    return checkXcode(dep);
+  }
+  if (dep.name === 'ADB') {
+    return checkAdb(dep);
   }
 
   try {
@@ -88,36 +137,31 @@ function checkDependency(dep: Dependency): { installed: boolean; version: string
     const match = output.match(dep.versionPattern);
     return {
       installed: true,
+      ready: true,
+      status: 'ready',
       version: match ? match[1] || 'installed' : 'installed',
     };
   } catch (error) {
-    return {
-      installed: false,
-      version: null,
-      error: error instanceof Error ? error.message : 'Command failed',
-    };
+    return createMissingDependencyStatus(dep, error);
   }
 }
 
-function checkPlaywright(dep: Dependency): { installed: boolean; version: string | null; error?: string } {
-  try {
-    const pkgPath = requireFromHere.resolve('playwright/package.json');
-    const raw = readFileSync(pkgPath, 'utf-8');
-    const pkg = JSON.parse(raw) as { version?: string };
-    return {
-      installed: true,
-      version: typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version.trim() : 'installed',
-    };
-  } catch (error) {
-    return {
-      installed: false,
-      version: null,
-      error: error instanceof Error ? error.message : 'Playwright package not found',
-    };
-  }
+async function checkPlaywright(): Promise<DependencyStatus> {
+  const status = await getPlaywrightRuntimeStatus();
+  return {
+    installed: status.packageInstalled,
+    ready: status.ready,
+    status: status.ready ? 'ready' : (status.packageInstalled ? 'warning' : 'missing'),
+    version: status.version,
+    error: status.error,
+    browserInstalled: status.ready,
+    browserExecutablePath: status.executablePath,
+    warning: status.ready ? undefined : status.warning,
+    actionHint: status.ready ? undefined : status.actionHint,
+  };
 }
 
-function checkMaestro(dep: Dependency): { installed: boolean; version: string | null; error?: string } {
+function checkMaestro(dep: Dependency): DependencyStatus {
   const homeDir = homedir();
 
   // Common Maestro installation paths
@@ -137,6 +181,8 @@ function checkMaestro(dep: Dependency): { installed: boolean; version: string | 
     const match = output.match(dep.versionPattern);
     return {
       installed: true,
+      ready: true,
+      status: 'ready',
       version: match ? match[1] : 'installed',
     };
   } catch {}
@@ -153,23 +199,120 @@ function checkMaestro(dep: Dependency): { installed: boolean; version: string | 
         const match = output.match(dep.versionPattern);
         return {
           installed: true,
+          ready: true,
+          status: 'ready',
           version: match ? match[1] : 'installed',
+          detectedPath: maestroPath,
         };
-      } catch {
-        // File exists but couldn't get version - still consider it installed
+      } catch (error) {
+        // File exists but couldn't get version - report as partial instead of green.
         return {
           installed: true,
+          ready: false,
+          status: 'warning',
           version: 'installed',
+          detectedPath: maestroPath,
+          error: formatDependencyError(error),
+          warning: 'Maestro CLI was found, but DiscoveryLab could not run it to verify the version. Mobile automation may fail until Maestro is repaired or reinstalled.',
+          actionHint: getDependencyActionHint(dep),
         };
       }
     }
   }
 
-  return {
-    installed: false,
-    version: null,
-    error: 'Maestro not found in PATH or common installation directories',
-  };
+  return createMissingDependencyStatus(dep, 'Maestro not found in PATH or common installation directories');
+}
+
+function checkXcode(dep: Dependency): DependencyStatus {
+  if (platform() !== 'darwin') {
+    return {
+      installed: false,
+      ready: false,
+      status: 'missing',
+      version: null,
+      warning: 'Xcode CLI Tools are only available on macOS.',
+    };
+  }
+
+  let developerPath = '';
+  try {
+    developerPath = execSync('xcode-select -p', { encoding: 'utf-8', timeout: 5000 }).trim();
+  } catch (error) {
+    return createMissingDependencyStatus(dep, error);
+  }
+
+  try {
+    execSync('xcrun simctl help', { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' });
+    return {
+      installed: true,
+      ready: true,
+      status: 'ready',
+      version: 'installed',
+      detectedPath: developerPath,
+      details: 'simctl available',
+    };
+  } catch (error) {
+    return {
+      installed: true,
+      ready: false,
+      status: 'warning',
+      version: 'installed',
+      detectedPath: developerPath,
+      error: formatDependencyError(error),
+      warning: 'Xcode CLI Tools are installed, but simctl is not available. iOS Simulator capture and replay may fail until Xcode command line tools are repaired.',
+      actionHint: 'xcode-select --install',
+    };
+  }
+}
+
+function checkAdb(dep: Dependency): DependencyStatus {
+  const candidates = [
+    'adb',
+    '/opt/homebrew/bin/adb',
+    '/usr/local/bin/adb',
+    process.env.ANDROID_HOME ? `${process.env.ANDROID_HOME}/platform-tools/adb` : '',
+    process.env.ANDROID_SDK_ROOT ? `${process.env.ANDROID_SDK_ROOT}/platform-tools/adb` : '',
+  ].filter(Boolean);
+
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+
+    if (candidate !== 'adb' && !existsSync(candidate)) continue;
+
+    try {
+      const command = candidate === 'adb' ? 'adb version' : `"${candidate}" version`;
+      const output = execSync(command, {
+        encoding: 'utf-8',
+        timeout: 5000,
+        shell: '/bin/bash',
+      }).trim();
+      const match = output.match(dep.versionPattern);
+      return {
+        installed: true,
+        ready: true,
+        status: 'ready',
+        version: match ? match[1] : 'installed',
+        detectedPath: candidate === 'adb' ? null : candidate,
+      };
+    } catch (error) {
+      if (candidate !== 'adb' && existsSync(candidate)) {
+        return {
+          installed: true,
+          ready: false,
+          status: 'warning',
+          version: 'installed',
+          detectedPath: candidate,
+          error: formatDependencyError(error),
+          warning: 'ADB was found, but DiscoveryLab could not run it. Android Emulator capture and replay may fail until Android platform tools are repaired.',
+          actionHint: getDependencyActionHint(dep),
+        };
+      }
+    }
+  }
+
+  return createMissingDependencyStatus(dep, 'adb not found in PATH or common Android SDK locations');
 }
 
 type ReplayExecutorStatus = {
@@ -228,17 +371,28 @@ export const setupStatusTool: MCPTool = {
         continue;
       }
 
-      const status = checkDependency(dep);
+      const status = await checkDependency(dep);
       results.push({
         name: dep.name,
         installed: status.installed,
+        ready: status.ready,
+        status: status.status,
         version: status.version,
         required: dep.required,
         description: dep.description,
-        installHint: status.installed ? null : dep.installHint,
+        installHint: status.ready ? null : (status.actionHint || getDependencyActionHint(dep)),
+        details: status.details || null,
+        detectedPath: status.detectedPath || null,
+        error: status.error || null,
+        ...(typeof status.browserInstalled === 'boolean' ? { browserInstalled: status.browserInstalled } : {}),
+        ...(typeof status.browserExecutablePath === 'string' || status.browserExecutablePath === null
+          ? { browserExecutablePath: status.browserExecutablePath }
+          : {}),
+        ...(status.warning ? { warning: status.warning } : {}),
+        ...(status.actionHint ? { actionHint: status.actionHint } : {}),
       });
 
-      if (dep.required && !status.installed) {
+      if (dep.required && !status.ready) {
         allRequiredInstalled = false;
       }
     }
@@ -262,8 +416,16 @@ export const setupStatusTool: MCPTool = {
       summary: {
         total: results.length,
         installed: results.filter((r) => r.installed).length,
-        missing: results.filter((r) => !r.installed).length,
-        requiredMissing: results.filter((r) => r.required && !r.installed).map((r) => r.name),
+        ready: results.filter((r) => r.ready).length,
+        missing: results.filter((r) => r.status === 'missing').length,
+        attention: results.filter((r) => r.status !== 'ready').length,
+        requiredMissing: results.filter((r) => r.required && !r.ready).map((r) => r.name),
+        warnings: results.filter((r) => r.status !== 'ready').map((r) => ({
+          name: r.name,
+          status: r.status,
+          warning: r.warning || `${r.name} needs setup.`,
+          actionHint: r.actionHint || r.installHint,
+        })),
       },
     });
   },
@@ -292,7 +454,11 @@ export const setupCheckTool: MCPTool = {
       return createTextResult(`Unknown tool: ${params.tool}`);
     }
 
-    const status = checkDependency(dep);
+    const status = await checkDependency(dep);
+
+    if (!status.ready) {
+      return createTextResult(`${dep.name} needs setup/update.\n${status.warning || `${dep.name} is not ready.`}\nRun: ${status.actionHint || getDependencyActionHint(dep)}`);
+    }
 
     if (status.installed) {
       return createTextResult(`${dep.name} is installed (version: ${status.version})`);
@@ -310,11 +476,18 @@ export const setupReplayStatusTool: MCPTool = {
   description: 'Check whether this machine can run local ESVP replay for Claude Desktop using iOS Simulator or Android.',
   inputSchema: z.object({}),
   handler: async () => {
-    const adbStatus = checkDependency(dependencies[4]);
+    const adbStatus = await checkDependency(dependencies[4]);
     const xcodeStatus = platform() === 'darwin'
-      ? checkDependency(dependencies[3])
-      : { installed: false, version: null, error: 'Xcode CLI Tools are only available on macOS' };
-    const maestroStatus = checkDependency(dependencies[1]);
+      ? await checkDependency(dependencies[3])
+      : {
+          installed: false,
+          ready: false,
+          status: 'missing' as const,
+          version: null,
+          error: 'Xcode CLI Tools are only available on macOS',
+          warning: 'Xcode CLI Tools are only available on macOS.',
+        };
+    const maestroStatus = await checkDependency(dependencies[1]);
 
     const deviceEnvelope = await listESVPDevices('all').catch((error) => ({
       adb: { devices: [], error: error instanceof Error ? error.message : String(error) },
@@ -332,20 +505,20 @@ export const setupReplayStatusTool: MCPTool = {
 
     const android = buildReplayExecutorStatus({
       devices: androidDevices,
-      dependencyReady: adbStatus.installed,
-      missing: adbStatus.installed ? [] : ['adb'],
+      dependencyReady: adbStatus.ready,
+      missing: adbStatus.ready ? [] : ['adb'],
     });
     const iosSimulator = buildReplayExecutorStatus({
       devices: iosSimDevices,
-      dependencyReady: xcodeStatus.installed,
-      missing: xcodeStatus.installed ? [] : ['xcode'],
+      dependencyReady: xcodeStatus.ready,
+      missing: xcodeStatus.ready ? [] : ['xcode'],
     });
     const iosMaestro = buildReplayExecutorStatus({
       devices: maestroIosDevices,
-      dependencyReady: maestroStatus.installed && xcodeStatus.installed,
+      dependencyReady: maestroStatus.ready && xcodeStatus.ready,
       missing: [
-        ...(maestroStatus.installed ? [] : ['maestro']),
-        ...(xcodeStatus.installed ? [] : ['xcode']),
+        ...(maestroStatus.ready ? [] : ['maestro']),
+        ...(xcodeStatus.ready ? [] : ['xcode']),
       ],
     });
 
@@ -380,18 +553,24 @@ export const setupReplayStatusTool: MCPTool = {
       dependencies: {
         adb: {
           installed: adbStatus.installed,
+          ready: adbStatus.ready,
           version: adbStatus.version,
-          installHint: adbStatus.installed ? null : dependencies[4].installHint,
+          warning: adbStatus.warning || null,
+          installHint: adbStatus.ready ? null : (adbStatus.actionHint || getDependencyActionHint(dependencies[4])),
         },
         xcode: {
           installed: xcodeStatus.installed,
+          ready: xcodeStatus.ready,
           version: xcodeStatus.version,
-          installHint: xcodeStatus.installed ? null : dependencies[3].installHint,
+          warning: xcodeStatus.warning || null,
+          installHint: xcodeStatus.ready ? null : (xcodeStatus.actionHint || getDependencyActionHint(dependencies[3])),
         },
         maestro: {
           installed: maestroStatus.installed,
+          ready: maestroStatus.ready,
           version: maestroStatus.version,
-          installHint: maestroStatus.installed ? null : dependencies[1].installHint,
+          warning: maestroStatus.warning || null,
+          installHint: maestroStatus.ready ? null : (maestroStatus.actionHint || getDependencyActionHint(dependencies[1])),
         },
       },
       dataDirectory: DATA_DIR,
@@ -444,60 +623,60 @@ export const setupInstallTool: MCPTool = {
 
     // FFmpeg
     if (toolToInstall === 'all' || toolToInstall === 'ffmpeg') {
-      const status = checkDependency(dependencies[0]);
-      if (!status.installed) {
+      const status = await checkDependency(dependencies[0]);
+      if (!status.ready) {
         installCommands.push({
           name: 'FFmpeg',
-          command: isMac ? 'brew install ffmpeg' : 'sudo apt install -y ffmpeg',
-          description: 'Required for video processing and export',
+          command: status.actionHint || getDependencyActionHint(dependencies[0]),
+          description: status.warning || 'Required for video processing and export',
         });
       }
     }
 
     // Maestro
     if (toolToInstall === 'all' || toolToInstall === 'maestro') {
-      const status = checkDependency(dependencies[1]);
-      if (!status.installed) {
+      const status = await checkDependency(dependencies[1]);
+      if (!status.ready) {
         installCommands.push({
           name: 'Maestro CLI',
-          command: 'curl -Ls "https://get.maestro.mobile.dev" | bash',
-          description: 'Mobile app testing automation',
+          command: status.actionHint || getDependencyActionHint(dependencies[1]),
+          description: status.warning || 'Mobile app testing automation',
         });
       }
     }
 
     // Playwright
     if (toolToInstall === 'all' || toolToInstall === 'playwright') {
-      const status = checkDependency(dependencies[2]);
-      if (!status.installed) {
+      const status = await checkDependency(dependencies[2]);
+      if (!status.ready) {
         installCommands.push({
           name: 'Playwright',
-          command: 'npm install -g playwright && npx playwright install',
-          description: 'Web app testing and browser automation',
+          command: status.actionHint || getDependencyActionHint(dependencies[2]),
+          description: status.warning || 'Web app testing and browser automation',
         });
       }
     }
 
     // Xcode CLI (macOS only)
     if (isMac && (toolToInstall === 'all' || toolToInstall === 'xcode')) {
-      const status = checkDependency(dependencies[3]);
-      if (!status.installed) {
+      const status = await checkDependency(dependencies[3]);
+      if (!status.ready) {
         installCommands.push({
           name: 'Xcode CLI Tools',
-          command: 'xcode-select --install',
-          description: 'Required for iOS Simulator access',
+          command: status.actionHint || getDependencyActionHint(dependencies[3]),
+          description: status.warning || 'Required for iOS Simulator access',
         });
       }
     }
 
     // ADB
     if (toolToInstall === 'all' || toolToInstall === 'adb') {
-      const status = checkDependency(dependencies[4]);
-      if (!status.installed) {
+      const status = await checkDependency(dependencies[4]);
+      if (!status.ready) {
         installCommands.push({
           name: 'ADB (Android Debug Bridge)',
-          command: isMac ? 'brew install android-platform-tools' : 'sudo apt install -y adb',
-          description: 'Required for Android Emulator access',
+          command: status.actionHint || getDependencyActionHint(dependencies[4]),
+          description: status.warning || 'Required for Android Emulator access',
         });
       }
     }

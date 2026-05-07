@@ -2216,6 +2216,57 @@ function normalizeProjectRecord(project: ProjectRecord): NormalizedProjectRecord
   return withProjectAnalysisProgress(normalized) as NormalizedProjectRecord;
 }
 
+function isPlaywrightBrowserInstallError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes("Executable doesn't exist")
+    || message.includes('Looks like Playwright was just installed or updated')
+    || message.includes('Please run the following command to download new browsers');
+}
+
+async function launchChromiumWithFallback(options: Record<string, unknown> = {}): Promise<any> {
+  const { chromium } = await import('playwright');
+  const attempts: Array<{ label: string; options: Record<string, unknown> }> = [];
+  const seen = new Set<string>();
+  const addAttempt = (label: string, launchOptions: Record<string, unknown>) => {
+    const key = JSON.stringify(launchOptions);
+    if (seen.has(key)) return;
+    seen.add(key);
+    attempts.push({ label, options: launchOptions });
+  };
+
+  if (typeof options.channel === 'string') {
+    addAttempt(String(options.channel), options);
+  } else {
+    addAttempt('Playwright Chromium', options);
+  }
+
+  for (const channel of ['chrome', 'msedge', 'chrome-beta']) {
+    addAttempt(channel, { ...options, channel });
+  }
+
+  if (typeof options.channel === 'string') {
+    const { channel: _channel, ...withoutChannel } = options;
+    addAttempt('Playwright Chromium', withoutChannel);
+  }
+
+  let lastError: unknown = null;
+  for (const attempt of attempts) {
+    try {
+      return await chromium.launch(attempt.options as any);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (isPlaywrightBrowserInstallError(lastError)) {
+    throw new Error(
+      'Playwright browser is not installed on this machine. AppLab tried bundled Chromium and installed Chrome/Edge. Run `npx playwright install chromium` in the AppLab Discovery project, then retry the export.'
+    );
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Could not launch browser'));
+}
+
 function resolveFlowCodePath(recordingBaseDir: string | null): string | null {
   if (!recordingBaseDir || !existsSync(recordingBaseDir)) return null;
   const candidates = [
@@ -2930,9 +2981,8 @@ app.post('/api/flow-maps/:id/export', async (c) => {
 
     if (format === 'png') {
       const outputPath = join(exportDir, background === 'transparent' ? 'flow-map-transparent.png' : 'flow-map.png');
-      const { chromium } = await import('playwright');
       const bounds = computeFlowMapCollectionBounds(collection, { viewMode, showArrows });
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchChromiumWithFallback({ headless: true });
       try {
         const page = await browser.newPage({
           viewport: {
@@ -4496,8 +4546,7 @@ app.post('/api/capture/web/start', async (c) => {
     };
 
     try {
-      const { chromium } = await import('playwright');
-      browser = await chromium.launch({
+      browser = await launchChromiumWithFallback({
         headless: false,
         channel: 'chrome'  // Use user's installed Chrome instead of Playwright's Chromium
       });
@@ -6900,9 +6949,7 @@ app.post('/api/visualization/screenshot', async (c) => {
     const serverPort = process.env.PORT || '3847';
     const vizUrl = `http://localhost:${serverPort}/api/visualization/${projectId}/${templateId}`;
 
-    const { chromium } = await import('playwright');
-
-    const browser = await chromium.launch({ headless: true });
+    const browser = await launchChromiumWithFallback({ headless: true });
     const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
 
     await page.goto(vizUrl, { waitUntil: 'networkidle' });
@@ -7473,10 +7520,18 @@ app.get('/api/testing/status', async (c) => {
     const { execSync } = await import('node:child_process');
     const { existsSync } = await import('node:fs');
     const { homedir } = await import('node:os');
-    const { isPlaywrightInstalled } = await import('../core/testing/playwright.js');
+    const { getPlaywrightRuntimeStatus } = await import('../core/testing/playwright.js');
 
     let maestroInstalled = false;
-    let playwrightInstalled = false;
+    let playwrightStatus: Awaited<ReturnType<typeof getPlaywrightRuntimeStatus>> = {
+      packageInstalled: false,
+      version: null,
+      browserInstalled: false,
+      ready: false,
+      executablePath: null,
+      warning: 'Playwright status could not be checked.',
+      actionHint: 'npm install -g playwright && npx playwright install chromium',
+    };
     let xcrunAvailable = false;
     let adbAvailable = false;
 
@@ -7491,8 +7546,17 @@ app.get('/api/testing/status', async (c) => {
       }
     } catch {}
 
-    // Check for Playwright
-    playwrightInstalled = await isPlaywrightInstalled().catch(() => false);
+    // Check for Playwright package and actual runnable Chromium browser.
+    playwrightStatus = await getPlaywrightRuntimeStatus().catch((error) => ({
+      packageInstalled: false,
+      version: null,
+      browserInstalled: false,
+      ready: false,
+      executablePath: null,
+      warning: 'Playwright status could not be checked. Browser capture and web tests may fail until setup is repaired.',
+      actionHint: 'npm install -g playwright && npx playwright install chromium',
+      error: error instanceof Error ? error.message : String(error),
+    }));
 
     // Check for xcrun (iOS Simulator support)
     try {
@@ -7512,7 +7576,14 @@ app.get('/api/testing/status', async (c) => {
 
     return c.json({
       maestro: maestroInstalled,
-      playwright: playwrightInstalled,
+      playwright: playwrightStatus.ready,
+      playwrightPackageInstalled: playwrightStatus.packageInstalled,
+      playwrightBrowserInstalled: playwrightStatus.ready,
+      playwrightVersion: playwrightStatus.version,
+      playwrightExecutablePath: playwrightStatus.executablePath,
+      playwrightWarning: playwrightStatus.ready ? null : playwrightStatus.warning,
+      playwrightActionHint: playwrightStatus.ready ? null : playwrightStatus.actionHint,
+      playwrightError: playwrightStatus.ready ? null : playwrightStatus.error,
       xcrun: xcrunAvailable,
       adb: adbAvailable
     });

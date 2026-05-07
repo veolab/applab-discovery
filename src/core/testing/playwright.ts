@@ -55,6 +55,17 @@ export interface PlaywrightTestResult {
   traces?: string[];
 }
 
+export interface PlaywrightRuntimeStatus {
+  packageInstalled: boolean;
+  version: string | null;
+  browserInstalled: boolean;
+  ready: boolean;
+  executablePath: string | null;
+  warning?: string;
+  actionHint?: string;
+  error?: string;
+}
+
 export interface PlaywrightAction {
   type: string;
   selector?: string;
@@ -102,9 +113,93 @@ export async function getPlaywrightVersion(): Promise<string | null> {
   return resolveInstalledPlaywrightVersion();
 }
 
+function isPlaywrightBrowserInstallErrorMessage(message: string): boolean {
+  return message.includes("Executable doesn't exist")
+    || message.includes('Looks like Playwright was just installed or updated')
+    || message.includes('Please run the following command to download new browsers');
+}
+
+function truncatePlaywrightRuntimeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.length > 1600 ? `${message.slice(0, 1600)}...` : message;
+}
+
+export async function getPlaywrightRuntimeStatus(): Promise<PlaywrightRuntimeStatus> {
+  const version = resolveInstalledPlaywrightVersion();
+  if (!version) {
+    return {
+      packageInstalled: false,
+      version: null,
+      browserInstalled: false,
+      ready: false,
+      executablePath: null,
+      warning: 'Playwright is not installed. Browser capture, web tests, and PNG export need Playwright plus its Chromium browser.',
+      actionHint: 'npm install -g playwright && npx playwright install chromium',
+    };
+  }
+
+  let executablePath: string | null = null;
+  try {
+    const playwright = requireFromHere('playwright') as typeof import('playwright');
+    try {
+      executablePath = playwright.chromium.executablePath();
+    } catch {
+      executablePath = null;
+    }
+
+    let browser: { close: () => Promise<void> } | null = null;
+    try {
+      browser = await playwright.chromium.launch({ headless: true, timeout: 5000 });
+      await browser.close();
+      return {
+        packageInstalled: true,
+        version,
+        browserInstalled: true,
+        ready: true,
+        executablePath,
+      };
+    } catch (error) {
+      try {
+        await browser?.close();
+      } catch {}
+
+      const message = truncatePlaywrightRuntimeError(error);
+      const browserMissing = isPlaywrightBrowserInstallErrorMessage(message);
+      return {
+        packageInstalled: true,
+        version,
+        browserInstalled: false,
+        ready: false,
+        executablePath,
+        warning: browserMissing
+          ? 'Playwright is installed, but its Chromium browser is missing or outdated. Web capture, tests, and PNG export may fail until browsers are installed.'
+          : 'Playwright is installed, but Chromium could not be launched. Web capture, tests, and PNG export may fail until setup is repaired.',
+        actionHint: 'npx playwright install chromium',
+        error: message,
+      };
+    }
+  } catch (error) {
+    return {
+      packageInstalled: true,
+      version,
+      browserInstalled: false,
+      ready: false,
+      executablePath,
+      warning: 'Playwright is installed, but DiscoveryLab could not load its runtime. Web capture, tests, and PNG export may fail until setup is repaired.',
+      actionHint: 'npm install -g playwright && npx playwright install chromium',
+      error: truncatePlaywrightRuntimeError(error),
+    };
+  }
+}
+
+export async function isPlaywrightReady(): Promise<boolean> {
+  const status = await getPlaywrightRuntimeStatus();
+  return status.ready;
+}
+
 export async function installPlaywrightBrowsers(): Promise<{ success: boolean; error?: string }> {
   try {
-    await execAsync('npx playwright install');
+    await execAsync('npx playwright install chromium');
     return { success: true };
   } catch (error) {
     return {
@@ -350,11 +445,18 @@ export const PlaywrightActions = {
 // RUN PLAYWRIGHT TEST
 // ============================================================================
 export async function runPlaywrightTest(options: PlaywrightRunOptions): Promise<PlaywrightTestResult> {
-  const installed = await isPlaywrightInstalled();
-  if (!installed) {
+  const runtimeStatus = await getPlaywrightRuntimeStatus();
+  if (!runtimeStatus.packageInstalled) {
     return {
       success: false,
       error: 'Playwright is not installed. Install with: npm install -D @playwright/test && npx playwright install',
+    };
+  }
+  if (!runtimeStatus.ready) {
+    return {
+      success: false,
+      error: `${runtimeStatus.warning || 'Playwright browser runtime is not ready.'} Run: ${runtimeStatus.actionHint || 'npx playwright install chromium'}`,
+      output: runtimeStatus.error,
     };
   }
 
@@ -578,11 +680,17 @@ export async function startPlaywrightCodegen(
     outputPath?: string;
   } = {}
 ): Promise<{ success: boolean; error?: string }> {
-  const installed = await isPlaywrightInstalled();
-  if (!installed) {
+  const runtimeStatus = await getPlaywrightRuntimeStatus();
+  if (!runtimeStatus.packageInstalled) {
     return {
       success: false,
       error: 'Playwright is not installed',
+    };
+  }
+  if (!runtimeStatus.ready) {
+    return {
+      success: false,
+      error: `${runtimeStatus.warning || 'Playwright browser runtime is not ready.'} Run: ${runtimeStatus.actionHint || 'npx playwright install chromium'}`,
     };
   }
 
