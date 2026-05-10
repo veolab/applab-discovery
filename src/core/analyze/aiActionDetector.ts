@@ -143,6 +143,34 @@ function normalizeTapElementLabel(value?: string): string {
   return variants[variants.length - 1] || variants[0] || raw;
 }
 
+function isValidTapCoordinate(value?: { x: number; y: number }): value is { x: number; y: number } {
+  if (!value) return false;
+  return Number.isFinite(value.x) &&
+    Number.isFinite(value.y) &&
+    value.x >= 0 &&
+    value.x <= 100 &&
+    value.y >= 0 &&
+    value.y <= 100;
+}
+
+function inferMaestroAppId(appName?: string): string {
+  const normalized = normalizeWhitespace(appName).toLowerCase();
+  if (!normalized) return '';
+
+  const knownApps: Array<[RegExp, string]> = [
+    [/\bapple\s+maps\b|\bmapas da apple\b/i, 'com.apple.Maps'],
+    [/\bapple\s+calendar\b|\bcalend[aá]rio da apple\b/i, 'com.apple.mobilecal'],
+    [/\bsafari\b/i, 'com.apple.mobilesafari'],
+    [/\bapple\s+notes\b|\bnotas da apple\b/i, 'com.apple.mobilenotes'],
+    [/\bapple\s+photos\b|\bfotos da apple\b/i, 'com.apple.mobileslideshow'],
+    [/\bapple\s+settings\b|\bajustes da apple\b/i, 'com.apple.Preferences'],
+    [/\bapple\s+mail\b/i, 'com.apple.mobilemail'],
+  ];
+
+  const match = knownApps.find(([pattern]) => pattern.test(normalized));
+  return match?.[1] || '';
+}
+
 function normalizeDetectedAction(action: DetectedAction): DetectedAction {
   const normalized: DetectedAction = {
     ...action,
@@ -550,8 +578,14 @@ export function generateMaestroYaml(
     lines.push('');
   }
 
-  lines.push('appId: ' + (appId || 'com.example.app # TODO: Set your app ID'));
-  lines.push('');
+  const resolvedAppId = normalizeWhitespace(appId) || inferMaestroAppId(appName);
+  if (resolvedAppId) {
+    lines.push(`appId: ${resolvedAppId}`);
+    lines.push('');
+  } else {
+    lines.push('# appId: unresolved');
+    lines.push('');
+  }
 
   if (appName) {
     lines.push(`# App: ${appName}`);
@@ -560,6 +594,11 @@ export function generateMaestroYaml(
 
   lines.push('---');
   lines.push('');
+
+  if (resolvedAppId && !actions.some(action => action.type === 'launch')) {
+    lines.push('- launchApp');
+    lines.push('');
+  }
 
   for (const action of actions) {
     if (action.confidence < 0.7) continue;
@@ -571,15 +610,13 @@ export function generateMaestroYaml(
         break;
 
       case 'tap':
-        if (action.element) {
+        if (isValidTapCoordinate(action.coordinates)) {
+          lines.push(`- tapOn:`);
+          lines.push(`    point: "${Math.round(action.coordinates.x)}%,${Math.round(action.coordinates.y)}%"`);
+        } else if (action.element) {
           const literalElement = normalizeTapElementLabel(action.element || commentDescription);
-          // Try to tap by text first
           lines.push(`- tapOn:`);
           lines.push(`    text: "${escapeYaml(literalElement)}"`);
-        } else if (action.coordinates) {
-          // Fall back to coordinates
-          lines.push(`- tapOn:`);
-          lines.push(`    point: "${action.coordinates.x}%,${action.coordinates.y}%"`);
         }
         break;
 
@@ -604,8 +641,8 @@ export function generateMaestroYaml(
             : action.direction === 'down' ? 'UP'
             : action.direction === 'left' ? 'RIGHT'
             : 'LEFT';
-          lines.push(`- scroll:`);
-          lines.push(`    direction: ${direction}`);
+          lines.push(`- swipe:`);
+          lines.push(`    direction: "${direction}"`);
         }
         break;
 

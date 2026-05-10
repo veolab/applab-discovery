@@ -12211,8 +12211,7 @@
                 // Use Analysis tab live viewer (shows inline, expands smoothly with auto-scroll)
                 await startAnalysisLiveStream(platform, recordingId);
             } else {
-                // Web project - use web agent mode
-                openAgentMode(currentProject.id);
+                await runWebProjectReplay(currentProject.id);
             }
         }
 
@@ -19871,52 +19870,7 @@
             }
 
             try {
-                // Fetch recording data to get actions/steps
-                const recordingResponse = await fetch(`/api/testing/mobile/recordings/${lastMobileRecording.projectId}`);
-                const recordingData = await recordingResponse.json();
-
-                if (!recordingResponse.ok || !recordingData.session) {
-                    throw new Error('Recording not found');
-                }
-
-                const session = recordingData.session;
-                const actions = session.actions || [];
-
-                // Get screenshot paths
-                const screenshotPaths = await fetchScreenshotPaths(session);
-
-                // Convert to action format for inline panel
-                let replayActions = actions.map((a, i) => ({
-                    type: a.type || 'tap',
-                    description: a.description || `Step ${i + 1}`,
-                    screenshotPath: a.screenshotPath || screenshotPaths[i]
-                }));
-
-                // If no actions but have screenshots, use those
-                if (replayActions.length === 0 && screenshotPaths.length > 0) {
-                    replayActions = screenshotPaths.map((path, i) => ({
-                        type: 'screenshot',
-                        description: `Screenshot ${i + 1}`,
-                        screenshotPath: path
-                    }));
-                }
-
-                // Show inline agent panel (not fullscreen)
-                showInlineAgentPanel(lastMobileRecording.projectId, replayActions, screenshotPaths);
-
-                showToast('Running Maestro test...', 'info');
-
-                // Start the actual replay on the device (in background)
-                fetch(`/api/testing/mobile/recordings/${lastMobileRecording.projectId}/replay`, {
-                    method: 'POST'
-                }).then(response => response.json()).then(data => {
-                    if (!data.success && data.error) {
-                        console.warn('Device replay note:', data.error);
-                    }
-                }).catch(err => {
-                    console.warn('Device replay skipped:', err.message);
-                });
-
+                await startMobileReplayOnDevice(lastMobileRecording.projectId, { viewer: 'mobile' });
             } catch (error) {
                 showToast('Failed to replay: ' + error.message, 'error');
             }
@@ -22076,54 +22030,89 @@
             }
 
             stopWebLiveViewer();
+            await runWebRecordingReplay(recorderSession.id, recorderSession.name || 'web recording');
+        }
 
-            // Set viewport from recording session
-            if (recorderSession.viewport) {
-                agentModeState.viewport = recorderSession.viewport;
-            } else {
-                agentModeState.viewport = { width: 1920, height: 1080 };
+        async function openWebRecordingCodeModalForReplay(recordingId, focusVars = false) {
+            if (!recordingId) return;
+            try {
+                const response = await fetch(`/api/recorder/recordings/${encodeURIComponent(recordingId)}`);
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || 'Failed to load Playwright script');
+                showCodeModal(data.specCode || '', 'typescript', recordingId, 'web');
+                if (focusVars) setTimeout(() => switchCodeModalTab('vars'), 120);
+            } catch (error) {
+                showToast(error.message || 'Failed to open Playwright script', 'error');
             }
+        }
 
-            // Load actions from recording session
-            if (recorderSession.actions && recorderSession.actions.length > 0) {
-                webLiveViewerState.active = true;
-                webLiveViewerState.currentStep = 0;
-                webLiveViewerState.totalSteps = recorderSession.actions.length;
-                webLiveViewerState.actions = recorderSession.actions.map((a, i) => ({
-                    type: a.type || 'action',
-                    description: a.description || `${a.type} action`,
-                    imagePath: a.screenshotPath,
-                    selector: a.selector,
-                    value: a.value,
-                    x: a.x,
-                    y: a.y,
-                    delay: 1500
-                }));
+        function formatPlaywrightReplaySummary(result) {
+            if (!result) return 'Playwright replay finished';
+            const passed = Number(result.passed ?? 0);
+            const failed = Number(result.failed ?? 0);
+            const skipped = Number(result.skipped ?? 0);
+            return `Playwright replay finished: ${passed} passed, ${failed} failed, ${skipped} skipped`;
+        }
 
-                // Show inline replay viewer
-                const viewer = document.getElementById('webLiveViewer');
-                if (viewer) {
-                    viewer.classList.add('active');
-                    setTimeout(() => {
-                        viewer.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    }, 150);
+        async function runStoredWebReplay(endpoint, options = {}) {
+            const label = options.label || 'web flow';
+            const recordingId = options.recordingId || null;
+            try {
+                showToast(`Running captured ${label} in Chromium...`, 'info', 7000);
+
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        headless: false,
+                        browser: 'chromium',
+                        video: 'retain-on-failure',
+                        screenshot: 'only-on-failure',
+                        trace: 'retain-on-failure'
+                    })
+                });
+                const data = await response.json().catch(() => ({}));
+
+                if (!response.ok) {
+                    const replayRecordingId = data.recordingId || recordingId;
+                    if (Array.isArray(data?.missingKeys) && data.missingKeys.length > 0 && replayRecordingId) {
+                        showToast(`Missing test variables: ${data.missingKeys.join(', ')}`, 'warning', 7000);
+                        await openWebRecordingCodeModalForReplay(replayRecordingId, true);
+                    } else if (replayRecordingId && /variables/i.test(String(data.error || ''))) {
+                        await openWebRecordingCodeModalForReplay(replayRecordingId, true);
+                    }
+                    throw new Error(data.error || data.result?.error || 'Failed to run Playwright replay');
                 }
 
-                const urlEl = document.getElementById('webLiveViewerUrl');
-                if (urlEl) {
-                    const sessionName = recorderSession?.name || 'Test Replay';
-                    const sessionUrl = recorderSession?.url || '';
-                    urlEl.textContent = sessionUrl ? `${sessionName} - ${sessionUrl}` : sessionName;
-                }
-
-                const badgeText = document.getElementById('webLiveBadgeText');
-                if (badgeText) badgeText.textContent = 'REPLAY';
-
-                replayWebAction();
-            } else {
-                showToast('No actions to replay', 'error');
-                stopWebLiveViewer();
+                const result = data.result || {};
+                const toastType = result.success === false || data.success === false ? 'warning' : 'success';
+                showToast(formatPlaywrightReplaySummary(result), toastType, 7000);
+                return data;
+            } catch (error) {
+                showToast(`Replay failed: ${error.message || 'Unknown error'}`, 'error', 8000);
+                return null;
             }
+        }
+
+        async function runWebRecordingReplay(recordingId, label = 'web recording') {
+            if (!recordingId) {
+                showToast('No web recording to replay', 'warning');
+                return null;
+            }
+            return runStoredWebReplay(`/api/recorder/recordings/${encodeURIComponent(recordingId)}/run`, {
+                label,
+                recordingId
+            });
+        }
+
+        async function runWebProjectReplay(projectId) {
+            if (!projectId) {
+                showToast('No project selected for replay', 'warning');
+                return null;
+            }
+            return runStoredWebReplay(`/api/projects/${encodeURIComponent(projectId)}/replay`, {
+                label: 'project flow'
+            });
         }
 
         function replayWebAction() {
@@ -23420,18 +23409,20 @@
             liveStreamState.active = true;
             liveStreamState.platform = payload?.platform;
             liveStreamState.deviceId = payload?.deviceId || liveStreamState.deviceId;
-            mobileReplayState.active = false;
             const badgeText = document.getElementById('mobileLiveBadgeText');
             if (badgeText) {
-                badgeText.textContent = (mobileRecordingState?.active && mobileRecordingState.captureMode === 'manual')
-                    ? 'MANUAL'
-                    : 'AO VIVO';
+                badgeText.textContent = mobileReplayState.active
+                    ? 'REPLAY'
+                    : ((mobileRecordingState?.active && mobileRecordingState.captureMode === 'manual')
+                        ? 'MANUAL'
+                        : 'AO VIVO');
             }
             showToast('Live stream started!', 'success');
         }
 
         function handleLiveStreamStopped(payload) {
             liveStreamState.active = false;
+            mobileReplayState.active = false;
             const viewer = document.getElementById('mobileLiveViewer');
             if (viewer) {
                 viewer.classList.remove('active', 'fullscreen');
@@ -23711,115 +23702,35 @@
 
         async function startAnalysisLiveStream(platform, recordingId) {
             try {
-                // Show the Analysis tab viewer
+                if (recordingId) {
+                    await startMobileReplayOnDevice(recordingId, { viewer: 'analysis', platform });
+                    return;
+                }
+
                 const viewer = document.getElementById('analysisLiveViewer');
                 if (viewer) {
                     viewer.classList.add('active');
-                    // Scroll into view AFTER animation starts (500ms for smooth feel)
-                    setTimeout(() => {
-                        viewer.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    }, 150);
+                    setTimeout(() => viewer.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
                 }
-
                 ensureRecorderWebSocket();
-
-                // Reset state
                 liveStreamState = {
                     active: true,
-                    platform: platform,
+                    platform,
                     deviceId: null,
                     frameCount: 0,
                     lastFrameTime: Date.now(),
                     fps: 0
                 };
-
-                let session = null;
-                let deviceId = null;
-                let resolvedPlatform = platform;
-                if (recordingId) {
-                    try {
-                        const sessionResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}`);
-                        const sessionData = await sessionResponse.json();
-                        if (sessionResponse.ok && sessionData.session) {
-                            session = sessionData.session;
-                            deviceId = session.deviceId || null;
-                            resolvedPlatform = session.platform || platform;
-                        }
-                    } catch (error) {
-                        console.error('Failed to load recording session:', error);
-                    }
-                }
-                liveStreamState.platform = resolvedPlatform;
-                liveStreamState.deviceId = deviceId || null;
-
-                // Start the stream on server
                 const response = await fetch('/api/live-stream/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ platform: resolvedPlatform, deviceId })
+                    body: JSON.stringify({ platform })
                 });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    if (session) {
-                        const screenshotPaths = await fetchScreenshotPaths(session);
-                        if (screenshotPaths.length > 0) {
-                            showToast('No device connected - replaying captured screenshots', 'info');
-                            await playAnalysisScreenshotReplay(screenshotPaths);
-                            return;
-                        }
-                    }
-                    throw new Error(data.error || 'Failed to start live stream');
-                }
-
-                if (session) {
-                    const screenshotPaths = await fetchScreenshotPaths(session);
-                    if (screenshotPaths.length > 0) {
-                        setTimeout(async () => {
-                            if (!liveStreamState.active) return;
-                            const frameImg = document.getElementById('analysisLiveFrame');
-                            const hasFrame = frameImg?.src && frameImg.src.startsWith('data:image');
-                            if (!hasFrame) {
-                                await fetch('/api/live-stream/stop', { method: 'POST' }).catch(() => {});
-                                showToast('Stream not responding - replaying captured screenshots', 'info');
-                                await playAnalysisScreenshotReplay(screenshotPaths);
-                            }
-                        }, 3500);
-                    }
-                }
-
-                // Trigger Maestro replay if there's a recording
-                if (recordingId) {
-                    try {
-                        const replayResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}/replay`, {
-                            method: 'POST'
-                        });
-                        if (!replayResponse.ok) {
-                            const replayData = await replayResponse.json();
-                            throw new Error(replayData.error || 'Failed to start replay');
-                        }
-                        showToast('Mobile test running - watch live!', 'success');
-
-                        // Simulate progress
-                        let progress = 0;
-                        const progressBar = document.getElementById('analysisLiveProgress');
-                        const progressInterval = setInterval(() => {
-                            progress += 2;
-                            if (progressBar) progressBar.style.width = Math.min(progress, 100) + '%';
-                            if (progress >= 100) {
-                                clearInterval(progressInterval);
-                                setTimeout(() => stopAnalysisLiveViewer(), 2000);
-                            }
-                        }, 300);
-
-                    } catch (error) {
-                        showToast('Running live stream only - no Maestro test found', 'info');
-                    }
-                }
-
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || 'Failed to start live stream');
             } catch (error) {
-                showToast('Failed to start live stream: ' + error.message, 'error');
+                const prefix = recordingId ? 'Failed to replay mobile flow' : 'Failed to start live stream';
+                showToast(prefix + ': ' + error.message, 'error');
                 stopAnalysisLiveViewer();
             }
         }
@@ -23937,54 +23848,332 @@
             }
         }
 
+        function getMobileReplayPlatform(session, fallback = null) {
+            const platform = String(session?.platform || '').toLowerCase();
+            if (platform === 'android' || platform === 'ios') return platform;
+            const fallbackPlatform = String(fallback || '').toLowerCase();
+            if (fallbackPlatform === 'android' || fallbackPlatform === 'ios') return fallbackPlatform;
+            return null;
+        }
+
+        function formatReplayDeviceLabel(device) {
+            const name = device?.name || device?.id || 'Device';
+            const platform = String(device?.platform || 'mobile').toUpperCase();
+            const status = device?.status ? ` • ${device.status}` : '';
+            return `${name} (${platform}${status})`;
+        }
+
+        async function fetchMaestroReplayDevices() {
+            const response = await fetch('/api/testing/mobile/maestro-devices?refresh=1');
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || 'Failed to load running devices');
+            return Array.isArray(data.devices) ? data.devices : [];
+        }
+
+        async function fetchAllReplayDevices() {
+            const response = await fetch('/api/devices');
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || 'Failed to load devices');
+            return Array.isArray(data.devices) ? data.devices : [];
+        }
+
+        function wait(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function waitForReplayDevice(device, platform, timeoutMs = 45000) {
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < timeoutMs) {
+                await wait(2500);
+                const devices = await fetchMaestroReplayDevices().catch(() => []);
+                const compatible = devices.filter(d => !platform || d.platform === platform);
+                const exact = compatible.find(d => d.id === device.id);
+                if (exact) return exact;
+                if (device.platform === 'android' && device.type === 'emulator') {
+                    const emulator = compatible.find(d => String(d.id || '').startsWith('emulator-'));
+                    if (emulator) return emulator;
+                }
+                if (compatible.length === 1) return compatible[0];
+            }
+            throw new Error('Device did not become available in time');
+        }
+
+        async function bootReplayDevice(device) {
+            const response = await fetch('/api/devices/boot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ deviceId: device.id, platform: device.platform })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || data.message || 'Failed to boot device');
+            }
+            return data;
+        }
+
+        function showMobileReplayDevicePicker(session, devices, options = {}) {
+            return new Promise((resolve) => {
+                const platform = getMobileReplayPlatform(session, options.platform);
+                const platformLabel = platform ? platform.toUpperCase() : 'MOBILE';
+                const compatible = platform
+                    ? (devices || []).filter(d => d.platform === platform)
+                    : (devices || []).filter(d => d.platform === 'ios' || d.platform === 'android');
+                const running = compatible.filter(d => d.status === 'booted' || d.status === 'connected');
+                const stopped = compatible.filter(d => d.status !== 'booted' && d.status !== 'connected');
+                const existing = document.getElementById('mobileReplayDevicePicker');
+                if (existing) existing.remove();
+
+                const modal = document.createElement('div');
+                modal.className = 'modal-overlay';
+                modal.id = 'mobileReplayDevicePicker';
+                modal.innerHTML = `
+                    <div class="modal" style="max-width: 720px; max-height: 86vh; display: flex; flex-direction: column;">
+                        <div class="modal-header">
+                            <div>
+                                <h3 style="margin: 0;">Choose Replay Device</h3>
+                                <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
+                                    Replay uses the original ${escapeHtml(platformLabel)} flow. Pick a running device or boot one.
+                                </div>
+                            </div>
+                            <button class="modal-close" type="button" data-action="cancel">&times;</button>
+                        </div>
+                        <div style="padding: 16px 20px; overflow: auto; display: grid; gap: 14px;">
+                            ${running.length ? `
+                                <div>
+                                    <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px;">Running</div>
+                                    <div style="display: grid; gap: 8px;">
+                                        ${running.map(device => `
+                                            <button class="btn btn-secondary replay-device-option" type="button" data-device-id="${escapeAttr(device.id)}" style="justify-content: space-between; width: 100%;">
+                                                <span>${escapeHtml(formatReplayDeviceLabel(device))}</span>
+                                                <span style="color: var(--success); font-size: 12px;">Use</span>
+                                            </button>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                            ${stopped.length ? `
+                                <div>
+                                    <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px;">Available to boot</div>
+                                    <div style="display: grid; gap: 8px;">
+                                        ${stopped.map(device => `
+                                            <button class="btn btn-secondary replay-device-option" type="button" data-device-id="${escapeAttr(device.id)}" style="justify-content: space-between; width: 100%;">
+                                                <span>${escapeHtml(formatReplayDeviceLabel(device))}</span>
+                                                <span style="color: var(--accent-hover); font-size: 12px;">Boot & use</span>
+                                            </button>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                            ${compatible.length === 0 ? `
+                                <div style="padding: 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-tertiary); color: var(--text-secondary);">
+                                    No ${escapeHtml(platformLabel)} device was found. Open a simulator/emulator first, then retry replay.
+                                </div>
+                            ` : ''}
+                        </div>
+                        <div style="padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-secondary" type="button" data-action="refresh">Refresh</button>
+                            <button class="btn btn-secondary" type="button" data-action="cancel">Cancel</button>
+                        </div>
+                    </div>
+                `;
+
+                const cleanup = (value) => {
+                    modal.classList.remove('active');
+                    setTimeout(() => modal.remove(), 180);
+                    resolve(value);
+                };
+
+                modal.addEventListener('click', async (event) => {
+                    if (event.target === modal || event.target.closest('[data-action="cancel"]')) {
+                        cleanup(null);
+                        return;
+                    }
+                    if (event.target.closest('[data-action="refresh"]')) {
+                        cleanup({ refresh: true });
+                        return;
+                    }
+                    const button = event.target.closest('.replay-device-option');
+                    if (!button) return;
+                    const device = compatible.find(d => String(d.id) === String(button.dataset.deviceId));
+                    if (!device) return;
+
+                    try {
+                        button.disabled = true;
+                        const label = button.querySelector('span:last-child');
+                        if (device.status === 'booted' || device.status === 'connected') {
+                            cleanup(device);
+                            return;
+                        }
+                        if (label) label.textContent = 'Booting...';
+                        await bootReplayDevice(device);
+                        showToast('Starting device. Waiting for it to become available...', 'info', 7000);
+                        const readyDevice = await waitForReplayDevice(device, platform);
+                        cleanup(readyDevice);
+                    } catch (error) {
+                        button.disabled = false;
+                        showToast(error.message || 'Failed to prepare device', 'error');
+                    }
+                });
+
+                document.body.appendChild(modal);
+                requestAnimationFrame(() => modal.classList.add('active'));
+            });
+        }
+
+        async function resolveMobileReplayTarget(session) {
+            const platform = getMobileReplayPlatform(session);
+            const capturedDeviceId = String(session?.deviceId || '').trim();
+            const capturedDeviceName = String(session?.deviceName || '').trim();
+            const runningDevices = await fetchMaestroReplayDevices().catch(() => []);
+            const compatibleRunning = platform
+                ? runningDevices.filter(d => d.platform === platform)
+                : runningDevices.filter(d => d.platform === 'ios' || d.platform === 'android');
+            const exact = capturedDeviceId ? compatibleRunning.find(d => d.id === capturedDeviceId) : null;
+            if (exact) return exact;
+            const nameMatch = capturedDeviceName ? compatibleRunning.find(d => d.name === capturedDeviceName) : null;
+            if (nameMatch) return nameMatch;
+            if (compatibleRunning.length === 1) return compatibleRunning[0];
+
+            const allDevices = await fetchAllReplayDevices().catch(() => runningDevices);
+            let selected = await showMobileReplayDevicePicker(session, allDevices, { platform });
+            if (selected?.refresh) {
+                selected = await resolveMobileReplayTarget(session);
+            }
+            return selected || null;
+        }
+
+        function buildMobileReplayRequestBody(device) {
+            if (!device?.id) return {};
+            return {
+                deviceId: device.id,
+                deviceName: device.name || device.id,
+                devicePlatform: device.platform,
+                skipDeviceValidation: true
+            };
+        }
+
+        async function pollMobileReplayRun(runId, options = {}) {
+            const startedAt = Date.now();
+            const timeoutMs = options.timeoutMs || 360000;
+            const progressBar = options.progressBar || null;
+            while (Date.now() - startedAt < timeoutMs) {
+                const response = await fetch(`/api/testing/mobile/replays/${encodeURIComponent(runId)}`);
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || 'Failed to read replay status');
+                if (data.status === 'running') {
+                    if (progressBar) {
+                        const elapsed = Number(data.elapsedMs || 0);
+                        progressBar.style.width = `${Math.min(92, Math.max(8, Math.round(elapsed / 2500)))}%`;
+                    }
+                    await wait(1200);
+                    continue;
+                }
+                if (progressBar) progressBar.style.width = data.status === 'completed' ? '100%' : '100%';
+                return data;
+            }
+            throw new Error('Timed out waiting for replay to finish');
+        }
+
+        async function startMobileReplayOnDevice(recordingId, options = {}) {
+            const recordingResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}`);
+            const recordingData = await recordingResponse.json();
+            if (!recordingResponse.ok || !recordingData.session) {
+                throw new Error(recordingData.error || 'Recording not found');
+            }
+
+            const session = recordingData.session;
+            const device = await resolveMobileReplayTarget(session);
+            if (!device) return null;
+
+            const viewerMode = options.viewer || 'mobile';
+            const platform = device.platform || getMobileReplayPlatform(session, options.platform);
+            const deviceId = device.id;
+            if (platform !== 'ios' && platform !== 'android') {
+                throw new Error('Replay device platform is unknown');
+            }
+
+            try {
+                const viewerId = viewerMode === 'analysis' ? 'analysisLiveViewer' : 'mobileLiveViewer';
+                const frameId = viewerMode === 'analysis' ? 'analysisLiveFrame' : 'mobileLiveFrame';
+                const placeholderId = viewerMode === 'analysis' ? 'analysisLivePlaceholder' : 'mobileLivePlaceholder';
+                const progressId = viewerMode === 'analysis' ? 'analysisLiveProgress' : 'mobileLiveProgress';
+                const viewer = document.getElementById(viewerId);
+                if (viewer) {
+                    viewer.classList.add('active');
+                    setTimeout(() => viewer.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
+                }
+                const frameImg = document.getElementById(frameId);
+                const placeholder = document.getElementById(placeholderId);
+                const progressBar = document.getElementById(progressId);
+                if (frameImg) frameImg.style.display = 'none';
+                if (placeholder) placeholder.style.display = 'flex';
+                if (progressBar) progressBar.style.width = '0%';
+
+                if (viewerMode !== 'analysis') {
+                    const badgeText = document.getElementById('mobileLiveBadgeText');
+                    if (badgeText) badgeText.textContent = 'REPLAY';
+                    const fab = document.getElementById('liveStreamFab');
+                    if (fab) fab.classList.add('visible');
+                }
+
+                ensureRecorderWebSocket();
+                mobileReplayState.active = true;
+                liveStreamState = { active: true, platform, deviceId, frameCount: 0, lastFrameTime: Date.now(), fps: 0 };
+
+                const streamResponse = await fetch('/api/live-stream/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ platform, deviceId })
+                });
+                const streamData = await streamResponse.json().catch(() => ({}));
+                if (!streamResponse.ok) throw new Error(streamData.error || 'Failed to start live stream');
+
+                const replayResponse = await fetch(`/api/testing/mobile/recordings/${recordingId}/replay`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(buildMobileReplayRequestBody(device))
+                });
+                const replayData = await replayResponse.json().catch(() => ({}));
+                if (!replayResponse.ok) {
+                    throw new Error(replayData.error || 'Failed to start replay');
+                }
+
+                if (progressBar) progressBar.style.width = '8%';
+
+                showToast(`Running captured flow on ${device.name || device.id}`, 'success', 6000);
+
+                if (replayData.runId) {
+                    const finalStatus = await pollMobileReplayRun(replayData.runId, { progressBar });
+                    if (finalStatus.status === 'completed') {
+                        showToast('Replay completed on device', 'success');
+                        setTimeout(() => {
+                            if (viewerMode === 'analysis') stopAnalysisLiveViewer();
+                            else stopLiveStream('mobile');
+                        }, 1600);
+                    } else if (finalStatus.status === 'failed') {
+                        throw new Error(finalStatus.error || 'Replay failed on device');
+                    } else if (finalStatus.status === 'canceled') {
+                        showToast('Replay canceled', 'info');
+                    }
+                    return finalStatus;
+                }
+                return replayData;
+            } catch (error) {
+                if (viewerMode === 'analysis') stopAnalysisLiveViewer();
+                else stopLiveStream('mobile');
+                throw error;
+            }
+        }
+
         async function replayMobileRecording(id) {
             try {
                 closeAgentMode();
                 closeMobileRecordingModal();
-
-                // Fetch recording data to get actions/steps
-                const recordingResponse = await fetch(`/api/testing/mobile/recordings/${id}`);
-                const recordingData = await recordingResponse.json();
-
-                if (!recordingResponse.ok || !recordingData.session) {
-                    throw new Error('Recording not found');
-                }
-
-                const session = recordingData.session;
-                const actions = session.actions || [];
-
-                let replayActions = actions;
-                if (!replayActions || replayActions.length === 0) {
-                    const screenshotPaths = await fetchScreenshotPaths(session);
-                    if (screenshotPaths.length === 0) {
-                        showToast('No actions or screenshots to replay', 'error');
-                        return;
-                    }
-                    replayActions = screenshotPaths.map((path, index) => ({
-                        screenshotPath: path,
-                        description: `Screenshot ${index + 1}`
-                    }));
-                }
-
-                // Open agent mode with mobile layout
-                openAgentModeForMobile(session, replayActions);
-
-                showToast('Running Maestro test on device...', 'info');
-
-                // Start the actual replay on the device (in background)
-                fetch(`/api/testing/mobile/recordings/${id}/replay`, {
-                    method: 'POST'
-                }).then(response => response.json()).then(data => {
-                    if (!data.success && data.error) {
-                        console.warn('Device replay note:', data.error);
-                    }
-                }).catch(err => {
-                    console.warn('Device replay skipped:', err.message);
-                });
-
+                await startMobileReplayOnDevice(id, { viewer: 'mobile' });
             } catch (error) {
                 showToast('Failed to replay: ' + error.message, 'error');
                 closeAgentMode();
+                stopLiveStream('mobile');
             }
         }
 

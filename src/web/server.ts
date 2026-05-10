@@ -10,7 +10,7 @@ import { readFileSync, existsSync, statSync, readdirSync, writeFileSync, mkdirSy
 import { exec, execSync, spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, extname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { eq, desc, and, inArray } from 'drizzle-orm';
 import { getDatabase, getSqlite, projects, projectExports, frames, testVariables, DATA_DIR, PROJECTS_DIR, EXPORTS_DIR, FRAMES_DIR } from '../db/index.js';
@@ -2769,6 +2769,104 @@ app.get('/api/projects/:id', async (c) => {
       networkCapture,
       esvp,
     }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+// Replay a saved project when it has a replayable source script.
+app.post('/api/projects/:id/replay', async (c) => {
+  try {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const db = getDatabase();
+    const [rawProject] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    if (!rawProject) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const platform = String(rawProject.platform || '').toLowerCase();
+    if (platform === 'ios' || platform === 'android') {
+      return c.json({
+        error: 'Use the mobile recording replay endpoint for mobile projects.',
+        mobileRecordingId: id,
+      }, 400);
+    }
+
+    const recordingBaseDir = resolveRecordingBaseDir(rawProject.videoPath);
+    const specPath = recordingBaseDir ? join(recordingBaseDir, 'test.spec.ts') : null;
+    const sessionPath = recordingBaseDir ? join(recordingBaseDir, 'session.json') : null;
+    if (!recordingBaseDir || !specPath || !existsSync(specPath)) {
+      return c.json({
+        error: 'This web project does not have a replayable Playwright spec. Record it from Testing > Web Testing to replay the captured flow.',
+      }, 409);
+    }
+
+    const recordingId = basename(recordingBaseDir);
+    const specCode = readFileSync(specPath, 'utf8');
+    const resolved = await resolveExecutionVariablesForScript({
+      ownerType: 'web-recording',
+      ownerId: recordingId,
+      platform: 'web',
+      code: specCode,
+    });
+    const applied = applyPlaywrightScriptPlaceholderValues(specCode, resolved.envMap);
+
+    if (applied.missingKeys.length > 0) {
+      return c.json({
+        error: 'Missing required test variables',
+        placeholders: applied.placeholders,
+        usedKeys: applied.usedKeys,
+        missingKeys: applied.missingKeys,
+        envTest: resolved.envTestText,
+        recordingId,
+      }, 400);
+    }
+
+    mkdirSync(join(recordingBaseDir, '.runtime'), { recursive: true });
+    const runStamp = Date.now();
+    const runtimeDir = join(recordingBaseDir, '.runtime');
+    const runtimeSpecPath = join(runtimeDir, `project-replay.${runStamp}.spec.ts`);
+    const runtimeEnvPath = join(runtimeDir, `.env.project-replay.${runStamp}`);
+    writeFileSync(runtimeSpecPath, applied.code, 'utf8');
+    writeFileSync(runtimeEnvPath, resolved.envTestText || '', 'utf8');
+
+    let sessionData: any = null;
+    if (sessionPath && existsSync(sessionPath)) {
+      try {
+        sessionData = JSON.parse(readFileSync(sessionPath, 'utf8'));
+      } catch {}
+    }
+
+    const result = await runPlaywrightTest({
+      testPath: runtimeSpecPath,
+      workers: 1,
+      retries: 0,
+      env: resolved.envMap,
+      config: {
+        browser: body?.browser === 'firefox' || body?.browser === 'webkit' || body?.browser === 'chromium' ? body.browser : 'chromium',
+        headless: body?.headless === true ? true : false,
+        timeout: Number.isFinite(Number(body?.timeout)) ? Number(body.timeout) : undefined,
+        video: body?.video === 'on' || body?.video === 'retain-on-failure' ? body.video : 'retain-on-failure',
+        screenshot: body?.screenshot === 'on' || body?.screenshot === 'only-on-failure' ? body.screenshot : 'only-on-failure',
+        trace: body?.trace === 'on' || body?.trace === 'retain-on-failure' ? body.trace : 'retain-on-failure',
+      },
+      outputDir: join(recordingBaseDir, 'playwright-runs', String(runStamp)),
+      reporter: 'json',
+    });
+
+    return c.json({
+      success: result.success,
+      result,
+      projectId: id,
+      recordingId,
+      recordingName: sessionData?.name || rawProject.name,
+      usedKeys: applied.usedKeys,
+      missingKeys: applied.missingKeys,
+      runtimeSpecPath,
+      runtimeEnvPath,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -5822,6 +5920,113 @@ function copyPathIntoExportBundle(sourcePath: string | null | undefined, destina
   return true;
 }
 
+function registerBundlePath(pathMap: Map<string, string>, sourcePath: string | null | undefined, relativePath: string): void {
+  if (!sourcePath) return;
+  pathMap.set(sourcePath, relativePath);
+  try {
+    pathMap.set(join(dirname(sourcePath), basename(sourcePath)), relativePath);
+  } catch {
+    // Ignore malformed source paths.
+  }
+}
+
+function copyFlowMapImageIntoDiagnosticBundle(
+  sourcePath: string | null | undefined,
+  bundleRoot: string,
+  pathMap: Map<string, string>,
+  index: number,
+): string | null {
+  if (!sourcePath || !existsSync(sourcePath)) return null;
+
+  const mapped = pathMap.get(sourcePath) || pathMap.get(join(dirname(sourcePath), basename(sourcePath)));
+  if (mapped) return mapped;
+
+  const extension = extname(sourcePath) || '.png';
+  const relativePath = `frames/flow-map-${String(index + 1).padStart(4, '0')}${extension}`;
+  copyPathIntoExportBundle(sourcePath, join(bundleRoot, relativePath));
+  registerBundlePath(pathMap, sourcePath, relativePath);
+  return relativePath;
+}
+
+function makeDiagnosticPortableFlowMap(
+  flowMap: FlowMap,
+  bundleRoot: string,
+  pathMap: Map<string, string>,
+  flowCodePath: string | null,
+): FlowMap {
+  const portable = JSON.parse(JSON.stringify(flowMap)) as FlowMap;
+
+  portable.media = {
+    ...portable.media,
+    videoPath: null,
+  };
+  portable.artifacts = {
+    recordingDir: null,
+    sessionPath: portable.artifacts?.sessionPath ? 'metadata/session.json' : null,
+    flowCodePath,
+    flowMapPath: 'flow-map/flow-map.json',
+  };
+
+  portable.nodes = (portable.nodes || []).map((node, index) => {
+    const imagePath = copyFlowMapImageIntoDiagnosticBundle(node.imagePath, bundleRoot, pathMap, index);
+    return {
+      ...node,
+      imagePath,
+      imageName: imagePath ? basename(imagePath) : node.imageName,
+    };
+  });
+
+  return portable;
+}
+
+function makeDiagnosticFlowMapCollection(
+  project: ProjectRecord,
+  flowMap: FlowMap,
+): FlowMapCollection {
+  const now = new Date().toISOString();
+  return {
+    version: 1,
+    id: `diagnostic-${project.id}`,
+    type: 'flow-map',
+    name: project.marketingTitle || project.name || 'Diagnostic Flow',
+    createdAt: now,
+    updatedAt: now,
+    layout: { mode: 'lanes' },
+    flows: [
+      {
+        id: `${project.id}-flow`,
+        projectId: project.id,
+        name: project.name || flowMap.title || 'Captured Flow',
+        platform: project.platform || flowMap.platform || 'unknown',
+        color: FLOW_MAP_COLORS[0],
+        visible: true,
+        layout: { x: 80, y: 80 },
+        flowMap,
+      },
+    ],
+  };
+}
+
+function copyDiagnosticReplayScripts(recordingBaseDir: string | null, bundleRoot: string): Array<{ kind: string; path: string }> {
+  if (!recordingBaseDir || !existsSync(recordingBaseDir)) return [];
+
+  const scripts: Array<{ kind: string; path: string }> = [];
+  const candidates = [
+    { kind: 'maestro', source: join(recordingBaseDir, 'test.yaml'), target: 'testing/maestro/test.yaml' },
+    { kind: 'maestro', source: join(recordingBaseDir, 'test.yml'), target: 'testing/maestro/test.yml' },
+    { kind: 'playwright', source: join(recordingBaseDir, 'test.spec.ts'), target: 'testing/playwright/test.spec.ts' },
+  ];
+
+  for (const candidate of candidates) {
+    if (!existsSync(candidate.source)) continue;
+    if (copyPathIntoExportBundle(candidate.source, join(bundleRoot, candidate.target))) {
+      scripts.push({ kind: candidate.kind, path: candidate.target });
+    }
+  }
+
+  return scripts;
+}
+
 function looksLikeRecordingDirectory(dirPath: string | null | undefined): boolean {
   if (!dirPath || !existsSync(dirPath)) return false;
 
@@ -6155,6 +6360,7 @@ app.post('/api/export', async (c) => {
   try {
     const body = await c.req.json();
     const { projectId, format, destination, includeOcr, includeSummary } = body;
+    const exportProfile = format === 'applab' && body?.profile === 'diagnostic' ? 'diagnostic' : 'standard';
 
     const db = getDatabase();
     const result = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
@@ -6233,11 +6439,13 @@ app.post('/api/export', async (c) => {
         const ocrPath = rawProject.ocrText ? 'analysis/ocr.txt' : null;
         const thumbnailName = rawProject.thumbnailPath ? basename(rawProject.thumbnailPath) : null;
 
+        const bundlePathMap = new Map<string, string>();
         let bundledFrames = projectFrames.map((frame) => {
           const extensionMatch = basename(frame.imagePath).match(/(\.[^.]+)$/);
           const extension = extensionMatch ? extensionMatch[1] : '.png';
           const relativeImagePath = `frames/frame-${String(frame.frameNumber).padStart(4, '0')}${extension}`;
           copyPathIntoExportBundle(frame.imagePath, join(bundleRoot, relativeImagePath));
+          registerBundlePath(bundlePathMap, frame.imagePath, relativeImagePath);
           return {
             ...frame,
             imagePath: relativeImagePath,
@@ -6251,6 +6459,7 @@ app.post('/api/export', async (c) => {
             const extension = extensionMatch ? extensionMatch[1] : '.png';
             const relativeImagePath = `frames/frame-${String(index + 1).padStart(4, '0')}${extension}`;
             copyPathIntoExportBundle(framePath, join(bundleRoot, relativeImagePath));
+            registerBundlePath(bundlePathMap, framePath, relativeImagePath);
             return {
               id: `${projectId}-fallback-frame-${index + 1}`,
               projectId,
@@ -6311,6 +6520,29 @@ app.post('/api/export', async (c) => {
           detachedEsvpResult.detached,
         );
         const exportedESVPSessionId = detachedEsvpResult.detached ? null : esvpSessionId;
+        const diagnosticScripts = exportProfile === 'diagnostic'
+          ? copyDiagnosticReplayScripts(recordingBaseDir, bundleRoot)
+          : [];
+        let diagnosticFlowMap: FlowMap | null = null;
+        if (exportProfile === 'diagnostic') {
+          const builtFlowMap = await buildProjectFlowMap(projectId, { persist: true });
+          if (builtFlowMap) {
+            diagnosticFlowMap = makeDiagnosticPortableFlowMap(
+              builtFlowMap,
+              bundleRoot,
+              bundlePathMap,
+              diagnosticScripts[0]?.path || null,
+            );
+            writeExportJson(join(bundleRoot, 'flow-map', 'flow-map.json'), diagnosticFlowMap);
+            writeExportText(
+              join(bundleRoot, 'flow-map', 'index.html'),
+              renderFlowMapCollectionExportHtml(
+                makeDiagnosticFlowMapCollection(rawProject, diagnosticFlowMap),
+                { background: 'grid', viewMode: 'flow', showArrows: true, hideText: false },
+              ),
+            );
+          }
+        }
 
         const packagedProject = {
           ...normalizedProject,
@@ -6326,8 +6558,9 @@ app.post('/api/export', async (c) => {
         };
 
         writeExportJson(join(bundleRoot, 'manifest.json'), {
-          bundleVersion: 1,
+          bundleVersion: exportProfile === 'diagnostic' ? 2 : 1,
           packageFormat: format,
+          profile: exportProfile,
           exportedAt: new Date(timestamp).toISOString(),
           exportedWith: {
             app: 'DiscoveryLab',
@@ -6349,6 +6582,8 @@ app.post('/api/export', async (c) => {
             hasOCR: !!rawProject.ocrText,
             hasAppIntelligence: !!rawProject.aiSummary,
             hasExportArtifacts: exportArtifactCount > 0,
+            hasFlowMap: !!diagnosticFlowMap,
+            hasReplayScripts: diagnosticScripts.length > 0,
           },
           included: {
             mediaFiles,
@@ -6357,6 +6592,9 @@ app.post('/api/export', async (c) => {
             networkEntries: networkEntries.length,
             exportArtifacts: exportArtifactCount,
             esvpSessionId: exportedESVPSessionId || null,
+            flowMap: diagnosticFlowMap ? 'flow-map/flow-map.json' : null,
+            flowMapHtml: diagnosticFlowMap ? 'flow-map/index.html' : null,
+            replayScripts: diagnosticScripts,
           },
         });
         writeExportJson(join(bundleRoot, 'metadata', 'project.json'), packagedProject);
@@ -6414,12 +6652,15 @@ app.post('/api/export', async (c) => {
           '- OCR text and app intelligence summary',
           '- network trace, capture metadata, and ESVP snapshot',
           '- Task Hub links, requirements, and test map',
+          exportProfile === 'diagnostic'
+            ? '- diagnostic FlowMap JSON/HTML and replay scripts when available'
+            : '',
           '',
           'Excluded by default to keep the bundle Claude-friendly:',
           '- original long-form media',
           '- recording folder',
           '- generated export assets and renders',
-        ].join('\n'));
+        ].filter(Boolean).join('\n'));
 
         outputPath = join(exportDir, `export-${timestamp}.${format}`);
         mimeType = 'application/zip';
@@ -6587,6 +6828,7 @@ app.post('/api/export', async (c) => {
     if (destination === 'local' || destination === 'clipboard') {
       return c.json({
         success: true,
+        profile: exportProfile,
         path: outputPath,
         downloadUrl: `/api/file?path=${encodeURIComponent(outputPath)}&download=true`
       });
@@ -6594,6 +6836,7 @@ app.post('/api/export', async (c) => {
       // For cloud destinations, return info about what would be uploaded
       return c.json({
         success: true,
+        profile: exportProfile,
         path: outputPath,
         downloadUrl: `/api/file?path=${encodeURIComponent(outputPath)}&download=true`,
         message: `File ready for ${destination}. Use the download link or MCP tools for cloud upload.`
@@ -6602,6 +6845,7 @@ app.post('/api/export', async (c) => {
 
     return c.json({
       success: true,
+      profile: exportProfile,
       path: outputPath,
       downloadUrl: `/api/file?path=${encodeURIComponent(outputPath)}&download=true`
     });
@@ -8173,6 +8417,79 @@ app.get('/api/devices', async (c) => {
       }
     });
 
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/devices/boot', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const deviceId = String(body?.deviceId || body?.id || '').trim();
+    const platform = String(body?.platform || '').toLowerCase();
+
+    if (!deviceId || (platform !== 'ios' && platform !== 'android')) {
+      return c.json({ error: 'deviceId and platform are required' }, 400);
+    }
+
+    if (platform === 'ios') {
+      try {
+        execSync(`xcrun simctl boot ${JSON.stringify(deviceId)}`, { encoding: 'utf8', stdio: 'pipe' });
+      } catch {
+        // simctl returns an error when the simulator is already booted; that is fine here.
+      }
+      exec('open -a Simulator', () => {});
+      return c.json({ success: true, message: 'Booting iOS Simulator...', deviceId, platform });
+    }
+
+    if (platform === 'android') {
+      const connected = resolveAndroidDeviceSerial(deviceId);
+      if (connected) {
+        return c.json({ success: true, message: 'Android device is already connected.', deviceId: connected, platform });
+      }
+      if (!EMULATOR_PATH) {
+        return c.json({
+          success: false,
+          error: 'Android SDK emulator not found. Install Android Studio or set ANDROID_HOME.',
+        }, 400);
+      }
+
+      const avdOutput = execSync(`"${EMULATOR_PATH}" -list-avds 2>/dev/null`, { encoding: 'utf8' });
+      const avds = avdOutput.trim().split('\n').filter(Boolean);
+      if (!avds.includes(deviceId)) {
+        return c.json({
+          success: false,
+          error: `Android emulator "${deviceId}" was not found.`,
+          availableAvds: avds,
+        }, 400);
+      }
+
+      exec(`"${EMULATOR_PATH}" -avd ${JSON.stringify(deviceId)} &`, (error) => {
+        if (error) console.error('[Devices] Failed to start Android emulator:', error);
+      });
+      return c.json({ success: true, message: `Starting Android Emulator: ${deviceId}`, deviceId, platform });
+    }
+
+    return c.json({ error: 'Unsupported platform' }, 400);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: message }, 500);
+  }
+});
+
+app.post('/api/devices/focus', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const platform = String(body?.platform || '').toLowerCase();
+    const deviceId = typeof body?.deviceId === 'string' ? body.deviceId.trim() : undefined;
+
+    if (platform !== 'ios' && platform !== 'android') {
+      return c.json({ error: 'platform must be "ios" or "android"' }, 400);
+    }
+
+    const focus = await bringDeviceToForeground(platform, deviceId);
+    return c.json({ success: true, ...focus });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);
@@ -10127,6 +10444,9 @@ app.post('/api/testing/mobile/recordings/:id/replay', async (c) => {
     const { join } = await import('node:path');
 
     const flowPath = join(PROJECTS_DIR, 'maestro-recordings', id, 'test.yaml');
+    const session = await readMobileRecordingSessionData(id).catch(() => null);
+    const recordingPlatform: 'ios' | 'android' | undefined =
+      session?.platform === 'ios' || session?.platform === 'android' ? session.platform : undefined;
 
     if (!existsSync(flowPath)) {
       return c.json({ error: 'Flow file not found' }, 404);
@@ -10155,6 +10475,13 @@ app.post('/api/testing/mobile/recordings/:id/replay', async (c) => {
     let deviceSelectionSource: 'auto' | 'validated' | 'trusted-client' = 'auto';
     if (requestedDeviceId) {
       if (skipDeviceValidation && requestedDevicePlatform) {
+        if (recordingPlatform && requestedDevicePlatform !== recordingPlatform) {
+          return c.json({
+            error: `Selected device is ${requestedDevicePlatform}, but this recording was captured on ${recordingPlatform}. Choose a ${recordingPlatform} device to replay the same flow.`,
+            deviceSelectionRequired: true,
+            platform: recordingPlatform,
+          }, 400);
+        }
         targetDeviceId = requestedDeviceId;
         targetDeviceName = requestedDeviceName || requestedDeviceId;
         targetDevicePlatform = requestedDevicePlatform;
@@ -10167,6 +10494,16 @@ app.post('/api/testing/mobile/recordings/:id/replay', async (c) => {
             error: 'Selected device is not currently available',
             deviceId: requestedDeviceId,
             availableDevices: devices,
+            deviceSelectionRequired: true,
+            platform: recordingPlatform || null,
+          }, 400);
+        }
+        if (recordingPlatform && match.platform !== recordingPlatform) {
+          return c.json({
+            error: `Selected device is ${match.platform}, but this recording was captured on ${recordingPlatform}. Choose a ${recordingPlatform} device to replay the same flow.`,
+            deviceSelectionRequired: true,
+            platform: recordingPlatform,
+            availableDevices: devices.filter((device) => device.platform === recordingPlatform),
           }, 400);
         }
         targetDeviceId = match.id;
@@ -10174,10 +10511,46 @@ app.post('/api/testing/mobile/recordings/:id/replay', async (c) => {
         targetDevicePlatform = match.platform;
         deviceSelectionSource = 'validated';
       }
+    } else {
+      const devices = await listMaestroDevices({ forceRefresh: true }).catch(() => []);
+      const compatibleDevices = recordingPlatform
+        ? devices.filter((device) => device.platform === recordingPlatform)
+        : devices;
+      const capturedDeviceId = typeof session?.deviceId === 'string' ? session.deviceId.trim() : '';
+      const capturedDeviceName = typeof session?.deviceName === 'string' ? session.deviceName.trim() : '';
+      const exactDevice = capturedDeviceId
+        ? compatibleDevices.find((device) => device.id === capturedDeviceId)
+        : null;
+      const nameMatch = capturedDeviceName
+        ? compatibleDevices.find((device) => device.name === capturedDeviceName)
+        : null;
+      const autoDevice = exactDevice || nameMatch || (compatibleDevices.length === 1 ? compatibleDevices[0] : null);
+
+      if (autoDevice) {
+        targetDeviceId = autoDevice.id;
+        targetDeviceName = autoDevice.name;
+        targetDevicePlatform = autoDevice.platform;
+        deviceSelectionSource = exactDevice || nameMatch ? 'validated' : 'auto';
+      } else {
+        return c.json({
+          error: compatibleDevices.length > 1
+            ? `Multiple ${recordingPlatform || 'mobile'} devices are available. Choose where to replay this recording.`
+            : `No ${recordingPlatform || 'compatible'} device is currently available for replay.`,
+          deviceSelectionRequired: true,
+          platform: recordingPlatform || null,
+          availableDevices: compatibleDevices,
+          allDevices: devices,
+          capturedDeviceId: capturedDeviceId || null,
+          capturedDeviceName: capturedDeviceName || null,
+        }, 409);
+      }
     }
     // Use UDID/serial when available (iOS + Android). This is the most stable identifier
     // and avoids Maestro mismatches with shortened simulator names in some environments.
     const maestroDeviceArg = targetDeviceId || targetDeviceName;
+    const focus = targetDevicePlatform
+      ? await focusDeviceBestEffort(targetDevicePlatform, targetDeviceId)
+      : null;
 
     const runId = `mrun_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const createdAt = Date.now();
@@ -10261,6 +10634,7 @@ app.post('/api/testing/mobile/recordings/:id/replay', async (c) => {
       devicePlatform: targetDevicePlatform || null,
       maestroDeviceArg: maestroDeviceArg || null,
       deviceSelectionSource,
+      focus,
     });
 
   } catch (error) {
@@ -13705,48 +14079,127 @@ function getForegroundAppIdForPlatform(platform: 'ios' | 'android', deviceId: st
   return isIgnoredMobileAppId(detected) ? null : detected;
 }
 
+interface DeviceForegroundResult {
+  focused: boolean;
+  platform: 'ios' | 'android';
+  deviceId?: string;
+  message: string;
+  processName?: string;
+}
+
+function osascriptCommand(script: string): string {
+  return `osascript ${script
+    .split('\n')
+    .map((line) => `-e ${JSON.stringify(line)}`)
+    .join(' ')}`;
+}
+
 /**
- * Bring the device emulator/simulator to foreground for faster testing
+ * Bring the device emulator/simulator to foreground for faster testing.
  */
-async function bringDeviceToForeground(platform: 'ios' | 'android'): Promise<void> {
+async function bringDeviceToForeground(platform: 'ios' | 'android', deviceId?: string): Promise<DeviceForegroundResult> {
   try {
-    const { exec } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const execAsync = promisify(exec);
 
     if (platform === 'ios') {
-      // Bring iOS Simulator to front using AppleScript
-      await execAsync('osascript -e \'tell application "Simulator" to activate\'');
+      await execAsync('open -a Simulator', { timeout: 2500 }).catch(() => null);
+      await execAsync('osascript -e \'tell application "Simulator" to activate\'', { timeout: 2500 });
       console.log('[Focus] iOS Simulator brought to foreground');
-    } else if (platform === 'android') {
-      // For Android, try to focus the emulator window
-      // First try using AppleScript on macOS
-      try {
-        await execAsync('osascript -e \'tell application "qemu-system-aarch64" to activate\' 2>/dev/null || osascript -e \'tell application "qemu-system-x86_64" to activate\' 2>/dev/null || true');
-        console.log('[Focus] Android Emulator brought to foreground');
-      } catch {
-        // Fallback: try generic "Android Emulator" or "Emulator" app names
-        try {
-          await execAsync('osascript -e \'tell application "Android Emulator" to activate\' 2>/dev/null || true');
-        } catch {
-          // Silently ignore if we can't focus Android emulator
-        }
-      }
+      return {
+        focused: true,
+        platform,
+        deviceId,
+        message: 'iOS Simulator brought to foreground',
+        processName: 'Simulator',
+      };
     }
+
+    if (deviceId && !deviceId.startsWith('emulator-')) {
+      return {
+        focused: false,
+        platform,
+        deviceId,
+        message: 'Physical Android devices cannot be brought to the Mac foreground automatically.',
+      };
+    }
+
+    await execAsync('open -a "Android Emulator"', { timeout: 2500 }).catch(() => null);
+
+    const script = `
+tell application "System Events"
+  set candidates to {"Android Emulator", "qemu-system-aarch64", "qemu-system-x86_64", "emulator"}
+  repeat with candidateName in candidates
+    if exists process candidateName then
+      set frontmost of process candidateName to true
+      return candidateName
+    end if
+  end repeat
+end tell
+return ""
+`;
+
+    const { stdout } = await execAsync(osascriptCommand(script), { timeout: 3000 });
+    const processName = stdout.trim();
+    if (processName) {
+      console.log(`[Focus] Android Emulator brought to foreground (${processName})`);
+      return {
+        focused: true,
+        platform,
+        deviceId,
+        message: 'Android Emulator brought to foreground',
+        processName,
+      };
+    }
+
+    return {
+      focused: false,
+      platform,
+      deviceId,
+      message: 'Android Emulator process was not found in System Events.',
+    };
   } catch (error) {
-    // Silently ignore focus errors - not critical
+    try {
+      const { promisify } = await import('node:util');
+      const execAsync = promisify(exec);
+      if (platform === 'android') {
+        await execAsync('open -a "Android Emulator"', { timeout: 2500 });
+        return {
+          focused: true,
+          platform,
+          deviceId,
+          message: 'Android Emulator opened',
+          processName: 'Android Emulator',
+        };
+      }
+    } catch {
+      // Ignore fallback errors; return the primary focus failure below.
+    }
+
     console.log(`[Focus] Could not bring ${platform} to foreground:`, error);
+    return {
+      focused: false,
+      platform,
+      deviceId,
+      message: error instanceof Error ? error.message : `Could not bring ${platform} to foreground`,
+    };
+  }
+}
+
+async function focusDeviceBestEffort(platform: 'ios' | 'android', deviceId?: string): Promise<DeviceForegroundResult | null> {
+  try {
+    return await bringDeviceToForeground(platform, deviceId);
+  } catch (error) {
+    console.log(`[Focus] Could not bring ${platform} to foreground:`, error);
+    return null;
   }
 }
 
 function startLiveStream(platform: 'ios' | 'android', deviceId?: string): void {
-  stopLiveStream(); // Stop any existing stream
+  stopLiveStream(false); // Stop any existing stream without flashing a stopped event
 
   liveStreamPlatform = platform;
   liveStreamDeviceId = deviceId || null;
-
-  // Note: Emulator stays in background during live stream
-  // Foreground is only brought during screenshot capture
 
   // Wake/unlock Android screen to avoid black frames
   if (platform === 'android' && liveStreamDeviceId) {
@@ -13757,18 +14210,21 @@ function startLiveStream(platform: 'ios' | 'android', deviceId?: string): void {
     } catch {}
   }
 
-  // Capture at ~2 FPS (every 500ms) - balanced between smoothness and CPU usage
-  liveStreamInterval = setInterval(captureAndBroadcastScreen, 500);
-
   broadcastToClients({
     type: 'liveStreamStarted',
     data: { platform, deviceId },
   });
 
+  // Send an initial frame immediately so the UI does not wait for the first interval tick.
+  void captureAndBroadcastScreen();
+
+  // Capture at ~2 FPS (every 500ms) - balanced between smoothness and CPU usage
+  liveStreamInterval = setInterval(captureAndBroadcastScreen, 500);
+
   console.log(`[LiveStream] Started for ${platform}${deviceId ? ` (${deviceId})` : ''}`);
 }
 
-function stopLiveStream(): void {
+function stopLiveStream(shouldBroadcast = true): void {
   if (liveStreamInterval) {
     clearInterval(liveStreamInterval);
     liveStreamInterval = null;
@@ -13776,10 +14232,12 @@ function stopLiveStream(): void {
   liveStreamPlatform = null;
   liveStreamDeviceId = null;
 
-  broadcastToClients({
-    type: 'liveStreamStopped',
-    data: {},
-  });
+  if (shouldBroadcast) {
+    broadcastToClients({
+      type: 'liveStreamStopped',
+      data: {},
+    });
+  }
 }
 
 // Start live stream endpoint
@@ -13839,9 +14297,10 @@ app.post('/api/live-stream/start', async (c) => {
       return c.json({ error: 'No iOS simulator booted' }, 400);
     }
 
+    const focus = await focusDeviceBestEffort(platform, deviceId);
     startLiveStream(platform, deviceId);
 
-    return c.json({ success: true, message: 'Live stream started' });
+    return c.json({ success: true, message: 'Live stream started', focus });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return c.json({ error: message }, 500);

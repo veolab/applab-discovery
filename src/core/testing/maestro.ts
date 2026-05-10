@@ -377,6 +377,65 @@ function formatValue(value: any): string {
   return String(value);
 }
 
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+async function readMaestroJunitFailure(outputDir: string): Promise<string> {
+  try {
+    const reportPath = path.join(outputDir, 'report.xml');
+    if (!fs.existsSync(reportPath)) return '';
+    const xml = await fs.promises.readFile(reportPath, 'utf8');
+    const failureMatch = xml.match(/<failure(?:\s[^>]*)?>([\s\S]*?)<\/failure>/i);
+    if (!failureMatch?.[1]) return '';
+    return decodeXmlEntities(failureMatch[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim());
+  } catch {
+    return '';
+  }
+}
+
+export function normalizeMaestroFlowYaml(yamlContent: string): { yaml: string; changed: boolean } {
+  const lines = yamlContent.split(/\r?\n/);
+  const normalized: string[] = [];
+  let changed = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const scrollMatch = line.match(/^(\s*)-\s*scroll:\s*(#.*)?$/);
+
+    if (!scrollMatch) {
+      normalized.push(line);
+      continue;
+    }
+
+    const indent = scrollMatch[1] || '';
+    const scrollComment = scrollMatch[2] ? ` ${scrollMatch[2].trim()}` : '';
+    const nextLine = lines[i + 1] || '';
+    const directionMatch = nextLine.match(/^(\s*)direction:\s*["']?([A-Za-z]+)["']?(\s*#.*)?$/);
+
+    if (directionMatch) {
+      const directionIndent = directionMatch[1] || `${indent}    `;
+      const direction = directionMatch[2].toUpperCase();
+      const directionComment = directionMatch[3] || scrollComment;
+      normalized.push(`${indent}- swipe:`);
+      normalized.push(`${directionIndent}direction: "${direction}"${directionComment || ''}`);
+      i++;
+      changed = true;
+      continue;
+    }
+
+    normalized.push(`${indent}- scroll${scrollComment}`);
+    changed = true;
+  }
+
+  return { yaml: normalized.join('\n'), changed };
+}
+
 // ============================================================================
 // COMMON FLOW ACTIONS
 // ============================================================================
@@ -476,6 +535,17 @@ export async function runMaestroTest(options: MaestroRunOptions): Promise<Maestr
     return { success: false, error: `Flow file not found: ${flowPath}` };
   }
 
+  try {
+    const rawFlow = await fs.promises.readFile(flowPath, 'utf8');
+    const normalizedFlow = normalizeMaestroFlowYaml(rawFlow);
+    if (normalizedFlow.changed) {
+      await fs.promises.writeFile(flowPath, normalizedFlow.yaml, 'utf8');
+      console.log(`[Maestro] Normalized deprecated scroll syntax in ${flowPath}`);
+    }
+  } catch (error) {
+    console.warn('[Maestro] Failed to normalize flow YAML before replay:', error);
+  }
+
   // Create output directory
   await fs.promises.mkdir(outputDir, { recursive: true });
 
@@ -540,14 +610,21 @@ export async function runMaestroTest(options: MaestroRunOptions): Promise<Maestr
       : Buffer.isBuffer(errLike?.stderr)
         ? errLike.stderr.toString('utf8')
         : '';
-    const detailedOutput = [stderr?.trim(), stdout?.trim(), message]
+    const junitFailure = await readMaestroJunitFailure(outputDir);
+    const summary = junitFailure || stderr?.trim() || message;
+    const detailedOutput = [
+      junitFailure ? `JUnit failure: ${junitFailure}` : '',
+      stderr?.trim(),
+      stdout?.trim(),
+      message,
+    ]
       .filter(Boolean)
       .join('\n\n')
       .slice(-16000);
 
     return {
       success: false,
-      error: stderr?.trim() || message,
+      error: summary,
       duration,
       flowPath,
       output: detailedOutput || message,
